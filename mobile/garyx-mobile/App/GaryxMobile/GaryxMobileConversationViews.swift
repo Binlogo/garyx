@@ -209,6 +209,10 @@ struct GaryxConversationView: View {
     @State private var pendingHistoryPrefetchThreadId: String?
     @State private var bottomChromeHeight: CGFloat = 0
     @State private var tailScrollSchedulerBox = GaryxConversationTailScrollSchedulerBox()
+    /// Stable callback sink for turn rows: keeping the handlers behind one
+    /// reference is what lets each row view be Equatable and skip its body
+    /// when only the streaming tail changed.
+    @State private var turnRowCallbackSink = GaryxTurnRowCallbackSink()
     @State private var readingAnchorRestoreGeneration = 0
     @State private var tailThinkingPresentationState = GaryxTailThinkingPresentationState()
     @State private var showsDebouncedTailThinking = false
@@ -748,7 +752,19 @@ struct GaryxConversationView: View {
         turnRows: [GaryxMobileTurnRow],
         openingSnapshotContext: GaryxConversationOpeningSnapshotContext
     ) -> some View {
-        ScrollView {
+        // Refresh the handlers behind the stable sink reference. Row views
+        // compare the sink by identity, so re-pointing the closures here never
+        // invalidates a row body.
+        turnRowCallbackSink.onNearHistoryBoundary = {
+            prefetchOlderHistoryIfNeeded()
+        }
+        turnRowCallbackSink.onRowContentMinYChange = { rowId, minY in
+            // Plain box write: content-space geometry never changes from
+            // scrolling, so this only fires on layout changes and never
+            // invalidates the body.
+            rowGeometryBox.record(rowId, minY: minY)
+        }
+        return ScrollView {
             ZStack(alignment: .topLeading) {
                 // Give short transcripts a viewport-height content plane. The
                 // gesture owner is attached after this ZStack resolves, so for
@@ -818,15 +834,7 @@ struct GaryxConversationView: View {
                                 GaryxMobileTurnRowsView(
                                     rows: turnRows,
                                     prefetchBoundaryRowCount: garyxHistoryPrefetchBoundaryRows,
-                                    onNearHistoryBoundary: {
-                                        prefetchOlderHistoryIfNeeded()
-                                    },
-                                    onRowContentMinYChange: { rowId, minY in
-                                        // Plain box write: content-space geometry never
-                                        // changes from scrolling, so this only fires on
-                                        // layout changes and never invalidates the body.
-                                        rowGeometryBox.record(rowId, minY: minY)
-                                    }
+                                    sink: turnRowCallbackSink
                                 )
                                 .onAppear {
                                     GaryxRoutePushPerformanceProbe.shared?

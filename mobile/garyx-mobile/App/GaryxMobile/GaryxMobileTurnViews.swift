@@ -8,43 +8,45 @@ import SwiftUI
 /// unaffected by concurrent tail growth or reader scrolling.
 let garyxConversationContentSpaceName = "garyx-conversation-content"
 
+/// Stable sink for the transcript's per-row callbacks.
+///
+/// Callbacks live behind a reference so a row view can be `Equatable`: closure
+/// values are never equal, so passing them per row forced SwiftUI to rebuild
+/// every row body on every root update. The transcript owns one sink for the
+/// lifetime of its occurrence and only mutates the handlers inside it.
+final class GaryxTurnRowCallbackSink {
+    var onNearHistoryBoundary: () -> Void = {}
+    var onRowContentMinYChange: (_ rowId: String, _ minY: CGFloat) -> Void = { _, _ in }
+}
+
 struct GaryxMobileTurnRowsView: View {
-    @Environment(\.garyxMotion) private var motion
     let rows: [GaryxMobileTurnRow]
     let prefetchBoundaryRowCount: Int
-    let onNearHistoryBoundary: () -> Void
-    let onRowContentMinYChange: (_ rowId: String, _ minY: CGFloat) -> Void
+    let sink: GaryxTurnRowCallbackSink
 
     init(
         rows: [GaryxMobileTurnRow],
         prefetchBoundaryRowCount: Int = 0,
-        onNearHistoryBoundary: @escaping () -> Void = {},
-        onRowContentMinYChange: @escaping (_ rowId: String, _ minY: CGFloat) -> Void = { _, _ in }
+        sink: GaryxTurnRowCallbackSink = GaryxTurnRowCallbackSink()
     ) {
         self.rows = rows
         self.prefetchBoundaryRowCount = prefetchBoundaryRowCount
-        self.onNearHistoryBoundary = onNearHistoryBoundary
-        self.onRowContentMinYChange = onRowContentMinYChange
+        self.sink = sink
     }
 
     var body: some View {
         ForEach(Array(rows.enumerated()), id: \.element.id) { rowIndex, row in
-            // The row wrapper VStack exists so the whole turn row has ONE
-            // geometry to observe. Its spacing matches the transcript stack,
-            // so the wrapped layout stays pixel-identical to the previously
-            // flattened children.
-            VStack(alignment: .leading, spacing: 14) {
-                turnRowContent(rowIndex: rowIndex, row: row)
-            }
-            .onGeometryChange(for: CGFloat.self) { proxy in
-                proxy.frame(in: .named(garyxConversationContentSpaceName)).minY
-            } action: { minY in
-                onRowContentMinYChange(row.id, minY)
-            }
-            .onAppear {
-                guard rowIndex <= prefetchBoundaryRowCount else { return }
-                onNearHistoryBoundary()
-            }
+            // `.equatable()` is the point of this whole structure: a streaming
+            // delta changes exactly one row, so every other row compares equal
+            // and SwiftUI skips its body entirely. Before this, one delta
+            // rebuilt all resident rows — the measured structural主因
+            // (#TASK-2703: 60 rows re-evaluated per root update).
+            GaryxMobileTurnRowView(
+                row: row,
+                isWithinHistoryPrefetchBoundary: rowIndex <= prefetchBoundaryRowCount,
+                sink: sink
+            )
+            .equatable()
         }
         .onAppear {
             GaryxRoutePushPerformanceProbe.shared?.markConversationContent(rowCount: rows.count)
@@ -53,9 +55,44 @@ struct GaryxMobileTurnRowsView: View {
             GaryxRoutePushPerformanceProbe.shared?.markConversationContent(rowCount: count)
         }
     }
+}
+
+/// One turn row. Equality covers everything that can change its rendering;
+/// the sink is compared by identity because its handlers are stable for the
+/// occupancy's lifetime.
+struct GaryxMobileTurnRowView: View, Equatable {
+    @Environment(\.garyxMotion) private var motion
+    let row: GaryxMobileTurnRow
+    let isWithinHistoryPrefetchBoundary: Bool
+    let sink: GaryxTurnRowCallbackSink
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.row == rhs.row
+            && lhs.isWithinHistoryPrefetchBoundary == rhs.isWithinHistoryPrefetchBoundary
+            && lhs.sink === rhs.sink
+    }
+
+    var body: some View {
+        // The row wrapper VStack exists so the whole turn row has ONE
+        // geometry to observe. Its spacing matches the transcript stack,
+        // so the wrapped layout stays pixel-identical to the previously
+        // flattened children.
+        VStack(alignment: .leading, spacing: 14) {
+            content
+        }
+        .onGeometryChange(for: CGFloat.self) { proxy in
+            proxy.frame(in: .named(garyxConversationContentSpaceName)).minY
+        } action: { minY in
+            sink.onRowContentMinYChange(row.id, minY)
+        }
+        .onAppear {
+            guard isWithinHistoryPrefetchBoundary else { return }
+            sink.onNearHistoryBoundary()
+        }
+    }
 
     @ViewBuilder
-    private func turnRowContent(rowIndex: Int, row: GaryxMobileTurnRow) -> some View {
+    private var content: some View {
         if let userBlock = row.userBlock {
             GaryxMobileTranscriptBlockView(block: userBlock)
                 .transition(motion.transition(.transcriptAppear))
