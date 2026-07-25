@@ -247,6 +247,8 @@ const api: GaryxDesktopApi = {
     ipcRenderer.invoke("garyx:update-thread-runtime-settings", input),
   listRecentThreads: (input) =>
     ipcRenderer.invoke("garyx:list-recent-threads", input),
+  listThreadSummaries: (input) =>
+    ipcRenderer.invoke("garyx:list-thread-summaries", input),
   listThreadFavorites: (input) =>
     ipcRenderer.invoke("garyx:list-thread-favorites", input),
   getThreadFavoritesSnapshot: (input) =>

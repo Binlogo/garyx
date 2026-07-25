@@ -3,12 +3,14 @@ import assert from "node:assert/strict";
 
 import {
   assertRecentThreadGatewayScope,
+  assertThreadSummaryGatewayScope,
   ThreadStreamGapError,
   createTask,
   archiveRemoteThread,
   deleteRemoteThread,
   updateCustomAgent,
   fetchRecentThreads,
+  fetchThreadSummaries,
   fetchThreadFavorites,
   fetchThreadFavoritesSnapshot,
   fetchAutomations,
@@ -24,6 +26,7 @@ import {
   setRemoteThreadFavorite,
   streamThreadEvents,
   validateListRecentThreadsInput,
+  validateListThreadSummariesInput,
 } from "./gary-client.ts";
 
 test("fetchAutomations preserves nullable target-agent and validation wire state", async () => {
@@ -107,6 +110,29 @@ function canonicalStandardThread(overrides = {}) {
     worktree: null,
     recent_run_id: null,
     active_run_id: null,
+    ...overrides,
+  };
+}
+
+function canonicalThreadSummaryRow(overrides = {}) {
+  return {
+    thread_id: "thread::search-result",
+    title: "Search result",
+    workspace_dir: "/Users/test/project",
+    thread_type: "chat",
+    provider_type: "codex_app_server",
+    agent_id: "test-agent",
+    created_at: "2026-07-20T10:00:00Z",
+    updated_at: "2026-07-20T11:00:00Z",
+    message_count: 3,
+    last_user_message: "Synthetic question",
+    last_assistant_message: "Synthetic answer",
+    last_message_preview: "Synthetic answer",
+    recent_run_id: "run::recent",
+    active_run_id: null,
+    worktree: null,
+    root_workspace_path: "/Users/test/project",
+    workspace_origin: "explicit",
     ...overrides,
   };
 }
@@ -1746,6 +1772,114 @@ test("fetchRecentThreads sends an explicit task filter and maps the filtered pag
   }
 });
 
+test("fetchThreadSummaries sends a global title query and strictly maps its page", async () => {
+  const urls = [];
+  setGatewayFetch(async (url) => {
+    urls.push(String(url));
+    return new Response(
+      JSON.stringify({
+        threads: [
+          canonicalThreadSummaryRow({
+            active_run_id: "run::active",
+            worktree: {
+              path: "/Users/test/project-worktrees/search",
+              source_workspace_dir: "/Users/test/project",
+            },
+          }),
+        ],
+        has_more: true,
+        next_cursor: "cursor/next",
+        store_incarnation_id: "33333333-3333-4333-8333-333333333333",
+        server_boot_id: "44444444-4444-4444-8444-444444444444",
+      }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+  });
+  try {
+    const page = await fetchThreadSummaries(
+      {
+        gatewayUrl: "https://garyx.example.test/",
+        gatewayAuthToken: "",
+      },
+      {
+        tasks: "include",
+        q: "TASK 2541",
+        limit: 30,
+        cursor: "cursor-first",
+      },
+    );
+
+    assert.equal(
+      urls[0],
+      "https://garyx.example.test/api/thread-summaries?tasks=include&limit=30&q=TASK+2541&cursor=cursor-first",
+    );
+    assert.equal(page.gatewayScope, "https://garyx.example.test");
+    assert.equal(page.threads[0].id, "thread::search-result");
+    assert.equal(page.threads[0].title, "Search result");
+    assert.equal(page.threads[0].runState, "running");
+    assert.equal(
+      page.threads[0].worktree?.sourceWorkspaceDir,
+      "/Users/test/project",
+    );
+    assert.equal(page.nextCursor, "cursor/next");
+    assert.equal(page.hasMore, true);
+    assert.equal(
+      page.storeIncarnationId,
+      "33333333-3333-4333-8333-333333333333",
+    );
+  } finally {
+    setGatewayFetch(null);
+  }
+});
+
+test("fetchThreadSummaries rejects incomplete rows and invalid cursor pages", async () => {
+  const settings = {
+    gatewayUrl: "https://garyx.example.test",
+    gatewayAuthToken: "",
+  };
+  const input = {
+    tasks: "include",
+    q: "search",
+    limit: 30,
+    cursor: null,
+  };
+
+  try {
+    for (const payload of [
+      {
+        threads: [
+          (() => {
+            const row = canonicalThreadSummaryRow();
+            delete row.last_user_message;
+            return row;
+          })(),
+        ],
+        has_more: false,
+        next_cursor: null,
+        store_incarnation_id: "33333333-3333-4333-8333-333333333333",
+        server_boot_id: "44444444-4444-4444-8444-444444444444",
+      },
+      {
+        threads: [canonicalThreadSummaryRow()],
+        has_more: true,
+        next_cursor: null,
+        store_incarnation_id: "33333333-3333-4333-8333-333333333333",
+        server_boot_id: "44444444-4444-4444-8444-444444444444",
+      },
+    ]) {
+      setGatewayFetch(async () =>
+        new Response(JSON.stringify(payload), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      );
+      await assert.rejects(fetchThreadSummaries(settings, input));
+    }
+  } finally {
+    setGatewayFetch(null);
+  }
+});
+
 test("validateListRecentThreadsInput rejects renderer-selected URLs and invalid pages", () => {
   assert.deepEqual(
     validateListRecentThreadsInput({
@@ -1803,6 +1937,64 @@ test("validateListRecentThreadsInput rejects renderer-selected URLs and invalid 
   );
 });
 
+test("validateListThreadSummariesInput keeps the IPC query narrow and canonical", () => {
+  assert.deepEqual(
+    validateListThreadSummariesInput({
+      gatewayScope: "https://garyx.example.test///",
+      tasks: "include",
+      q: "  TASK-2541  ",
+      limit: 30,
+      cursor: null,
+    }),
+    {
+      gatewayScope: "https://garyx.example.test",
+      tasks: "include",
+      q: "TASK-2541",
+      limit: 30,
+      cursor: null,
+    },
+  );
+  for (const input of [
+    {
+      gatewayScope: "",
+      tasks: "include",
+      q: "task",
+      limit: 30,
+      cursor: null,
+    },
+    {
+      gatewayScope: "https://garyx.example.test",
+      tasks: "invalid",
+      q: "task",
+      limit: 30,
+      cursor: null,
+    },
+    {
+      gatewayScope: "https://garyx.example.test",
+      tasks: "include",
+      q: " ",
+      limit: 30,
+      cursor: null,
+    },
+    {
+      gatewayScope: "https://garyx.example.test",
+      tasks: "include",
+      q: "task",
+      limit: 101,
+      cursor: null,
+    },
+    {
+      gatewayScope: "https://garyx.example.test",
+      tasks: "include",
+      q: "task",
+      limit: 30,
+      cursor: "",
+    },
+  ]) {
+    assert.throws(() => validateListThreadSummariesInput(input));
+  }
+});
+
 test("Recent IPC ownership rejects an expected/actual Gateway scope mismatch", () => {
   assert.equal(
     assertRecentThreadGatewayScope(
@@ -1818,6 +2010,24 @@ test("Recent IPC ownership rejects an expected/actual Gateway scope mismatch", (
         "https://gateway-a.test",
       ),
     /Gateway changed before the Recent request started/,
+  );
+});
+
+test("thread search IPC ownership rejects an expected/actual Gateway scope mismatch", () => {
+  assert.equal(
+    assertThreadSummaryGatewayScope(
+      { gatewayUrl: "https://gateway-a.test/", gatewayAuthToken: "" },
+      "https://gateway-a.test",
+    ),
+    "https://gateway-a.test",
+  );
+  assert.throws(
+    () =>
+      assertThreadSummaryGatewayScope(
+        { gatewayUrl: "https://gateway-b.test", gatewayAuthToken: "" },
+        "https://gateway-a.test",
+      ),
+    /Gateway changed before the thread search request started/,
   );
 });
 
