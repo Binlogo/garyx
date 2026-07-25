@@ -193,9 +193,22 @@ final class GaryxPreparedSelectedThreadTranscriptUpdateTests: XCTestCase {
             GaryxMessageListSignature.make(for: [changedAttachment])
         )
 
-        let longText = String(repeating: "x", count: 1_025)
+        // Genuinely large fields still sample. The budget is expressed in
+        // bytes and sized so ordinary prose in any script hashes whole,
+        // because `sampled` gates the dedupe fast path (review #TASK-2707
+        // MAJOR-4).
+        let longText = String(
+            repeating: "x",
+            count: GaryxMessageListSignature.wholeTextSignatureByteLimit + 1
+        )
         let sampled = GaryxMessageListSignature.make(for: [mobileMessage("user-1", role: .user, text: longText)])
         XCTAssertTrue(sampled.sampled)
+        let ordinaryProse = String(repeating: "值得注意的性能细节", count: 60)
+        XCTAssertFalse(
+            GaryxMessageListSignature.make(
+                for: [mobileMessage("user-2", role: .user, text: ordinaryProse)]
+            ).sampled
+        )
 
         let runningTool = GaryxMessageListSignature.make(for: [toolMessage(status: .running)])
         let completedTool = GaryxMessageListSignature.make(for: [toolMessage(status: .completed)])

@@ -82,10 +82,10 @@ final class GaryxExistingThreadLoadingJitterReproTests: XCTestCase {
         let scope = "thread:\(capture.threadId)"
         let geometry = messages.map(GaryxMobileMessageGeometry.init)
         var scrollState = GaryxConversationScrollState()
-        var scheduler = GaryxConversationScrollScheduler()
+        var scheduler = GaryxConversationTailScrollScheduler()
 
         let mountRequest = scrollState.threadOpened()
-        let mountToken = scheduler.schedule(request: mountRequest)
+        let mountToken = scheduler.schedule(reason: mountRequest.reason)
         let loadingCompletionRequest = try XCTUnwrap(
             scrollState.messagesChanged(
                 previous: [],
@@ -98,7 +98,7 @@ final class GaryxExistingThreadLoadingJitterReproTests: XCTestCase {
         )
         XCTAssertEqual(loadingCompletionRequest.reason, .openingThread)
         let loadingCompletionToken = scheduler.schedule(
-            request: loadingCompletionRequest
+            reason: loadingCompletionRequest.reason
         )
         XCTAssertFalse(scheduler.isCurrent(mountToken))
 
@@ -118,9 +118,9 @@ final class GaryxExistingThreadLoadingJitterReproTests: XCTestCase {
         XCTAssertTrue(
             scheduler.authorizeAttempt(
                 loadingCompletionToken,
-                input: scrollState.scrollAttemptInput(
+                input: scrollState.tailScrollAttemptInput(
                     index: 0,
-                    request: loadingCompletionRequest
+                    reason: loadingCompletionRequest.reason
                 )
             )
         )
@@ -152,9 +152,9 @@ final class GaryxExistingThreadLoadingJitterReproTests: XCTestCase {
                 guard delay > 0,
                       scheduler.authorizeAttempt(
                           loadingCompletionToken,
-                          input: scrollState.scrollAttemptInput(
+                          input: scrollState.tailScrollAttemptInput(
                               index: index,
-                              request: loadingCompletionRequest
+                              reason: loadingCompletionRequest.reason
                           )
                       )
                 else {

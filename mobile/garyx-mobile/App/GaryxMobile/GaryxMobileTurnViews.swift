@@ -8,42 +8,70 @@ import SwiftUI
 /// unaffected by concurrent tail growth or reader scrolling.
 let garyxConversationContentSpaceName = "garyx-conversation-content"
 
+/// The single owner of the gap between transcript rows.
+///
+/// Both the row stack that produces the gap and the window planner that
+/// accounts for the gaps a collapse removes read this one value: a drift
+/// between them would silently shift every spacer by (N-1) x delta with no
+/// test failing (review #TASK-2707 N11).
+let garyxConversationRowSpacing: CGFloat = 14
+
+/// Stable sink for the transcript's per-row callbacks.
+///
+/// Callbacks live behind a reference so a row view can be `Equatable`: closure
+/// values are never equal, so passing them per row forced SwiftUI to rebuild
+/// every row body on every root update. The transcript owns one sink for the
+/// lifetime of its occurrence and only mutates the handlers inside it.
+final class GaryxTurnRowCallbackSink {
+    var onNearHistoryBoundary: () -> Void = {}
+    /// One callback carries both facts the transcript needs from a row:
+    /// its scroll-invariant content-space start (prepend compensation) and its
+    /// own height (window planning). Height is intrinsic, so it stays valid
+    /// while the row is collapsed — unlike a position, which goes stale the
+    /// moment the row stops reporting (review #TASK-2707 BLOCKER-2).
+    var onRowContentGeometryChange: (_ rowId: String, _ minY: CGFloat, _ height: CGFloat) -> Void
+        = { _, _, _ in }
+}
+
 struct GaryxMobileTurnRowsView: View {
-    @Environment(\.garyxMotion) private var motion
     let rows: [GaryxMobileTurnRow]
     let prefetchBoundaryRowCount: Int
-    let onNearHistoryBoundary: () -> Void
-    let onRowContentMinYChange: (_ rowId: String, _ minY: CGFloat) -> Void
+    let sink: GaryxTurnRowCallbackSink
+    /// Windowing plan from `GaryxTranscriptWindowPlanner`. Empty means "lay
+    /// every row out", which is also the state before the first measurement.
+    let windowPlan: [GaryxTranscriptWindowPlanner.Segment]
 
     init(
         rows: [GaryxMobileTurnRow],
         prefetchBoundaryRowCount: Int = 0,
-        onNearHistoryBoundary: @escaping () -> Void = {},
-        onRowContentMinYChange: @escaping (_ rowId: String, _ minY: CGFloat) -> Void = { _, _ in }
+        sink: GaryxTurnRowCallbackSink = GaryxTurnRowCallbackSink(),
+        windowPlan: [GaryxTranscriptWindowPlanner.Segment] = []
     ) {
         self.rows = rows
         self.prefetchBoundaryRowCount = prefetchBoundaryRowCount
-        self.onNearHistoryBoundary = onNearHistoryBoundary
-        self.onRowContentMinYChange = onRowContentMinYChange
+        self.sink = sink
+        self.windowPlan = windowPlan
     }
 
     var body: some View {
-        ForEach(Array(rows.enumerated()), id: \.element.id) { rowIndex, row in
-            // The row wrapper VStack exists so the whole turn row has ONE
-            // geometry to observe. Its spacing matches the transcript stack,
-            // so the wrapped layout stays pixel-identical to the previously
-            // flattened children.
-            VStack(alignment: .leading, spacing: 14) {
-                turnRowContent(rowIndex: rowIndex, row: row)
-            }
-            .onGeometryChange(for: CGFloat.self) { proxy in
-                proxy.frame(in: .named(garyxConversationContentSpaceName)).minY
-            } action: { minY in
-                onRowContentMinYChange(row.id, minY)
-            }
-            .onAppear {
-                guard rowIndex <= prefetchBoundaryRowCount else { return }
-                onNearHistoryBoundary()
+        // Rows are the single source of truth for WHAT exists; the plan only
+        // proposes what collapses. A row the plan does not mention renders
+        // live, so a plan computed one frame ago can delay a collapse but can
+        // never hide content — the failure mode review #TASK-2707 measured as
+        // a 204ms invisible message right after sending.
+        ForEach(renderEntries) { entry in
+            switch entry.kind {
+            case .row(let rowIndex):
+                GaryxMobileTurnRowView(
+                    row: rows[rowIndex],
+                    isWithinHistoryPrefetchBoundary: rowIndex <= prefetchBoundaryRowCount,
+                    sink: sink
+                )
+                .equatable()
+            case .spacer(let height):
+                Color.clear
+                    .frame(height: height)
+                    .accessibilityHidden(true)
             }
         }
         .onAppear {
@@ -54,8 +82,93 @@ struct GaryxMobileTurnRowsView: View {
         }
     }
 
+    private enum RenderKind {
+        case row(rowIndex: Int)
+        case spacer(height: CGFloat)
+    }
+
+    /// Stable identity per entry: a row keeps its own id so SwiftUI preserves
+    /// its state across replans; a spacer is identified by the first row it
+    /// folds away.
+    private struct RenderEntry: Identifiable {
+        let id: String
+        let kind: RenderKind
+    }
+
+    /// Walk the row list in order, folding only runs the plan collapses.
+    private var renderEntries: [RenderEntry] {
+        guard !windowPlan.isEmpty else {
+            return rows.enumerated().map { index, row in
+                RenderEntry(id: row.id, kind: .row(rowIndex: index))
+            }
+        }
+        var collapsedHeightByFirstRowID: [String: CGFloat] = [:]
+        var collapsedRowIDs: [String: String] = [:]  // row id -> run's first row id
+        for segment in windowPlan {
+            guard case .spacer(let height, let ids) = segment, let first = ids.first else {
+                continue
+            }
+            collapsedHeightByFirstRowID[first] = height
+            for id in ids {
+                collapsedRowIDs[id] = first
+            }
+        }
+
+        var entries: [RenderEntry] = []
+        var emittedRuns: Set<String> = []
+        for (index, row) in rows.enumerated() {
+            guard let runFirstID = collapsedRowIDs[row.id],
+                  let height = collapsedHeightByFirstRowID[runFirstID] else {
+                entries.append(RenderEntry(id: row.id, kind: .row(rowIndex: index)))
+                continue
+            }
+            // One spacer per collapsed run, at the position of its first row.
+            if emittedRuns.insert(runFirstID).inserted {
+                entries.append(
+                    RenderEntry(id: "garyx-collapsed-\(runFirstID)", kind: .spacer(height: height))
+                )
+            }
+        }
+        return entries
+    }
+}
+
+/// One turn row. Equality covers everything that can change its rendering;
+/// the sink is compared by identity because its handlers are stable for the
+/// occupancy's lifetime.
+struct GaryxMobileTurnRowView: View, Equatable {
+    @Environment(\.garyxMotion) private var motion
+    let row: GaryxMobileTurnRow
+    let isWithinHistoryPrefetchBoundary: Bool
+    let sink: GaryxTurnRowCallbackSink
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.row == rhs.row
+            && lhs.isWithinHistoryPrefetchBoundary == rhs.isWithinHistoryPrefetchBoundary
+            && lhs.sink === rhs.sink
+    }
+
+    var body: some View {
+        // The row wrapper VStack exists so the whole turn row has ONE
+        // geometry to observe. Its spacing matches the transcript stack,
+        // so the wrapped layout stays pixel-identical to the previously
+        // flattened children.
+        VStack(alignment: .leading, spacing: garyxConversationRowSpacing) {
+            content
+        }
+        .onGeometryChange(for: CGRect.self) { proxy in
+            proxy.frame(in: .named(garyxConversationContentSpaceName))
+        } action: { frame in
+            sink.onRowContentGeometryChange(row.id, frame.minY, frame.height)
+        }
+        .onAppear {
+            guard isWithinHistoryPrefetchBoundary else { return }
+            sink.onNearHistoryBoundary()
+        }
+    }
+
     @ViewBuilder
-    private func turnRowContent(rowIndex: Int, row: GaryxMobileTurnRow) -> some View {
+    private var content: some View {
         if let userBlock = row.userBlock {
             GaryxMobileTranscriptBlockView(block: userBlock)
                 .transition(motion.transition(.transcriptAppear))

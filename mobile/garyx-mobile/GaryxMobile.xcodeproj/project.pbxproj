@@ -209,7 +209,6 @@
 		BED36AB83B94CF66089B4843 /* GaryxCapsulePreviewLoading.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51D8B445EDFA596C429355E9 /* GaryxCapsulePreviewLoading.swift */; };
 		BEDBF052D2538F4513AD93BF /* GaryxMobileConnectLink.swift in Sources */ = {isa = PBXBuildFile; fileRef = C8575D6575E8F57D66F2676B /* GaryxMobileConnectLink.swift */; };
 		BF2A1480CB62697F917E17CE /* GaryxImageSavePlanning.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5FD9CA4A23BF53B9BBFFA31A /* GaryxImageSavePlanning.swift */; };
-		C05E9C67C7CC56896ED3804F /* GaryxSendAnchorFillerState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4D987EC4537556496A38F546 /* GaryxSendAnchorFillerState.swift */; };
 		C0C753C922486CB1865BD3F7 /* GaryxMotionContextTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2F505653C9B7FB95D6145BDA /* GaryxMotionContextTests.swift */; };
 		C12B724CEB9AB5F0F2A2B242 /* GaryxPresentationTransaction.swift in Sources */ = {isa = PBXBuildFile; fileRef = FFDD09539D9BAE6FBE76A351 /* GaryxPresentationTransaction.swift */; };
 		C19F97BAF97F9617A16C3C35 /* GaryxThreadMembershipProviders.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7B6D3A393D3B4489E472318B /* GaryxThreadMembershipProviders.swift */; };
@@ -237,6 +236,7 @@
 		D240731A001774AD5EDACF08 /* GaryxMobileDesignSystem.swift in Sources */ = {isa = PBXBuildFile; fileRef = AE7158878F175B8C15660D26 /* GaryxMobileDesignSystem.swift */; };
 		D286B39A3B6904DC7645D1E5 /* GaryxMobileCapsuleViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2404B3D17A50DD6F8FC1C83 /* GaryxMobileCapsuleViews.swift */; };
 		D4097D47FE2C952F35604421 /* GaryxConversationScrollPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 06E33FD257CEF25AB8BD3971 /* GaryxConversationScrollPolicy.swift */; };
+		D4097D47FE2C952F35604422 /* GaryxTranscriptWindowPlanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 06E33FD257CEF25AB8BD3972 /* GaryxTranscriptWindowPlanner.swift */; };
 		D5CB2BDEA70D2195F21C395F /* GaryxFluidNavigationIntent.swift in Sources */ = {isa = PBXBuildFile; fileRef = 441A0BD48F3A7E063D5E1DA5 /* GaryxFluidNavigationIntent.swift */; };
 		D60D50D4306465074D7BA50B /* GaryxForegroundSyncPlan.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCE7A7B4DA74871054E42B62 /* GaryxForegroundSyncPlan.swift */; };
 		D7CDBC1C292ED1D0F3699AC7 /* GaryxGatewayCapsuleModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = F50891510FC8D9DF8AB908AA /* GaryxGatewayCapsuleModels.swift */; };
@@ -330,6 +330,7 @@
 		03118985A16E839F37BC35D1 /* GaryxCapsuleFocusedPreviewLoader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GaryxCapsuleFocusedPreviewLoader.swift; sourceTree = "<group>"; };
 		069D0F80A6CF0A97C50DF5D0 /* GaryxMobileClaudeCodeAuthViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GaryxMobileClaudeCodeAuthViews.swift; sourceTree = "<group>"; };
 		06E33FD257CEF25AB8BD3971 /* GaryxConversationScrollPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GaryxConversationScrollPolicy.swift; sourceTree = "<group>"; };
+		06E33FD257CEF25AB8BD3972 /* GaryxTranscriptWindowPlanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GaryxTranscriptWindowPlanner.swift; sourceTree = "<group>"; };
 		074800CDFBD0F0167185BD92 /* GaryxToolFieldProjection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GaryxToolFieldProjection.swift; sourceTree = "<group>"; };
 		090FD93C71192EB9E248C46F /* GaryxThreadResidencyTracker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GaryxThreadResidencyTracker.swift; sourceTree = "<group>"; };
 		0A6AB4738FC86D30006AB2B9 /* GaryxUsageGaugeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GaryxUsageGaugeView.swift; sourceTree = "<group>"; };
@@ -413,7 +414,6 @@
 		4993E5416B97A70945A27AE3 /* GaryxTranscriptCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GaryxTranscriptCache.swift; sourceTree = "<group>"; };
 		4CAECB31673D8750B26FF35F /* GaryxMobileModel+TranscriptCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "GaryxMobileModel+TranscriptCache.swift"; sourceTree = "<group>"; };
 		4CD6F1CA998BB668325CB3F6 /* GaryxRouteContext.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GaryxRouteContext.swift; sourceTree = "<group>"; };
-		4D987EC4537556496A38F546 /* GaryxSendAnchorFillerState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GaryxSendAnchorFillerState.swift; sourceTree = "<group>"; };
 		4D9D37980035D4D66832FC48 /* GaryxMobileFileLinks.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GaryxMobileFileLinks.swift; sourceTree = "<group>"; };
 		50D46D929247D01DDC532E01 /* GaryxGatewayCommonModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GaryxGatewayCommonModels.swift; sourceTree = "<group>"; };
 		51D8B445EDFA596C429355E9 /* GaryxCapsulePreviewLoading.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GaryxCapsulePreviewLoading.swift; sourceTree = "<group>"; };
@@ -832,6 +832,7 @@
 				DC2C69C7E2572DAD607D6542 /* GaryxConversationRoutePresentation.swift */,
 				1143E0E399AA0B069FCE2846 /* GaryxConversationRunTracker.swift */,
 				06E33FD257CEF25AB8BD3971 /* GaryxConversationScrollPolicy.swift */,
+				06E33FD257CEF25AB8BD3972 /* GaryxTranscriptWindowPlanner.swift */,
 				97B7102FD5063F3C602C95B2 /* GaryxConversationStateMachine.swift */,
 				599E6F9AC8AA6BE5198550DA /* GaryxCustomAgentDraftRules.swift */,
 				1EF116F122901E9BF9342D9E /* GaryxDurableDeliveryActions.swift */,
@@ -907,7 +908,6 @@
 				26EE9FBDD5B4C2602C1F4A13 /* GaryxRouteRendererState.swift */,
 				8C20209294CFC0300DED52F6 /* GaryxRuntimePanelPager.swift */,
 				DBE242D7680E7E6E29F2E577 /* GaryxSelectedThreadStreamPolicy.swift */,
-				4D987EC4537556496A38F546 /* GaryxSendAnchorFillerState.swift */,
 				77E3B5F0AE2F032A3DBB991B /* GaryxSQLiteComposerDurabilityStore.swift */,
 				79007B0E36088744FE661908 /* GaryxTaskNotificationPresentation.swift */,
 				AF1E76550515A2D578136E8C /* GaryxTaskTreeSidebarPresentation.swift */,
@@ -1180,6 +1180,7 @@
 				B76EDD22B4E8F3AE2DEBFBC2 /* GaryxConversationRouteView.swift in Sources */,
 				08D28E9544EA1D3B5D416551 /* GaryxConversationRunTracker.swift in Sources */,
 				D4097D47FE2C952F35604421 /* GaryxConversationScrollPolicy.swift in Sources */,
+				D4097D47FE2C952F35604422 /* GaryxTranscriptWindowPlanner.swift in Sources */,
 				CD7F5630F5FC4B5777652A7A /* GaryxConversationStateMachine.swift in Sources */,
 				6ED55BD95CA1C463DC2D0483 /* GaryxConversationTranscriptSnapshotCache.swift in Sources */,
 				0121FCDB905043DAD0FE5660 /* GaryxCustomAgentDraftRules.swift in Sources */,
@@ -1346,7 +1347,6 @@
 				B0AE379D2A2A89AFE93E9916 /* GaryxRuntimePanelPager.swift in Sources */,
 				76DED7024430BB702C37195F /* GaryxSQLiteComposerDurabilityStore.swift in Sources */,
 				CC49F9DCCB1A6BCA4DCF9406 /* GaryxSelectedThreadStreamPolicy.swift in Sources */,
-				C05E9C67C7CC56896ED3804F /* GaryxSendAnchorFillerState.swift in Sources */,
 				5B99F197FC9EA6958F44A032 /* GaryxTaskNotificationPresentation.swift in Sources */,
 				19468849C652D246D0D84D49 /* GaryxTaskTreeSidebarPresentation.swift in Sources */,
 				7A705CCD224F45927229F337 /* GaryxThreadArchiveRequestBuilder.swift in Sources */,
