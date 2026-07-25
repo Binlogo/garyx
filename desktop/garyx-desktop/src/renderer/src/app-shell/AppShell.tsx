@@ -72,6 +72,16 @@ import {
 } from "./components/SideToolsPanel";
 import { BotConversationSidebar } from "../BotConversationSidebar";
 import { RecentConversationSidebar } from "../RecentConversationSidebar";
+import { SidebarRecentThreadList } from "../SidebarRecentThreadList";
+import type { ThreadRailRow } from "../ThreadRailList";
+import {
+  excludePinnedFromRecent,
+} from "../recent-conversation-sidebar-model";
+import {
+  persistSidebarTab,
+  readStoredSidebarTab,
+  type SidebarTab,
+} from "../sidebar-tab-model";
 import { ConversationHeaderActions } from "../ConversationHeaderActions";
 import {
   ConversationTitleRoot,
@@ -245,7 +255,10 @@ import {
   resolveLifecycleStoreIncarnation,
   runLifecycleMutation,
 } from "./lifecycle-ingress";
-import type { RecentThreadFeedState } from "./recent-thread-feeds";
+import type {
+  RecentThreadFeedState,
+  RecentThreadFilter,
+} from "./recent-thread-feeds";
 import { recordTranscriptRender } from "./transcript-render-probe";
 import {
   deferConversationRailUnmount,
@@ -810,6 +823,15 @@ export function AppShell() {
   >(null);
   const [recentThreadsRailOpen, setRecentThreadsRailOpenLegacy] =
     useState(restoredLayoutOccupancy?.conversationRail ?? false);
+  // Which L1 sidebar body is showing: Threads (the recent list) or Projects
+  // (bots + workspaces). Pinned sits above the tabs and belongs to neither.
+  const [sidebarTab, setSidebarTabState] = useState<SidebarTab>(() =>
+    readStoredSidebarTab(window.localStorage),
+  );
+  const selectSidebarTab = useCallback((tab: SidebarTab) => {
+    setSidebarTabState(tab);
+    persistSidebarTab(window.localStorage, tab);
+  }, []);
   // Batch 6c-2b: contentView is a SELECTOR over the committed route — the
   // route store is the only view state (AppShell subscribes on its local
   // store instance, not through context: AppShell renders the Provider).
@@ -1943,8 +1965,18 @@ export function AppShell() {
     gatewayScope: desktopState?.entitiesGatewayUrl || "",
     onError: setError,
   });
+  // Either recent surface wanting data keeps the one shared feed alive: the L1
+  // sidebar Threads tab, or the L2 recent rail. Deliberately not gated on L1
+  // collapse — collapse is transient, and expanding must show data immediately
+  // rather than restart a cold fetch.
+  const recentFeedWanted =
+    sidebarTab === "threads" ||
+    (shouldShowConversationRail && recentThreadsRailOpen);
   const recentThreadFeeds = useRecentThreadFeeds({
-    enabled: shouldShowConversationRail && recentThreadsRailOpen,
+    enabled: recentFeedWanted,
+    // The sidebar's Threads tab is the Chats list by definition, so that feed
+    // must keep refreshing even while the rail has All or Favorites selected.
+    keepChatsFeedActive: sidebarTab === "threads",
     // Main owns Gateway URL normalization and stamps every entity slice with
     // that canonical scope. Do not grow a second renderer normalizer or fall
     // back to the raw settings string (trailing-slash mismatch would make an
@@ -2009,9 +2041,45 @@ export function AppShell() {
   );
   const showingFavoriteThreads =
     recentThreadFeeds.state.selectedFilter === "favorites";
-  const visibleRecentThreads = showingFavoriteThreads
-    ? favoriteThreads
-    : recentThreadFeeds.selectedThreads;
+  // Pinned threads have their own always-visible sidebar region, so the recent
+  // list must not repeat them. Presentation-only, and applied once here so the
+  // L1 Threads tab and the L2 recent rail cannot disagree.
+  const visibleRecentThreads = useMemo(
+    () =>
+      excludePinnedFromRecent(
+        showingFavoriteThreads
+          ? favoriteThreads
+          : recentThreadFeeds.selectedThreads,
+        pinnedThreadIdSet,
+      ),
+    [
+      favoriteThreads,
+      pinnedThreadIdSet,
+      recentThreadFeeds.selectedThreads,
+      showingFavoriteThreads,
+    ],
+  );
+  // The sidebar's Threads tab reads the Chats feed by name — never the rail's
+  // selected filter — and excludes pinned threads the same way.
+  const sidebarChatRows = useMemo(
+    () =>
+      excludePinnedFromRecent(
+        recentThreadFeeds.chatsThreads,
+        pinnedThreadIdSet,
+      ).map((thread) => ({
+        thread,
+        isActive:
+          visibleThreadEntrySelectionSource === "recent" &&
+          visibleSelectedThreadId === thread.id,
+        isBusy: threadRunStateIsRunning(thread),
+      })),
+    [
+      pinnedThreadIdSet,
+      recentThreadFeeds.chatsThreads,
+      visibleSelectedThreadId,
+      visibleThreadEntrySelectionSource,
+    ],
+  );
   const recentThreadRows = useMemo(
     () =>
       // Ordering and membership come from the selected server-owned unit:
@@ -2050,6 +2118,59 @@ export function AppShell() {
       visibleThreadEntrySelectionSource,
     ],
   );
+  // One feed, one filter, one pager, rendered by two surfaces: the L1 sidebar
+  // Threads tab and the L2 recent rail. Everything either surface needs is
+  // derived once here so they cannot drift apart.
+  const recentFeedForDisplay = showingFavoriteThreads
+    ? favoritesFeed
+    : recentThreadFeeds.selectedFeed!;
+  const recentFeedRetry = showingFavoriteThreads
+    ? threadFavorites.refreshSnapshot
+    : recentThreadFeeds.retry;
+  const recentFeedLoadMore = showingFavoriteThreads
+    ? undefined
+    : recentThreadFeeds.loadMore;
+  function selectRecentFilter(filter: RecentThreadFilter) {
+    recentThreadFeeds.selectFilter(filter);
+    if (filter === "favorites") {
+      threadFavorites.refreshSnapshot();
+    }
+  }
+  // One row mapper for both recent surfaces. Only the Favorites filter — which
+  // is exclusive to the rail — contributes the unfavorite accessory.
+  function threadRailRowsFrom(
+    rows: { thread: DesktopThreadSummary; isActive: boolean; isBusy: boolean }[],
+    allowUnfavorite: boolean,
+  ): ThreadRailRow[] {
+    return rows.map((row) => ({
+      key: row.thread.id,
+      title: row.thread.title,
+      time: row.thread.updatedAt,
+      avatar: resolveThreadAvatarIdentity(row.thread, threadAvatarCatalog),
+      isActive: row.isActive,
+      isBusy: row.isBusy,
+      onOpen: () => {
+        void openExistingThread(row.thread.id, "recent");
+      },
+      onUnfavorite: allowUnfavorite
+        ? () => {
+            threadFavorites.setFavorite(row.thread.id, false);
+          }
+        : undefined,
+      onArchive: row.isBusy
+        ? undefined
+        : () => {
+            void handleDeleteThread(row.thread.id);
+          },
+    }));
+  }
+  function recentRailRows(): ThreadRailRow[] {
+    return threadRailRowsFrom(recentThreadRows, showingFavoriteThreads);
+  }
+  function sidebarChatRailRows(): ThreadRailRow[] {
+    return threadRailRowsFrom(sidebarChatRows, false);
+  }
+
   async function setThreadPinned(threadId: string, pinned: boolean) {
     const normalizedId = threadId.trim();
     if (!normalizedId) {
@@ -4876,6 +4997,17 @@ export function AppShell() {
             }}
           />
         }
+        recentThreadsSlot={
+          <SidebarRecentThreadList
+            feed={recentThreadFeeds.chatsFeed}
+            formatThreadTimestamp={formatThreadTimestamp}
+            onLoadMore={recentThreadFeeds.loadMoreChats}
+            onRetry={recentThreadFeeds.retryChats}
+            rows={sidebarChatRailRows()}
+          />
+        }
+        sidebarTab={sidebarTab}
+        onSelectSidebarTab={selectSidebarTab}
         activeBotConversationGroupId={
           shouldShowConversationRail ? botConversationGroupId : null
         }
@@ -5047,7 +5179,7 @@ export function AppShell() {
       ) : conversationRailPresented && recentThreadsRailOpen ? (
         <RecentConversationSidebar
           collapseLabel={t("Collapse recent threads")}
-          feed={showingFavoriteThreads ? favoritesFeed : recentThreadFeeds.selectedFeed!}
+          feed={recentFeedForDisplay}
           formatThreadTimestamp={formatThreadTimestamp}
           logo={
             <span className="recent-conversation-logo">
@@ -5060,41 +5192,12 @@ export function AppShell() {
               conversationRail: { kind: "closed" },
             }));
           }}
-          onLoadMore={showingFavoriteThreads ? undefined : recentThreadFeeds.loadMore}
+          onLoadMore={recentFeedLoadMore}
           onRailResizeStart={handleRailResizeStart}
-          onRetry={
-            showingFavoriteThreads
-              ? threadFavorites.refreshSnapshot
-              : recentThreadFeeds.retry
-          }
-          onSelectFilter={(filter) => {
-            recentThreadFeeds.selectFilter(filter);
-            if (filter === "favorites") {
-              threadFavorites.refreshSnapshot();
-            }
-          }}
+          onRetry={recentFeedRetry}
+          onSelectFilter={selectRecentFilter}
           railResizing={railResizing}
-          rows={recentThreadRows.map((row) => ({
-            key: row.thread.id,
-            title: row.thread.title,
-            time: row.thread.updatedAt,
-            avatar: resolveThreadAvatarIdentity(row.thread, threadAvatarCatalog),
-            isActive: row.isActive,
-            isBusy: row.isBusy,
-            onOpen: () => {
-              void openExistingThread(row.thread.id, "recent");
-            },
-            onUnfavorite: showingFavoriteThreads
-              ? () => {
-                  threadFavorites.setFavorite(row.thread.id, false);
-                }
-              : undefined,
-            onArchive: row.isBusy
-              ? undefined
-              : () => {
-                  void handleDeleteThread(row.thread.id);
-                },
-          }))}
+          rows={recentRailRows()}
           selectedFilter={recentThreadFeeds.state.selectedFilter}
         />
       ) : null}

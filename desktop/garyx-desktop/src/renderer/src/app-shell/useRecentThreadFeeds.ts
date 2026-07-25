@@ -18,6 +18,7 @@ import {
   noteRecentThreadLocalMutation,
   recentPageHeadActivitySeq,
   recentRefreshChainNeedsNextPage,
+  recentThreadSummariesForFilter,
   recentThreadTasksQuery,
   removeThreadFromRecentFeeds,
   requestRecentThreadLoadMore,
@@ -32,6 +33,7 @@ import {
   PAGINATED_RECENT_THREAD_FILTERS,
   type PaginatedRecentThreadFilter,
   type RecentThreadFilter,
+  type RecentThreadFeedState,
   type RecentThreadFeedsState,
   type RecentThreadLoadMoreTicket,
   type RecentThreadRefreshMode,
@@ -46,6 +48,12 @@ import type {
 
 type RecentThreadFeedsControllerOptions = {
   enabled: boolean;
+  /**
+   * The sidebar's Threads tab IS the Chats list — it does not follow the L2
+   * rail's filter selection. While it is showing, the Chats feed must stay
+   * refreshed even when the rail has selected All or Favorites.
+   */
+  keepChatsFeedActive: boolean;
   gatewayScope: string;
   runtimeEpoch: number;
   sharedSummaries: DesktopThreadSummary[];
@@ -59,6 +67,11 @@ export type RecentThreadFeedsController = {
   state: RecentThreadFeedsState;
   selectedFeed: ReturnType<typeof selectedRecentThreadFeed>;
   selectedThreads: DesktopThreadSummary[];
+  /** The Chats feed by name, for the sidebar's Threads tab. */
+  chatsFeed: RecentThreadFeedState;
+  chatsThreads: DesktopThreadSummary[];
+  loadMoreChats: () => void;
+  retryChats: () => void;
   selectFilter: (filter: RecentThreadFilter) => void;
   refreshSelected: () => void;
   refreshAll: () => void;
@@ -80,6 +93,7 @@ class RecentIdentityInterrupted extends Error {
 
 export function useRecentThreadFeeds({
   enabled,
+  keepChatsFeedActive,
   gatewayScope,
   runtimeEpoch,
   sharedSummaries,
@@ -285,16 +299,19 @@ export function useRecentThreadFeeds({
   );
 
   const issueLoadMore = useCallback(
-    (retry: boolean) => {
+    (retry: boolean, targetFilter?: PaginatedRecentThreadFilter) => {
       const current = stateRef.current;
-      if (!isPaginatedRecentThreadFilter(current.selectedFilter)) {
+      // Without an explicit target this pages the rail's selected feed; the
+      // sidebar's Chats list names its own feed instead.
+      const filter =
+        targetFilter ??
+        (isPaginatedRecentThreadFilter(current.selectedFilter)
+          ? current.selectedFilter
+          : null);
+      if (!filter) {
         return;
       }
-      const decision = requestRecentThreadLoadMore(
-        current,
-        current.selectedFilter,
-        retry,
-      );
+      const decision = requestRecentThreadLoadMore(current, filter, retry);
       if (!decision.ticket) {
         return;
       }
@@ -318,23 +335,37 @@ export function useRecentThreadFeeds({
     );
   }, [commit, sharedSummaries]);
 
+  // Every feed some visible surface depends on: the rail's selected filter plus
+  // the sidebar's fixed Chats list. Read through a ref so the refresh effects
+  // below do not need the live filter in their dependency lists.
+  const activeFiltersRef = useRef<() => PaginatedRecentThreadFilter[]>(() => []);
+  activeFiltersRef.current = () => {
+    const filters: PaginatedRecentThreadFilter[] = [];
+    const selected = stateRef.current.selectedFilter;
+    if (isPaginatedRecentThreadFilter(selected)) {
+      filters.push(selected);
+    }
+    if (keepChatsFeedActive && !filters.includes("nonTask")) {
+      filters.push("nonTask");
+    }
+    return filters;
+  };
+
   useEffect(() => {
     if (!enabled || !gatewayScope) {
       return;
     }
-    const filter = stateRef.current.selectedFilter;
-    if (isPaginatedRecentThreadFilter(filter)) {
+    for (const filter of activeFiltersRef.current()) {
       issueRefresh(filter);
     }
-  }, [enabled, gatewayScope, issueRefresh, runtimeEpoch]);
+  }, [enabled, gatewayScope, issueRefresh, keepChatsFeedActive, runtimeEpoch]);
 
   useEffect(() => {
     if (!enabled || !gatewayScope) {
       return;
     }
     const interval = window.setInterval(() => {
-      const filter = stateRef.current.selectedFilter;
-      if (isPaginatedRecentThreadFilter(filter)) {
+      for (const filter of activeFiltersRef.current()) {
         issueRefresh(filter);
       }
     }, 10_000);
@@ -344,8 +375,7 @@ export function useRecentThreadFeeds({
   useEffect(() => {
     const onVisibilityChange = () => {
       if (document.visibilityState === "visible" && enabled && gatewayScope) {
-        const filter = stateRef.current.selectedFilter;
-        if (isPaginatedRecentThreadFilter(filter)) {
+        for (const filter of activeFiltersRef.current()) {
           issueRefresh(filter, true);
         }
       }
@@ -436,6 +466,20 @@ export function useRecentThreadFeeds({
 
   const loadMore = useCallback(() => issueLoadMore(false), [issueLoadMore]);
 
+  const loadMoreChats = useCallback(
+    () => issueLoadMore(false, "nonTask"),
+    [issueLoadMore],
+  );
+
+  const retryChats = useCallback(() => {
+    const feed = stateRef.current.feeds.nonTask;
+    if (feed.headFailure || feed.forceReplacementPending) {
+      issueRefresh("nonTask", feed.forceReplacementPending);
+      return;
+    }
+    issueLoadMore(true, "nonTask");
+  }, [issueLoadMore, issueRefresh]);
+
   const retry = useCallback(() => {
     const current = stateRef.current;
     const feed = selectedRecentThreadFeed(current);
@@ -495,6 +539,10 @@ export function useRecentThreadFeeds({
     state: visibleState,
     selectedFeed: selectedRecentThreadFeed(visibleState),
     selectedThreads: selectedRecentThreadSummaries(visibleState),
+    chatsFeed: visibleState.feeds.nonTask,
+    chatsThreads: recentThreadSummariesForFilter(visibleState, "nonTask"),
+    loadMoreChats,
+    retryChats,
     selectFilter,
     refreshSelected,
     refreshAll,

@@ -88,6 +88,94 @@
   padding: 0;
 }
 
+/* Pinned is a fixed region above the tabs. `flex-shrink: 0` is load-bearing:
+   the tab panel below holds a long list, and a shrinkable pinned region gets
+   squeezed to zero height by it. The cap keeps a large pin set from pushing the
+   tab panel off-screen instead, scrolling within itself past that point. */
+.sidebar-pinned-region {
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  max-height: 38%;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: none;
+}
+
+.sidebar-pinned-region::-webkit-scrollbar {
+  display: none;
+}
+
+/* Threads / Projects segmented control. Mirrors the recent-filter recipe but
+   reads as the stronger of the two rows: it switches the sidebar body, while
+   the filter row below only narrows one list. */
+.sidebar-tabs {
+  display: grid;
+  flex: 0 0 auto;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--color-token-border-light);
+  border-radius: 9px;
+  background: color-mix(
+    in oklab,
+    var(--color-token-text-primary) 5%,
+    transparent
+  );
+}
+
+.sidebar-tabs button {
+  min-width: 0;
+  height: 27px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--color-token-text-secondary);
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--text-sm);
+  font-weight: var(--font-weight-medium);
+  transition:
+    background-color var(--duration-fast) var(--ease-standard),
+    color var(--duration-fast) var(--ease-standard),
+    box-shadow var(--duration-fast) var(--ease-standard);
+}
+
+.sidebar-tabs button:hover {
+  color: var(--color-token-text-primary);
+}
+
+.sidebar-tabs button.active {
+  background: var(--color-token-bg-primary);
+  box-shadow: 0 1px 2px color-mix(in oklab, black 10%, transparent);
+  color: var(--color-token-text-primary);
+}
+
+.sidebar-tabs button:focus-visible {
+  outline: 2px solid
+    color-mix(in oklab, var(--color-token-text-primary) 45%, transparent);
+  outline-offset: 1px;
+}
+
+/* Threads-tab body. The filter row stays pinned while only the rows scroll,
+   so this panel does not scroll itself. */
+.sidebar-tab-panel {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+}
+
+/* The Threads tab shows the chat list directly — no filter row. All and
+   Favorites stay exclusive to the L2 recent rail. */
+.sidebar-tab-panel > .sidebar-recent-rows {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
 .sidebar-scroll-area {
   display: flex;
   flex: 1 1 auto;

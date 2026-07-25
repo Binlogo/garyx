@@ -62,6 +62,22 @@ export function recentConversationPresentation(
   return { emptyLabelKey, footerKind: "hidden" };
 }
 
+/**
+ * Drop threads that are already shown in the sidebar's Pinned region.
+ *
+ * Presentation-only, matching iOS (`GaryxHomeThreadListPresentation.swift`):
+ * ordering and membership still come from the server-owned unit, and the keyset
+ * pager keeps paging over the unfiltered feed. A page containing pinned rows
+ * therefore renders slightly short, which is expected — the near-tail loader
+ * simply asks for the next page sooner.
+ */
+export function excludePinnedFromRecent<T extends { id: string }>(
+  threads: readonly T[],
+  pinnedThreadIds: ReadonlySet<string>,
+): T[] {
+  return threads.filter((thread) => !pinnedThreadIds.has(thread.id));
+}
+
 export function recentFilterForArrowKey(
   current: RecentThreadFilter,
   key: "ArrowLeft" | "ArrowRight",

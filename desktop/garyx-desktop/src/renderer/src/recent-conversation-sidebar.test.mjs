@@ -2,10 +2,65 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  excludePinnedFromRecent,
   recentConversationPresentation,
   recentFilterForArrowKey,
 } from "./recent-conversation-sidebar-model.ts";
 import { threadRailIsNearListEnd } from "./thread-conversation-sidebar-model.ts";
+
+test("the recent list drops pinned threads and preserves server order", () => {
+  const threads = [
+    { id: "a" },
+    { id: "b" },
+    { id: "c" },
+    { id: "d" },
+  ];
+
+  assert.deepEqual(
+    excludePinnedFromRecent(threads, new Set(["b", "d"])).map((t) => t.id),
+    ["a", "c"],
+  );
+  // No pins: every row survives, order untouched.
+  assert.deepEqual(
+    excludePinnedFromRecent(threads, new Set()).map((t) => t.id),
+    ["a", "b", "c", "d"],
+  );
+  // Pins that are not in the feed change nothing.
+  assert.deepEqual(
+    excludePinnedFromRecent(threads, new Set(["zz"])).map((t) => t.id),
+    ["a", "b", "c", "d"],
+  );
+  // Every row pinned is an empty list, not a fallback to the unfiltered feed.
+  assert.deepEqual(
+    excludePinnedFromRecent(threads, new Set(["a", "b", "c", "d"])),
+    [],
+  );
+  assert.deepEqual(excludePinnedFromRecent([], new Set(["a"])), []);
+  // Ids are matched exactly; near-misses stay visible.
+  assert.deepEqual(
+    excludePinnedFromRecent(threads, new Set([" a", "A"])).map((t) => t.id),
+    ["a", "b", "c", "d"],
+  );
+  // The input is never mutated.
+  assert.equal(threads.length, 4);
+});
+
+test("an all-pinned page still reads as primed, not as an empty feed", () => {
+  // The pager keeps paging the unfiltered server unit, so a page whose rows are
+  // all pinned renders empty while the feed is healthy. It must not claim a
+  // loading state, and the near-tail loader stays available to fetch more.
+  const feed = {
+    isPrimed: true,
+    isRefreshingHead: false,
+    isLoadingMore: false,
+    headFailure: null,
+    loadGate: "ready",
+    nextCursor: "cursor-2",
+  };
+  const presentation = recentConversationPresentation(feed, 0, "all");
+  assert.equal(presentation.footerKind, "idle");
+  assert.equal(presentation.emptyLabelKey, "No recent threads");
+});
 
 test("Recent segmented tabs switch with both arrow keys", () => {
   assert.equal(recentFilterForArrowKey("nonTask", "ArrowRight"), "all");

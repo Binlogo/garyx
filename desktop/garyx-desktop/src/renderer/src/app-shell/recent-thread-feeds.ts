@@ -827,9 +827,25 @@ export function selectedRecentThreadSummaries(
   state: RecentThreadFeedsState,
 ): DesktopThreadSummary[] {
   const feed = selectedRecentThreadFeed(state);
-  if (!feed) {
-    return [];
-  }
+  return feed ? recentThreadSummariesForFeed(state, feed) : [];
+}
+
+/**
+ * Summaries for one specific paginated feed, independent of `selectedFilter`.
+ * The sidebar's Threads tab is defined as the Chats list, so it reads its feed
+ * by name rather than following the L2 rail's filter selection.
+ */
+export function recentThreadSummariesForFilter(
+  state: RecentThreadFeedsState,
+  filter: PaginatedRecentThreadFilter,
+): DesktopThreadSummary[] {
+  return recentThreadSummariesForFeed(state, state.feeds[filter]);
+}
+
+function recentThreadSummariesForFeed(
+  state: RecentThreadFeedsState,
+  feed: RecentThreadFeedState,
+): DesktopThreadSummary[] {
   return feed.orderedThreadIds.flatMap((id) => {
     const summary = state.summariesById[id];
     return summary ? [summary] : [];

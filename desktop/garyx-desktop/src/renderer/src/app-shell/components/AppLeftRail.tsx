@@ -5,7 +5,9 @@ import type { DesktopWorkspace } from '@shared/contracts';
 import { SETTINGS_TABS, type SettingsTabId } from '../../settings-tabs';
 import { BotSidebar } from '../../BotSidebar';
 import { PinnedThreadsSidebar, type PinnedThreadRow } from '../../PinnedThreadsSidebar';
+import { SidebarTabs } from '../../SidebarTabs';
 import { WorkspaceThreadSidebar } from '../../WorkspaceThreadSidebar';
+import type { SidebarTab } from '../../sidebar-tab-model';
 import { UpdatePill } from './UpdatePill';
 import { buildBotGroups } from '../../bot-console-model';
 import { buildWorkspaceThreadGroups } from '../../thread-model';
@@ -25,6 +27,10 @@ import { useI18n } from '../../i18n';
 
 type AppLeftRailProps = {
   gatewayIdentitySlot?: React.ReactNode;
+  /** Threads-tab body: the recent thread list, owned by AppShell. */
+  recentThreadsSlot?: React.ReactNode;
+  sidebarTab: SidebarTab;
+  onSelectSidebarTab: (tab: SidebarTab) => void;
   isSettingsView: boolean;
   isAutomationView: boolean;
   isCapsulesView: boolean;
@@ -75,6 +81,9 @@ type AppLeftRailProps = {
 
 export function AppLeftRail({
   gatewayIdentitySlot,
+  recentThreadsSlot,
+  sidebarTab,
+  onSelectSidebarTab,
   isSettingsView,
   isAutomationView,
   isCapsulesView,
@@ -228,42 +237,53 @@ export function AppLeftRail({
             </button>
           </nav>
 
-          <div className="sidebar-scroll-area">
-            <PinnedThreadsSidebar
-              formatThreadTimestamp={formatThreadTimestamp}
-              onArchiveThread={onArchivePinnedThread}
-              onDragCancel={onPinnedThreadDragCancel}
-              onDragStart={onPinnedThreadDragStart}
-              onOpenThread={onOpenPinnedThread}
-              onReorderThreads={onReorderPinnedThreads}
-              onUnpinThread={onUnpinThread}
-              rows={pinnedThreadRows}
-              syncPending={pinnedThreadSyncPending}
-            />
+          {/* Pinned is its own region: always visible, in neither tab. */}
+          {pinnedThreadRows.length ? (
+            <div className="sidebar-pinned-region">
+              <PinnedThreadsSidebar
+                formatThreadTimestamp={formatThreadTimestamp}
+                onArchiveThread={onArchivePinnedThread}
+                onDragCancel={onPinnedThreadDragCancel}
+                onDragStart={onPinnedThreadDragStart}
+                onOpenThread={onOpenPinnedThread}
+                onReorderThreads={onReorderPinnedThreads}
+                onUnpinThread={onUnpinThread}
+                rows={pinnedThreadRows}
+                syncPending={pinnedThreadSyncPending}
+              />
+            </div>
+          ) : null}
 
-            <BotSidebar
-              activeConversationGroupId={activeBotConversationGroupId}
-              groups={botGroups}
-              onAddBot={onAddBot}
-              onOpenBot={onOpenBot}
-              onToggleConversationGroup={onToggleBotConversationGroup}
-              selectedThreadId={visibleSelectedThreadId}
-            />
+          <SidebarTabs onSelectTab={onSelectSidebarTab} selectedTab={sidebarTab} />
 
-            <WorkspaceThreadSidebar
-              activeThreadId={visibleSelectedThreadId}
-              gatewayHome={gatewayHome}
-              onAddWorkspace={onAddWorkspace}
-              onCreateThreadForWorkspace={onCreateThreadForWorkspace}
-              onOpenThread={onOpenPinnedThread}
-              onPinWorkspace={onPinWorkspace}
-              onRequestRemoveWorkspace={onRequestRemoveWorkspace}
-              setWorkspaceMenuOpenPath={setWorkspaceMenuOpenPath}
-              workspaceMenuOpenPath={workspaceMenuOpenPath}
-              workspaceMutation={workspaceMutation}
-              workspaceThreadGroups={workspaceThreadGroups}
-            />
-          </div>
+          {sidebarTab === 'threads' ? (
+            <div className="sidebar-tab-panel">{recentThreadsSlot ?? null}</div>
+          ) : (
+            <div className="sidebar-scroll-area">
+              <BotSidebar
+                activeConversationGroupId={activeBotConversationGroupId}
+                groups={botGroups}
+                onAddBot={onAddBot}
+                onOpenBot={onOpenBot}
+                onToggleConversationGroup={onToggleBotConversationGroup}
+                selectedThreadId={visibleSelectedThreadId}
+              />
+
+              <WorkspaceThreadSidebar
+                activeThreadId={visibleSelectedThreadId}
+                gatewayHome={gatewayHome}
+                onAddWorkspace={onAddWorkspace}
+                onCreateThreadForWorkspace={onCreateThreadForWorkspace}
+                onOpenThread={onOpenPinnedThread}
+                onPinWorkspace={onPinWorkspace}
+                onRequestRemoveWorkspace={onRequestRemoveWorkspace}
+                setWorkspaceMenuOpenPath={setWorkspaceMenuOpenPath}
+                workspaceMenuOpenPath={workspaceMenuOpenPath}
+                workspaceMutation={workspaceMutation}
+                workspaceThreadGroups={workspaceThreadGroups}
+              />
+            </div>
+          )}
 
           <div className="sidebar-footer">
             {gatewayIdentitySlot ?? (

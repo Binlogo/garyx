@@ -1,37 +1,9 @@
-import {
-  type PointerEvent as ReactPointerEvent,
-  type ReactNode,
-  useEffect,
-  useRef,
-  useState,
-} from 'react';
-import { Archive, PanelLeftClose, StarOff } from 'lucide-react';
+import { type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
+import { PanelLeftClose } from 'lucide-react';
 
-import { AgentOptionAvatar } from './app-shell/components/AgentOptionAvatar';
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from './components/ui/tooltip';
-import { useI18n } from './i18n';
-import type { ThreadAvatarIdentity } from './thread-avatar';
-import { threadRailIsNearListEnd } from './thread-conversation-sidebar-model';
+import { ThreadRailList, type ThreadRailRow } from './ThreadRailList';
 
-export type ThreadRailRow = {
-  /** Stable React key and inline-confirm key. */
-  key: string;
-  title: string;
-  titleTooltip?: string;
-  time?: string | null;
-  avatar?: ThreadAvatarIdentity | null;
-  /** Translation key for an inline status badge (e.g. bot thread state). */
-  badge?: string | null;
-  isActive: boolean;
-  isBusy?: boolean;
-  /** Defaults to true; when false the row is rendered disabled. */
-  openable?: boolean;
-  onOpen: () => void;
-  /** Per-row archive handler. Omit to render the row without an action. */
-  onArchive?: () => void;
-  /** Favorites-only immediate removal action, rendered before Archive. */
-  onUnfavorite?: () => void;
-};
+export type { ThreadRailRow } from './ThreadRailList';
 
 type ThreadConversationSidebarProps = {
   ariaLabel: string;
@@ -60,8 +32,10 @@ type ThreadConversationSidebarProps = {
 
 /**
  * Shared secondary "thread list" rail behind Workspaces, Bots, and Recent.
- * Each caller maps its data into {@link ThreadRailRow}s. Row accessories are
- * composable; omit both handlers for a read-only row.
+ * Each caller maps its data into {@link ThreadRailRow}s. This shell owns the
+ * L2 rail chrome — logo, title, collapse control, resizer — and delegates the
+ * scrollable rows to {@link ThreadRailList}, which the L1 sidebar Threads tab
+ * composes without any of this chrome.
  */
 export function ThreadConversationSidebar({
   ariaLabel,
@@ -81,34 +55,7 @@ export function ThreadConversationSidebar({
   onRailResizeStart,
   railResizing,
 }: ThreadConversationSidebarProps) {
-  const { t } = useI18n();
-  const [confirmKey, setConfirmKey] = useState<string | null>(null);
-  const confirmTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const listRef = useRef<HTMLDivElement | null>(null);
-
-  useEffect(() => {
-    if (!confirmKey) {
-      return;
-    }
-    confirmTimerRef.current = setTimeout(() => {
-      setConfirmKey(null);
-    }, 3000);
-    return () => {
-      if (confirmTimerRef.current) {
-        clearTimeout(confirmTimerRef.current);
-      }
-    };
-  }, [confirmKey]);
-
-  useEffect(() => {
-    const list = listRef.current;
-    if (onNearListEnd && list && threadRailIsNearListEnd(list)) {
-      onNearListEnd();
-    }
-  }, [listFooter, onNearListEnd, rows.length]);
-
   return (
-    <TooltipProvider>
     <aside aria-label={ariaLabel} className={`bot-conversation-rail ${className ?? ''}`.trim()}>
       <div className="bot-conversation-header">
         <div className="bot-conversation-heading">
@@ -132,139 +79,15 @@ export function ThreadConversationSidebar({
 
       {headerAccessory ?? null}
 
-      <div
-        className="bot-conversation-list"
-        onScroll={(event) => {
-          if (onNearListEnd && threadRailIsNearListEnd(event.currentTarget)) {
-            onNearListEnd();
-          }
-        }}
-        ref={listRef}
-      >
-        {rows.length ? (
-          rows.map((row) => {
-            const hasAction = Boolean(row.onArchive || row.onUnfavorite);
-            const isConfirming = confirmKey === row.key;
-            const openable = row.openable !== false;
-            return (
-              <div
-                className={`bot-conversation-row-shell ${rowClassName ?? ''} ${row.isActive ? 'active' : ''} ${hasAction ? '' : 'no-delete'}`
-                  .replace(/\s+/g, ' ')
-                  .trim()}
-                key={row.key}
-                onMouseLeave={() => {
-                  if (confirmKey === row.key) {
-                    setConfirmKey(null);
-                  }
-                }}
-              >
-                <button
-                  aria-current={row.isActive ? 'page' : undefined}
-                  className={`bot-conversation-row ${row.avatar ? 'with-avatar' : ''}`.trim()}
-                  disabled={!openable}
-                  onClick={() => {
-                    if (openable) {
-                      row.onOpen();
-                    }
-                  }}
-                  type="button"
-                >
-                  {row.avatar ? (
-                    <span className="thread-row-avatar-wrap">
-                      <AgentOptionAvatar
-                        agentId={row.avatar.agentId}
-                        avatarDataUrl={row.avatar.avatarDataUrl}
-                        className="thread-row-agent-avatar"
-                        kind={row.avatar.kind}
-                        label={row.avatar.label}
-                        providerIcon={row.avatar.providerIcon}
-                        providerType={row.avatar.providerType}
-                        size="default"
-                      />
-                      {row.isBusy ? (
-                        <span aria-label={t('Loading')} className="thread-row-typing-badge" role="status">
-                          <span />
-                          <span />
-                          <span />
-                        </span>
-                      ) : null}
-                    </span>
-                  ) : null}
-                  <div className="bot-conversation-row-main">
-                    <span className="bot-conversation-row-title" title={row.titleTooltip ?? row.title}>
-                      {row.title}
-                    </span>
-                    {row.badge ? <span className="bot-thread-badge">{t(row.badge)}</span> : null}
-                  </div>
-                  <span className="bot-conversation-row-time">{formatThreadTimestamp(row.time)}</span>
-                </button>
-                {hasAction ? (
-                  <>
-                    {row.onUnfavorite && !isConfirming ? (
-                      <Tooltip>
-                        <TooltipTrigger asChild>
-                          <button
-                            aria-label={t('Unfavorite conversation')}
-                            className="thread-delete-button thread-unfavorite-button"
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              row.onUnfavorite?.();
-                            }}
-                            tabIndex={-1}
-                            type="button"
-                          >
-                            <StarOff aria-hidden />
-                          </button>
-                        </TooltipTrigger>
-                        <TooltipContent>{t('Unfavorite conversation')}</TooltipContent>
-                      </Tooltip>
-                    ) : null}
-                    {row.onArchive ? (
-                      isConfirming ? (
-                        <button
-                          aria-label={t('Confirm archive {name}', { name: row.title })}
-                          className="thread-delete-button confirm"
-                          style={{ opacity: 1, pointerEvents: 'auto' }}
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            setConfirmKey(null);
-                            row.onArchive?.();
-                          }}
-                          tabIndex={-1}
-                          type="button"
-                        >
-                          {t('Confirm')}
-                        </button>
-                      ) : (
-                        <Tooltip>
-                          <TooltipTrigger asChild>
-                            <button
-                              aria-label={t('Archive {name}', { name: row.title })}
-                              className="thread-delete-button"
-                              onClick={(event) => {
-                                event.stopPropagation();
-                                setConfirmKey(row.key);
-                              }}
-                              tabIndex={-1}
-                              type="button"
-                            >
-                              <Archive aria-hidden />
-                            </button>
-                          </TooltipTrigger>
-                          <TooltipContent>{t('Archive thread')}</TooltipContent>
-                        </Tooltip>
-                      )
-                    ) : null}
-                  </>
-                ) : null}
-              </div>
-            );
-          })
-        ) : emptyLabel ? (
-          <p className="workspace-empty-note">{emptyLabel}</p>
-        ) : null}
-        {listFooter ?? null}
-      </div>
+      <ThreadRailList
+        emptyLabel={emptyLabel}
+        formatThreadTimestamp={formatThreadTimestamp}
+        listFooter={listFooter}
+        onNearListEnd={onNearListEnd}
+        rowClassName={rowClassName}
+        rows={rows}
+      />
+
       {onRailResizeStart ? (
         <div
           className={`sidebar-resizer ${railResizing ? 'is-resizing' : ''}`}
@@ -274,6 +97,5 @@ export function ThreadConversationSidebar({
         </div>
       ) : null}
     </aside>
-    </TooltipProvider>
   );
 }

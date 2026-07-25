@@ -344,6 +344,8 @@ const zhCN: Record<string, string> = {
   'Thread actions': '对话操作',
   'Thread title': '线程标题',
   'Threads': '线程',
+  'Projects': '项目',
+  'Sidebar sections': '侧边栏分区',
   'Thinking': '思考中',
   'Last 24 hours': '最近 24 小时',
   'Last scan': '上次扫描',

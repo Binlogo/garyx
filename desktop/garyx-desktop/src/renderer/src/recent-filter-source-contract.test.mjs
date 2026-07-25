@@ -6,6 +6,17 @@ const recentSidebar = readFileSync(
   new URL("./RecentConversationSidebar.tsx", import.meta.url),
   "utf8",
 );
+// The recent feed has two renderers — the L1 sidebar Threads tab and the L2
+// recent rail — so the filter segmented control and the row list each live in
+// one shared module instead of being copied into both surfaces.
+const filterTabs = readFileSync(
+  new URL("./RecentFilterTabs.tsx", import.meta.url),
+  "utf8",
+);
+const sidebarRecentList = readFileSync(
+  new URL("./SidebarRecentThreadList.tsx", import.meta.url),
+  "utf8",
+);
 const appShell = readFileSync(
   new URL("./app-shell/AppShell.tsx", import.meta.url),
   "utf8",
@@ -15,7 +26,7 @@ const conversationHeader = readFileSync(
   "utf8",
 );
 const sharedThreadRail = readFileSync(
-  new URL("./ThreadConversationSidebar.tsx", import.meta.url),
+  new URL("./ThreadRailList.tsx", import.meta.url),
   "utf8",
 );
 const workspaceRails = readFileSync(
@@ -36,13 +47,44 @@ const main = readFileSync(
 );
 
 test("Recent tabs expose the required accessible segmented semantics", () => {
-  assert.match(recentSidebar, /aria-label=\{t\("Recent filter"\)\}/);
-  assert.match(recentSidebar, /role="tablist"/);
-  assert.match(recentSidebar, /role="tab"/);
-  assert.match(recentSidebar, /aria-selected=\{selected\}/);
-  assert.match(recentSidebar, /"favorites"/);
-  assert.match(recentSidebar, /event\.key !== "ArrowLeft"/);
-  assert.match(recentSidebar, /event\.key !== "ArrowRight"/);
+  assert.match(filterTabs, /aria-label=\{t\("Recent filter"\)\}/);
+  assert.match(filterTabs, /role="tablist"/);
+  assert.match(filterTabs, /role="tab"/);
+  assert.match(filterTabs, /aria-selected=\{selected\}/);
+  assert.match(filterTabs, /"favorites"/);
+  assert.match(filterTabs, /event\.key !== "ArrowLeft"/);
+  assert.match(filterTabs, /event\.key !== "ArrowRight"/);
+});
+
+test("the filter control belongs to the rail, never to the sidebar tab", () => {
+  // The L2 rail composes the shared control rather than inlining a tablist.
+  assert.match(recentSidebar, /import \{ RecentFilterTabs \}/);
+  assert.match(recentSidebar, /<RecentFilterTabs/);
+  assert.doesNotMatch(recentSidebar, /role="tablist"/);
+  // The sidebar's Threads tab shows the chat list directly: no filter control,
+  // and no filter selection plumbing at all.
+  assert.doesNotMatch(sidebarRecentList, /RecentFilterTabs/);
+  assert.doesNotMatch(sidebarRecentList, /role="tablist"/);
+  assert.doesNotMatch(sidebarRecentList, /selectedFilter/);
+  assert.doesNotMatch(sidebarRecentList, /onSelectFilter/);
+  assert.doesNotMatch(sidebarRecentList, /favorites/);
+});
+
+test("the sidebar Threads tab is bound to the Chats feed by name", () => {
+  // It must not follow the rail's selectedFilter, so the hook keeps that feed
+  // refreshed while the tab is showing and exposes it by name.
+  assert.match(appShell, /keepChatsFeedActive: sidebarTab === "threads"/);
+  assert.match(appShell, /feed=\{recentThreadFeeds\.chatsFeed\}/);
+  assert.match(appShell, /onLoadMore=\{recentThreadFeeds\.loadMoreChats\}/);
+  assert.match(appShell, /onRetry=\{recentThreadFeeds\.retryChats\}/);
+  assert.match(hook, /keepChatsFeedActive && !filters\.includes\("nonTask"\)/);
+  assert.match(hook, /chatsThreads: recentThreadSummariesForFilter\(/);
+  // The Chats list never carries the Favorites-only unfavorite accessory.
+  assert.match(appShell, /threadRailRowsFrom\(sidebarChatRows, false\)/);
+  assert.match(
+    appShell,
+    /threadRailRowsFrom\(recentThreadRows, showingFavoriteThreads\)/,
+  );
 });
 
 test("Desktop favorite controls share the pin menu and Favorites row accessory", () => {
@@ -62,7 +104,9 @@ test("Desktop favorite controls share the pin menu and Favorites row accessory",
     workspaceRails,
     /\.thread-delete-button\.thread-unfavorite-button\s*\{\s*right: 32px;/,
   );
-  assert.match(appShell, /onUnfavorite: showingFavoriteThreads/);
+  // The unfavorite accessory is gated per surface by the shared row mapper;
+  // only the rail's Favorites filter enables it (asserted in detail below).
+  assert.match(appShell, /onUnfavorite: allowUnfavorite/);
   assert.match(appShell, /onArchive: row\.isBusy/);
 });
 
@@ -88,6 +132,38 @@ test("AppShell owns the feed hook outside the conditional rail", () => {
     /onTaskCreated=\{\(\) => \{\s*recentThreadFeeds\.noteAllLocalMutation\(\);\s*recentThreadFeeds\.refreshAll\(\);/,
   );
   assert.match(hook, /queuedRefreshesRef\.current\.add\("all"\)/);
+});
+
+test("one feed serves both recent surfaces and either consumer keeps it alive", () => {
+  // The L1 Threads tab and the L2 recent rail share one hook, one filter
+  // selection, one pager, and one row mapping. Neither may fetch on its own.
+  assert.match(
+    appShell,
+    /const recentFeedWanted =\s*\n?\s*sidebarTab === "threads" \|\|\s*\n?\s*\(shouldShowConversationRail && recentThreadsRailOpen\);/,
+  );
+  assert.match(appShell, /enabled: recentFeedWanted/);
+  const hookOwner = appShell.indexOf("const recentThreadFeeds = useRecentThreadFeeds");
+  const rowMapper = appShell.indexOf("function threadRailRowsFrom(");
+  assert.ok(rowMapper > hookOwner);
+  // One hook, one row mapper, one presentation model behind both surfaces.
+  assert.equal(
+    appShell.match(/useRecentThreadFeeds\(\{/g)?.length,
+    1,
+    "a second feed hook would give the surfaces divergent data",
+  );
+  assert.equal(appShell.match(/threadRailRowsFrom\(/g)?.length, 3);
+  assert.match(sidebarRecentList, /recentConversationPresentation/);
+  // Collapse must not gate the feed: expanding L1 shows data immediately.
+  assert.doesNotMatch(appShell, /enabled:[^\n]*sidebarCollapsed/);
+});
+
+test("the recent list never repeats the sidebar's pinned region", () => {
+  // Pinned threads have their own always-visible region, so both recent
+  // surfaces must exclude them — derived once, not per view.
+  assert.match(appShell, /excludePinnedFromRecent\(/);
+  assert.match(appShell, /pinnedThreadIdSet,\s*\n\s*\),/);
+  assert.doesNotMatch(recentSidebar, /excludePinnedFromRecent/);
+  assert.doesNotMatch(sidebarRecentList, /excludePinnedFromRecent/);
 });
 
 test("closing Recent retains its content until the layout frame releases the rail", () => {
