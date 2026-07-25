@@ -234,13 +234,13 @@ pub(super) fn initialize_connection(conn: &Connection) -> GaryxDbResult<()> {
             last_delivery_updated_at TEXT,
             default_list_hidden INTEGER NOT NULL DEFAULT 0,
             sort_updated_at_us INTEGER NOT NULL DEFAULT 0,
-            search_text TEXT NOT NULL DEFAULT '',
+            search_title TEXT NOT NULL DEFAULT '',
             provider_key TEXT,
             selected_model TEXT,
             selected_model_reasoning_effort TEXT,
             selected_model_service_tier TEXT,
             sdk_session_id TEXT,
-            projection_version INTEGER NOT NULL DEFAULT 6,
+            projection_version INTEGER NOT NULL DEFAULT 7,
             projected_at TEXT NOT NULL
         ) STRICT;
 
@@ -870,10 +870,10 @@ pub(super) fn ensure_thread_meta_projection_columns(conn: &Connection) -> GaryxD
             [],
         )?;
     }
-    if !columns.contains("search_text") {
+    if !columns.contains("search_title") {
         conn.execute(
             "ALTER TABLE thread_meta
-             ADD COLUMN search_text TEXT NOT NULL DEFAULT ''",
+             ADD COLUMN search_title TEXT NOT NULL DEFAULT ''",
             [],
         )?;
     }

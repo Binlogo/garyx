@@ -4634,19 +4634,38 @@ async fn thread_summaries_cursor_binds_scope_tasks_canonical_query_and_incarnati
 #[tokio::test]
 async fn thread_summaries_q_trim_empty_and_scalar_limits_are_server_canonical() {
     let state = AppStateBuilder::new(test_config()).build();
-    state
-        .threads
-        .thread_store
-        .set(
+    for (thread_id, row) in [
+        (
             "thread::q-boundary",
             json!({
                 "thread_id": "thread::q-boundary",
                 "label": "Boundary",
                 "workspace_dir": "/workspace/q"
             }),
-        )
-        .await
-        .unwrap();
+        ),
+        (
+            "thread::q-empty-title",
+            json!({
+                "thread_id": "thread::q-empty-title",
+                "workspace_dir": "/workspace/q"
+            }),
+        ),
+        (
+            "thread::q-whitespace-title",
+            json!({
+                "thread_id": "thread::q-whitespace-title",
+                "label": " \t ",
+                "workspace_dir": "/workspace/q"
+            }),
+        ),
+    ] {
+        state
+            .threads
+            .thread_store
+            .set(thread_id, row)
+            .await
+            .unwrap();
+    }
     let router = build_router(state);
 
     let (status, omitted) = authed_get_json(&router, "/api/thread-summaries").await;
@@ -4654,6 +4673,16 @@ async fn thread_summaries_q_trim_empty_and_scalar_limits_are_server_canonical() 
     let (status, blank) = authed_get_json(&router, "/api/thread-summaries?q=%20%20%20").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(blank, omitted);
+    assert_eq!(omitted["threads"].as_array().unwrap().len(), 3);
+    assert_eq!(
+        omitted["threads"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|row| row["title"].is_null())
+            .count(),
+        2
+    );
 
     for (query, expected_status) in [
         ("a".repeat(100), StatusCode::OK),
@@ -4684,7 +4713,7 @@ async fn thread_summaries_q_trim_empty_and_scalar_limits_are_server_canonical() 
 }
 
 #[tokio::test]
-async fn thread_summaries_instr_search_handles_unicode_literals_nul_and_all_four_fields() {
+async fn thread_summaries_instr_search_is_title_only_and_preserves_unicode_literals_and_nul() {
     let state = AppStateBuilder::new(test_config()).build();
     for (thread_id, row) in [
         (
@@ -4727,10 +4756,28 @@ async fn thread_summaries_instr_search_handles_unicode_literals_nul_and_all_four
             "thread::search-fields",
             json!({
                 "thread_id": "thread::search-fields",
+                "label": "Findable Thread Title",
                 "workspace_dir": "/workspace/ÉquipeScope",
                 "agent_id": "AgentStraße",
-                "last_assistant_preview": "PreviewΣς",
+                "last_user_preview": "PreviewΣς",
                 "updated_at": "2026-07-17T00:00:00Z"
+            }),
+        ),
+        (
+            "thread::search-empty-title",
+            json!({
+                "thread_id": "thread::search-empty-title",
+                "workspace_dir": "/workspace/OnlyWorkspaceNeedle",
+                "agent_id": "OnlyAgentNeedle",
+                "last_user_preview": "OnlyPreviewNeedle"
+            }),
+        ),
+        (
+            "thread::search-whitespace-title",
+            json!({
+                "thread_id": "thread::search-whitespace-title",
+                "label": " \t ",
+                "workspace_dir": "/workspace/WhitespaceNeedle"
             }),
         ),
     ] {
@@ -4746,11 +4793,9 @@ async fn thread_summaries_instr_search_handles_unicode_literals_nul_and_all_four
     for (query, expected) in [
         ("CAFE\u{301}", vec!["thread::search-unicode"]),
         ("éCLAIR", vec!["thread::search-unicode"]),
-        (
-            "STRASSE",
-            vec!["thread::search-unicode", "thread::search-fields"],
-        ),
+        ("STRASSE", vec!["thread::search-unicode"]),
         ("σσ token", vec!["thread::search-unicode"]),
+        ("findable thread", vec!["thread::search-fields"]),
         (
             "%",
             vec!["thread::search-fullwidth", "thread::search-literals"],
@@ -4769,9 +4814,13 @@ async fn thread_summaries_instr_search_handles_unicode_literals_nul_and_all_four
             vec!["thread::search-fullwidth", "thread::search-literals"],
         ),
         ("b\0c", vec!["thread::search-nul"]),
-        ("e\u{301}quipescope", vec!["thread::search-fields"]),
-        ("agentstrasse", vec!["thread::search-fields"]),
-        ("previewσσ", vec!["thread::search-fields"]),
+        ("e\u{301}quipescope", vec![]),
+        ("agentstrasse", vec![]),
+        ("previewσσ", vec![]),
+        ("onlyworkspaceneedle", vec![]),
+        ("onlyagentneedle", vec![]),
+        ("onlypreviewneedle", vec![]),
+        ("whitespaceneedle", vec![]),
     ] {
         let uri = format!(
             "/api/thread-summaries?q={}&limit=100",
@@ -4791,8 +4840,9 @@ async fn thread_summaries_instr_search_handles_unicode_literals_nul_and_all_four
             "query {query:?}"
         );
     }
-    let (_, fields) = authed_get_json(&router, "/api/thread-summaries?q=agentstrasse").await;
-    assert_eq!(fields["threads"][0]["title"], Value::Null);
+    let (_, fields) = authed_get_json(&router, "/api/thread-summaries?q=thread%20title").await;
+    assert_eq!(fields["threads"][0]["thread_id"], "thread::search-fields");
+    assert_eq!(fields["threads"][0]["title"], "Findable Thread Title");
 }
 
 #[tokio::test]

@@ -36,12 +36,7 @@ pub(crate) fn thread_meta_projection_from_thread_data_with_active_run(
     let agent_id = agent_id_from_value(data);
     let sort_updated_at_us =
         summary_sort_updated_at_us(thread_updated_at.as_deref(), created_at.as_deref());
-    let search_text = summary_search_text(
-        thread_label.as_deref(),
-        workspace_dir.as_deref(),
-        agent_id.as_deref(),
-        last_message_preview.as_deref(),
-    );
+    let search_title = summary_search_title(thread_label.as_deref());
     let recent_run_id = data
         .get("history")
         .and_then(|history| history.get("recent_committed_run_ids"))
@@ -97,7 +92,7 @@ pub(crate) fn thread_meta_projection_from_thread_data_with_active_run(
         last_delivery_updated_at: last_delivery.and_then(|(_, updated_at)| updated_at),
         default_list_hidden: is_default_thread_list_hidden(data),
         sort_updated_at_us,
-        search_text,
+        search_title,
         root_workspace_path: workspace_membership.root_workspace_path,
         workspace_origin: Some(workspace_membership.workspace_origin),
     };
@@ -126,19 +121,8 @@ fn parse_rfc3339_micros(value: &str) -> Option<i64> {
         .map(|timestamp| timestamp.timestamp_micros())
 }
 
-fn summary_search_text(
-    title: Option<&str>,
-    workspace_dir: Option<&str>,
-    agent_id: Option<&str>,
-    last_message_preview: Option<&str>,
-) -> String {
-    normalize_for_search(&format!(
-        "{}\n{}\n{}\n{}",
-        title.unwrap_or_default(),
-        workspace_dir.unwrap_or_default(),
-        agent_id.unwrap_or_default(),
-        last_message_preview.unwrap_or_default(),
-    ))
+pub(crate) fn summary_search_title(title: Option<&str>) -> String {
+    normalize_for_search(title.unwrap_or_default())
 }
 
 /// Channel endpoint rows for one thread record: one row per binding the
@@ -243,9 +227,9 @@ mod tests {
     }
 
     #[test]
-    fn summary_projection_derives_sort_fallback_and_four_field_search_text() {
+    fn summary_projection_derives_sort_fallback_and_title_only_search() {
         let data = json!({
-            "label": "Straße",
+            "label": "CAFÉ Straße",
             "workspace_dir": "/workspace/Équipe",
             "agent_id": "Σς",
             "updated_at": "not-a-timestamp",
@@ -266,9 +250,12 @@ mod tests {
                 .timestamp_micros()
         );
         assert_eq!(
-            projected.search_text,
-            normalize_for_search("Straße\n/workspace/Équipe\nΣς\n％＿＼\0Tail")
+            projected.search_title,
+            normalize_for_search("Cafe\u{301} Straße")
         );
+        assert!(!projected.search_title.contains("workspace"));
+        assert!(!projected.search_title.contains("σσ"));
+        assert!(!projected.search_title.contains("tail"));
 
         let missing = thread_meta_projection_from_thread_data_with_active_run(
             "thread::summary-missing-time",
@@ -277,5 +264,22 @@ mod tests {
         )
         .unwrap();
         assert_eq!(missing.thread_meta.sort_updated_at_us, 0);
+        assert_eq!(missing.thread_meta.search_title, "");
+
+        let whitespace = thread_meta_projection_from_thread_data_with_active_run(
+            "thread::summary-whitespace-title",
+            &json!({"label": " \t "}),
+            None,
+        )
+        .unwrap();
+        assert_eq!(whitespace.thread_meta.search_title, "");
+        assert_eq!(
+            summary_search_title(Some("Straße")),
+            summary_search_title(Some("STRASSE"))
+        );
+        assert_eq!(
+            summary_search_title(Some("CAFÉ")),
+            summary_search_title(Some("Cafe\u{301}"))
+        );
     }
 }
