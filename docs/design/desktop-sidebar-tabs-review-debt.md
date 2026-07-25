@@ -59,3 +59,37 @@ reference its own tabpanel, which means keeping every panel mounted, and the
 Threads panel holds hundreds of rows. A single dynamic panel with two tabs
 pointing at it is worse than either option — it tells assistive tech that the
 inactive tab controls the panel the active one labels.
+
+## 6. No DOM-interaction test path for shared components
+
+Shipped as debt by owner decision (2026-07-25) after review of #TASK-2708
+confirmed the runtime behaviour correct but the test contract incomplete.
+
+Two gaps, both verified by the reviewer with mutation testing:
+
+1. **Event wiring is unobservable.** Deleting `onKeyDown` from
+   `components/SegmentedControl.tsx` leaves `segmented-control.test.mjs` at 9/9
+   PASS. The suite renders through `renderToStaticMarkup`, and SSR markup cannot
+   express React event handlers, so a refactor that drops the binding would kill
+   all four arrow keys silently.
+2. **Two of four callers are uncovered.** Only `SidebarTabs` and
+   `RecentFilterTabs` are light enough to render in the SSR harness.
+   `TasksPanel` and `CapsulesPanel` depend on the desktop API. Deleting
+   `layout="inline"` from the Tasks call site regresses it to the fill layout
+   while `tsc`, the focused suite, and all 1007 unit tests stay green.
+
+The repository has no DOM-mount infrastructure at all: no jsdom, linkedom, or
+happy-dom, and no test uses `createRoot` or `dispatchEvent`. Closing these needs
+one of:
+
+- a jsdom (or similar) devDependency plus a mount-and-dispatch helper, or
+- a Playwright component-interaction path, reusing the installed Playwright.
+
+Whichever is chosen, do **not** close them by reintroducing source-scanning
+regex guards — that violates the structural-guards rule in `AGENTS.md`, and the
+retired version of those guards failed to catch a `height` override, a `:hover`
+rule, and a `box-shadow` removal.
+
+Extracting the Tasks and Capsules call sites into thin wrapper components (the
+shape `SidebarTabs` and `RecentFilterTabs` already have) would make gap 2
+testable in the existing SSR harness and make all four surfaces symmetric.
