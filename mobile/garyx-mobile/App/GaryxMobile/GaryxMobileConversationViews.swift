@@ -230,9 +230,6 @@ struct GaryxConversationView: View {
     /// reference is what lets each row view be Equatable and skip its body
     /// when only the streaming tail changed.
     @State private var turnRowCallbackSink = GaryxTurnRowCallbackSink()
-    /// Current row windowing plan. Empty means every row lays out, which is
-    /// also the cold state before rows have been measured.
-    @State private var transcriptWindowPlan: [GaryxTranscriptWindowPlanner.Segment] = []
     @State private var readingAnchorRestoreGeneration = 0
     @State private var tailThinkingPresentationState = GaryxTailThinkingPresentationState()
     @State private var showsDebouncedTailThinking = false
@@ -854,8 +851,7 @@ struct GaryxConversationView: View {
                                 GaryxMobileTurnRowsView(
                                     rows: turnRows,
                                     prefetchBoundaryRowCount: garyxHistoryPrefetchBoundaryRows,
-                                    sink: turnRowCallbackSink,
-                                    windowPlan: transcriptWindowPlan
+                                    sink: turnRowCallbackSink
                                 )
                                 .onAppear {
                                     GaryxRoutePushPerformanceProbe.shared?
@@ -1086,63 +1082,6 @@ struct GaryxConversationView: View {
         24
     }
 
-    /// Recompute which rows lay out and which collapse into exact-height
-    /// spacers (`GaryxTranscriptWindowPlanner`).
-    ///
-    /// Driven from measured metrics rather than from content changes: the
-    /// planner needs real content-space row starts, and only rows it has
-    /// already measured may collapse. The plan is stored in SwiftUI state, so
-    /// it is written only when it actually changes — a plan-equal frame must
-    /// not invalidate the transcript body.
-    private func refreshTranscriptWindowPlan(
-        metrics: GaryxConversationLayoutMetrics,
-        rowIDs: [String]
-    ) {
-        guard let contentTopOffset = metrics.contentTopOffset,
-              metrics.viewportHeight > 0 else {
-            if !transcriptWindowPlan.isEmpty {
-                transcriptWindowPlan = []
-            }
-            return
-        }
-        // Content-space Y of the viewport top: `contentTopOffset` is the
-        // content top expressed in viewport coordinates, so negating it maps
-        // the viewport back into the scroll-invariant content ruler the row
-        // measurements use.
-        let plan = GaryxTranscriptWindowPlanner.plan(
-            .init(
-                rowIDs: rowIDs,
-                measuredMinY: rowGeometryBox.measuredMinY,
-                measuredHeight: rowGeometryBox.measuredHeight,
-                rowSpacing: garyxConversationRowSpacing,
-                // The content coordinate space starts above the stack's top
-                // padding, so the viewport's content-space origin includes it
-                // (review #TASK-2707 N5).
-                viewportTopInContent: -contentTopOffset + Self.transcriptContentTopPadding,
-                viewportHeight: metrics.viewportHeight,
-                overscan: metrics.viewportHeight,
-                pinnedTailRowCount: Self.transcriptWindowPinnedTailRows,
-                pinnedLeadingRowCount: Self.transcriptWindowPinnedLeadingRows,
-                // A prepend restore measures against the very geometry the
-                // planner would fold away, and history loading is about to
-                // change the row set anyway.
-                suspendsCollapsing: model.isLoadingOlderThreadHistory
-            )
-        )
-        if plan != transcriptWindowPlan {
-            transcriptWindowPlan = plan
-        }
-    }
-
-    /// Top padding inside the measured content coordinate space.
-    private static let transcriptContentTopPadding: CGFloat = 18
-    /// Trailing rows that always lay out: the tail owns bottom anchoring,
-    /// streaming growth, and the send/thinking region.
-    private static let transcriptWindowPinnedTailRows = 6
-    /// Leading rows that always lay out so the history boundary and its
-    /// reading anchor stay measurable.
-    private static let transcriptWindowPinnedLeadingRows = 2
-
     /// Feed a measurement update into the scroll state machine and run the
     /// follow-up work every metrics change shares.
     private func applyMetrics(
@@ -1157,7 +1096,6 @@ struct GaryxConversationView: View {
             )
         }
         reportOpeningViewportReadiness(openingSnapshotContext)
-        refreshTranscriptWindowPlan(metrics: metrics, rowIDs: routeTurnRows.map(\.id))
         if scrollStateBox.state.isFollowingTail,
            !scrollStateBox.state.isUserScrollInteracting {
             scheduleTranscriptSnapshot(openingSnapshotContext)
