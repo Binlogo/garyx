@@ -10,14 +10,18 @@
 # use: iOS asks for 3, desktop for 10. The cached-tail fast path is far more
 # likely to miss at 10, so a regression can hide entirely if only 3 is measured.
 #
-# EVERYTHING HERE IS THE WARM PATH. The gateway keeps a per-thread parsed tail,
-# and the first request against a thread builds it; with samples>1 the median is
-# warm by construction. There is no way to measure the cold path from inside
-# this script — that needs a gateway restart followed by exactly ONE request per
-# thread, with nothing else touching that thread first.
+# Each thread gets one untimed warm-up request before anything is measured, so
+# every reported number is the WARM path regardless of `samples`. Without it a
+# samples=1 run would time a cache build, and samples=2 would average a cold and
+# a warm run.
 #
-# Responses are validated: a 200 can still carry a history error, and a silently
-# empty page would otherwise read as a fast result.
+# This script does NOT measure the cold path. Doing so needs a gateway restart
+# followed by exactly one request per thread with nothing else touching it
+# first; that is a different mode, not something these rows can be read as.
+#
+# Responses are validated: a 200 can still carry a history error, and the
+# returned counts are printed so an `ok:true, messages:[]` cannot pass as a fast
+# result.
 set -euo pipefail
 
 COUNT="${1:-6}"
@@ -61,8 +65,8 @@ print(f"{statistics.median(times):.4f} {returned} {total if total is not None el
 PY
 }
 
-printf '%9s  %12s  %10s  %10s  %10s  %10s  %10s\n' \
-  SIZE 'BYTES' 'win(K=3)' 'win(K=10)' 'delta(3)' 'delta(10)' 'no-uql'
+printf '%9s  %12s  %10s  %10s  %10s  %10s  %10s  %13s\n' \
+  SIZE 'BYTES' 'win(K=3)' 'win(K=10)' 'delta(3)' 'delta(10)' 'no-uql' 'ret(3/10)'
 for f in $(ls -S "${TRANSCRIPTS}"/*.jsonl 2>/dev/null | head -n "$COUNT"); do
   size=$(du -h "$f" | cut -f1)
   bytes=$(wc -c < "$f" | tr -d ' ')
@@ -74,23 +78,32 @@ for f in $(ls -S "${TRANSCRIPTS}"/*.jsonl 2>/dev/null | head -n "$COUNT"); do
   # Pick a near-tail probe offset from the line count. This is an
   # approximation (it counts the Session header and misses a final
   # unterminated line) and is only ever used to choose an offset — it is never
-  # reported or asserted as a total. Deliberately no API probe here: one would
-  # build the cache before the measurements below.
+  # reported or asserted as a total.
   approx=$(wc -l < "$f" | tr -d ' ')
   after=0
   if [ "$approx" -gt 140 ] 2>/dev/null; then
     after=$(( approx - 140 ))
   fi
 
+  # Untimed warm-up: build the per-thread cache so the timed rows below cannot
+  # accidentally include a cache build.
+  curl -s -o /dev/null -H "Authorization: Bearer ${TOKEN}" \
+    "${BASE}?thread_id=${enc}&limit=1&include_tool_messages=true"
+
   # Newest-window open: what a client requests on entering a thread.
-  read -r w3_t _ _ <<<"$(probe "${BASE}?thread_id=${enc}&limit=100&include_tool_messages=true&user_query_limit=3")"
-  read -r w10_t _ _ <<<"$(probe "${BASE}?thread_id=${enc}&limit=100&include_tool_messages=true&user_query_limit=10")"
+  read -r w3_t w3_n _ <<<"$(probe "${BASE}?thread_id=${enc}&limit=100&include_tool_messages=true&user_query_limit=3")"
+  read -r w10_t w10_n _ <<<"$(probe "${BASE}?thread_id=${enc}&limit=100&include_tool_messages=true&user_query_limit=10")"
   # One iteration of the client's forward delta paging loop.
   read -r d3_t _ _ <<<"$(probe "${BASE}?thread_id=${enc}&limit=100&after_index=${after}&user_query_limit=3&include_tool_messages=true")"
   read -r d10_t _ _ <<<"$(probe "${BASE}?thread_id=${enc}&limit=100&after_index=${after}&user_query_limit=10&include_tool_messages=true")"
   # Control: identical request without the user-query window.
   read -r c_t _ _ <<<"$(probe "${BASE}?thread_id=${enc}&limit=100&after_index=${after}&include_tool_messages=true")"
 
-  printf '%9s  %12s  %9ss  %9ss  %9ss  %9ss  %9ss\n' \
-    "$size" "$bytes" "$w3_t" "$w10_t" "$d3_t" "$d10_t" "$c_t"
+  if [ "$w3_n" = "0" ] || [ "$w10_n" = "0" ]; then
+    echo "empty newest window for ${tid} — a fast empty page is not a result" >&2
+    exit 1
+  fi
+
+  printf '%9s  %12s  %9ss  %9ss  %9ss  %9ss  %9ss  %13s\n' \
+    "$size" "$bytes" "$w3_t" "$w10_t" "$d3_t" "$d10_t" "$c_t" "${w3_n}/${w10_n}"
 done

@@ -2805,9 +2805,10 @@ fn physical_messages(body: &str) -> Vec<Value> {
         .collect()
 }
 
-/// The physical-records oracle for the window start.
-fn physical_user_query_start(body: &str, target: usize, fallback: usize) -> (usize, usize) {
-    let messages = physical_messages(body);
+/// The physical-records oracle for the window start, over an explicit message
+/// list (used by the concurrency test, whose generations are built analytically
+/// rather than re-read from the file).
+fn physical_start_for(messages: &[Value], target: usize, fallback: usize) -> (usize, usize) {
     let total = messages.len();
     let mut hits = Vec::new();
     for (index, message) in messages.iter().enumerate() {
@@ -2823,6 +2824,11 @@ fn physical_user_query_start(body: &str, target: usize, fallback: usize) -> (usi
         hits[hits.len() - target.max(1)]
     };
     (start, total)
+}
+
+/// The physical-records oracle for a transcript body.
+fn physical_user_query_start(body: &str, target: usize, fallback: usize) -> (usize, usize) {
+    physical_start_for(&physical_messages(body), target, fallback)
 }
 
 async fn write_transcript(dir: &std::path::Path, thread_id: &str, body: &str) {
@@ -3057,57 +3063,92 @@ async fn newest_user_query_window_stays_consistent_with_a_concurrent_append() {
     write_transcript(dir.path(), thread_id, &body).await;
     let store = std::sync::Arc::new(ThreadTranscriptStore::file(dir.path()).await.unwrap());
 
-    // Readers and a writer race on the same thread slot. Every read must see a
-    // self-consistent (messages, total, start), never a window stitched across
-    // two generations of the file.
-    let writer = {
-        let store = store.clone();
-        tokio::spawn(async move {
-            for i in 0..12 {
+    // The oracle is built analytically, not by re-reading the file: the initial
+    // messages in file order, then one appended user message per round. For any
+    // `total` a reader reports, the page it returns must equal the physical
+    // prefix of that exact length, sliced at the same `start` rule.
+    let initial = physical_messages(&body);
+    let rounds = 12usize;
+    let appended: Vec<Value> = (0..rounds)
+        .map(|i| json!({"role": "user", "content": format!("concurrent {i}")}))
+        .collect();
+    let all: Vec<Value> = initial.iter().cloned().chain(appended.clone()).collect();
+
+    // One append and several reads are released together each round, so they
+    // genuinely contend for the same thread slot instead of running after the
+    // writer has already finished.
+    let readers_per_round = 3usize;
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(readers_per_round + 1));
+    let observed: std::sync::Arc<std::sync::Mutex<Vec<usize>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+
+    for round in 0..rounds {
+        let writer = {
+            let store = store.clone();
+            let barrier = barrier.clone();
+            let message = appended[round].clone();
+            tokio::spawn(async move {
+                barrier.wait().await;
                 store
-                    .append_committed_messages(
-                        thread_id,
-                        None,
-                        &[json!({"role": "user", "content": format!("concurrent {i}")})],
-                    )
+                    .append_committed_messages(thread_id, None, &[message])
                     .await
                     .unwrap();
-            }
-        })
-    };
-    let readers: Vec<_> = (0..4)
-        .map(|_| {
-            let store = store.clone();
-            tokio::spawn(async move {
-                for _ in 0..12 {
+            })
+        };
+        let readers: Vec<_> = (0..readers_per_round)
+            .map(|_| {
+                let store = store.clone();
+                let barrier = barrier.clone();
+                let all = all.clone();
+                let observed = observed.clone();
+                tokio::spawn(async move {
+                    barrier.wait().await;
                     let (messages, total, start) = store
                         .page_before_user_queries(thread_id, None, 3, 50)
                         .await
                         .unwrap();
-                    assert!(start <= total);
-                    assert_eq!(
-                        messages.len(),
-                        total - start,
-                        "the page must match the window it reports"
-                    );
-                }
-            })
-        })
-        .collect();
+                    observed.lock().unwrap().push(total);
 
-    writer.await.unwrap();
-    for reader in readers {
-        reader.await.unwrap();
+                    // Value-for-value against the prefix `total` names. A window
+                    // stitched across two generations, or one whose contents
+                    // drifted from its own reported bounds, fails here — a
+                    // length check alone would not.
+                    let prefix = &all[..total];
+                    let (expected_start, expected_total) = physical_start_for(prefix, 3, 50);
+                    assert_eq!(expected_total, total);
+                    assert_eq!(start, expected_start, "start must match its own total");
+                    assert_eq!(
+                        messages,
+                        prefix[expected_start..].to_vec(),
+                        "the page must be the physical prefix slice for the total it reports"
+                    );
+                })
+            })
+            .collect();
+
+        writer.await.unwrap();
+        for reader in readers {
+            reader.await.unwrap();
+        }
     }
+
+    let totals = observed.lock().unwrap().clone();
+    let distinct: std::collections::BTreeSet<usize> = totals.iter().copied().collect();
+    assert!(
+        distinct.len() >= 3,
+        "reads must observe several generations, not one settled state: saw {distinct:?}"
+    );
+    assert!(
+        distinct
+            .iter()
+            .any(|total| *total > initial.len() && *total < initial.len() + rounds),
+        "at least one read must land on an intermediate generation"
+    );
 
     let (messages, total, start) = store
         .page_before_user_queries(thread_id, None, 3, 50)
         .await
         .unwrap();
-    assert_eq!(total, 52);
-    assert_eq!(messages.len(), total - start);
-    assert_eq!(
-        messages.last().and_then(|m| m.get("content")),
-        Some(&json!("concurrent 11"))
-    );
+    assert_eq!(total, initial.len() + rounds);
+    assert_eq!(messages, all[start..].to_vec());
 }

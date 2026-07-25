@@ -88,8 +88,13 @@ tail miss 不是理论边角。review 统计本机 4401 份真实 transcript 的
 | K=3(iOS) | 0.57% | 1.95% | 13.08% |
 | K=10(desktop) | 1.52% | 5.37% | **34.58%** |
 
+这是**本机 transcript 文件的非加权占比,不是请求流量分布** —— 不能读成
+"desktop 三分之一的打开会走慢路径"。准确说法是:样本中 34.58% 的 ≥10MB transcript
+在 K=10 下会 tail miss,而整体 K=10 miss 率是 1.52%。
+
 最大的三份(≥100MB)在 K=3 和 K=10 下都命中,所以本轮不做反扫是合理的收敛;
-但 desktop 在 ≥10MB 线程上有三分之一会走慢路径,这是后续反扫的动机。
+上面的数字足以说明反扫应当尽快跟进,但不足以压过已确认的数据正确性缺陷
+(见下方优先级)。
 
 `message_count` → `with_built_cache` → `build_cache_streaming` 那次冷启动全扫**没有
 消除**。目前没有更便宜且精确的 `total` 来源:thread-record 的 `history.message_count`
@@ -122,5 +127,19 @@ last seq 因偏移/空洞不等于 total,文件长度推不出记录数。
 - 新增 `#[cfg(test)]` 计数器 `user_query_forward_scans`,断言的是"确实没有扫描",
   而不是墙钟时间。
 - `scripts/bench/thread-history-latency.sh` 前后对照(上表)。脚本同时测 **K=3(iOS)
-  与 K=10(desktop)** —— 只测 3 会让 K=10 的退化完全隐身;并且明确标注**全部是
-  warm 路径**(冷路径无法从脚本内部测量,需要重启网关后对每个线程只发一次请求)。
+  与 K=10(desktop)** —— 只测 3 会让 K=10 的退化完全隐身;每个线程测量前先发一次
+  **不计时的预热请求**,所以无论 `samples` 取值,报告的都是 warm 路径;并打印
+  returned 数,让 `ok:true, messages:[]` 不能冒充"很快"。该脚本**不测冷路径**
+  (那需要重启网关后对每个线程只发一次请求,是另一种模式)。
+
+## 后续优先级(review 结论)
+
+**先修 `page_messages_by_index` 的物理下标正确性,再做反向扫描器。** 理由:
+
+1. 正确性缺陷影响 `page_before_index`、`page_after_index`、`before_index: Some`
+   的用户分页、以及 `before_index: None` + tail miss —— 会直接产生空白或截断页面。
+2. 先做反扫只会顺带绕过 None + tail miss,其余分页仍错,形成又一层部分修复。
+3. 正确的 `messages_in_index_range` 物理切片(cache 与 disk 两条)恰好可以作为反扫
+   第二阶段的物化原语。
+4. 34.58% 是大文件样本占比而非流量占比,整体 K=10 miss 仍是 1.52%;不足以压过
+   已确认的数据正确性问题。
