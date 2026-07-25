@@ -6,19 +6,6 @@ const recentSidebar = readFileSync(
   new URL("./RecentConversationSidebar.tsx", import.meta.url),
   "utf8",
 );
-// The recent feed has two renderers — the L1 sidebar Threads tab and the L2
-// recent rail — so the filter segmented control and the row list each live in
-// one shared module instead of being copied into both surfaces.
-const filterTabs = readFileSync(
-  new URL("./RecentFilterTabs.tsx", import.meta.url),
-  "utf8",
-);
-// One segmented control owns the tablist semantics for every surface that has
-// one, so the accessibility contract is pinned there rather than per caller.
-const segmented = readFileSync(
-  new URL("./components/SegmentedControl.tsx", import.meta.url),
-  "utf8",
-);
 const sidebarRecentList = readFileSync(
   new URL("./SidebarRecentThreadList.tsx", import.meta.url),
   "utf8",
@@ -52,22 +39,10 @@ const main = readFileSync(
   "utf8",
 );
 
-test("Recent tabs expose the required accessible segmented semantics", () => {
-  // The rail still owns its label and its filter set...
-  assert.match(filterTabs, /ariaLabel=\{t\("Recent filter"\)\}/);
-  assert.match(filterTabs, /"favorites"/);
-  assert.match(filterTabs, /<SegmentedControl/);
-  // ...while the semantics come from the one shared control.
-  assert.match(segmented, /role="tablist"/);
-  assert.match(segmented, /role="tab"/);
-  assert.match(segmented, /aria-selected=\{selected\}/);
-  assert.match(segmented, /tabIndex=\{selected \? 0 : -1\}/);
-  assert.match(segmented, /event\.key !== 'ArrowLeft'/);
-  assert.match(segmented, /event\.key !== 'ArrowRight'/);
-});
-
 test("the filter control belongs to the rail, never to the sidebar tab", () => {
-  // The L2 rail composes the shared control rather than inlining a tablist.
+  // Segmented semantics and keyboard behaviour are covered by real behaviour
+  // tests in components/segmented-control.test.mjs; what matters here is only
+  // WHICH surface owns a filter at all.
   assert.match(recentSidebar, /import \{ RecentFilterTabs \}/);
   assert.match(recentSidebar, /<RecentFilterTabs/);
   assert.doesNotMatch(recentSidebar, /role="tablist"/);

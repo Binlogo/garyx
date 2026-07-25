@@ -53,6 +53,14 @@
   font-weight: var(--font-weight-medium);
   transition:
     background-color var(--duration-fast) var(--ease-standard),
+    color var(--duration-fast) var(--ease-standard);
+}
+
+/* Only rail instances ever animated their pill shadow; toolbar instances showed
+   it immediately, so the shadow must stay out of the shared transition. */
+.gx-segmented--fill button {
+  transition:
+    background-color var(--duration-fast) var(--ease-standard),
     color var(--duration-fast) var(--ease-standard),
     box-shadow var(--duration-fast) var(--ease-standard);
 }

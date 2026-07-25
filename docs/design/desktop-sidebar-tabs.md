@@ -161,8 +161,9 @@ the L2 bot/workspace drilldown rail, and the new L1 Threads tab. So:
   `recent-filter-source-contract.test.mjs`.
 
 Reuse without modification: `recent-thread-feeds.ts` (reducer),
-`recent-conversation-sidebar-model.ts` (`recentConversationPresentation`,
-`recentFilterForArrowKey`), `recentThreadFilterLabel`, `ThreadRailRow`.
+`recent-conversation-sidebar-model.ts` (`recentConversationPresentation`),
+`recentThreadFilterLabel`, `ThreadRailRow`. (Arrow-key traversal later moved
+into the shared `SegmentedControl`.)
 
 ### 3.5 CSS ownership
 

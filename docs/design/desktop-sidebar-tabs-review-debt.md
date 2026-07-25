@@ -26,8 +26,8 @@ transient before doing any work here.
 
 - iOS: `[all, nonTask, favorites]` — `GaryxRecentThreadFeeds.swift`.
 - Mac: `["nonTask", "all", "favorites"]` —
-  `desktop/garyx-desktop/src/renderer/src/RecentFilterTabs.tsx` and
-  `recent-conversation-sidebar-model.ts::recentFilterForArrowKey`.
+  `desktop/garyx-desktop/src/renderer/src/RecentFilterTabs.tsx`, whose option
+  array is now the single source of order (arrow-key traversal follows it).
 
 Arrow-key traversal therefore visits them in a different order on each
 platform. Cosmetic, but the Mac app is the IA source of truth, so one of the
@@ -48,10 +48,9 @@ extend the checker's allowlist to test files.
 (`garyx-gateway/src/routes/threads.rs`), but neither desktop nor iOS exposes it.
 Either surface it as a "Tasks" filter or drop it from the wire contract.
 
-## 5. Three hand-rolled segmented controls
+## 5. Three hand-rolled segmented controls — RESOLVED
 
-`recent-filter-tabs`, `sidebar-tabs`, `tasks-segmented`, and
-`capsules-segmented` each re-implement the same equal-width grid + active pill
-recipe with their own CSS block. This change added `sidebar-tabs` to that list
-rather than inventing a shared abstraction mid-task. Worth unifying into one
-component once someone touches a second one of them.
+Closed by `components/SegmentedControl.tsx` + `styles/segmented.css`: one
+recipe, two layouts (`fill`, `inline`), and per-surface semantics (`tabs` vs
+`radiogroup`) so unifying the visuals did not flatten the accessibility. The
+four surfaces now compose it.

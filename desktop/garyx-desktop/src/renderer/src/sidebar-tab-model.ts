@@ -12,6 +12,12 @@ export const SIDEBAR_TABS: readonly SidebarTab[] = ["threads", "projects"];
 
 export const SIDEBAR_TAB_STORAGE_KEY = "garyx.sidebarTab";
 
+/**
+ * The tabs pattern requires each tab to point at the panel it controls, so the
+ * control and its panel share this id instead of hard-coding it twice.
+ */
+export const SIDEBAR_TAB_PANEL_ID = "sidebar-tab-panel";
+
 /** Translation keys; render through `t()`. */
 const SIDEBAR_TAB_LABELS: Record<SidebarTab, string> = {
   threads: "Threads",

@@ -567,6 +567,7 @@ export function CapsulesPanel({
             className="capsules-segmented"
             layout="inline"
             onChange={setGalleryTab}
+            semantics="radiogroup"
             options={[
               { value: 'all', label: t('All') },
               { value: 'favorites', label: t('Favorites') },
