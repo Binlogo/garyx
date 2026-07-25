@@ -552,6 +552,7 @@ final class GaryxMobileModel: ObservableObject {
     let threadMutationHubStore: GaryxThreadMutationHubStore
     let threadFavoritesProvider: GaryxFavoritesMembershipProvider
     let homeThreadListStore: GaryxHomeThreadListStore
+    let homeThreadSearchRowsStore: GaryxHomeThreadSearchRowsStore
     var threadFeedRegistry = GaryxThreadFeedRegistry()
     var workspaceThreadProviders: [String: GaryxThreadSummaryMembershipProvider] = [:]
     var workspaceThreadStores: [String: GaryxThreadListStore] = [:]
@@ -636,6 +637,7 @@ final class GaryxMobileModel: ObservableObject {
         self.homeThreadListStore = GaryxHomeThreadListStore(
             mutationHubStore: threadMutationHubStore
         )
+        self.homeThreadSearchRowsStore = GaryxHomeThreadSearchRowsStore()
         self.composerPayloadCoordinator = composerPayloadCoordinator ?? .production()
         let restoredRecentThreadFilter = GaryxRecentThreadFilterStorage.load(
             defaults: defaults,

@@ -107,6 +107,7 @@ extension GaryxMobileModel {
     }
 
     func emitHomeProjectionSnapshot() {
+        refreshHomeThreadSearchRowsStore()
         if HomeProjectionLiveSourceConfiguration.usesActorSnapshots {
             homeProjectionGateway.capture(homeProjectionCapture)
             syncBackgroundCommittedRunReconcileLoopForHomeVisibility()

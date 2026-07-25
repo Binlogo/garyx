@@ -40,6 +40,15 @@ The helper is now also the prefetch trigger for search results. The parameter
 name still says `recentIds`. Rename to something feed-neutral when the pager is
 next touched.
 
+## D-4 — Home list divider still reads deprecated `UIScreen.main`
+
+`mobile/garyx-mobile/App/GaryxMobile/GaryxMobileSidebarViews.swift:1222`.
+
+The existing divider computes one physical pixel with `UIScreen.main.scale`,
+which is deprecated on iOS 26 in favor of the screen or trait collection from
+the active view context. The focused thread-search build reproduces this
+warning, but changing the shared Home row rendering is outside this feature.
+
 ## Explicitly still out of scope (do not re-open)
 
 Per §7 and D4 of the design, and confirmed unchanged by this review:

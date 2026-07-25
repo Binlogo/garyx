@@ -173,6 +173,101 @@ final class GaryxHomeObservationBridgeTests: XCTestCase {
         )
     }
 
+    func testHomeThreadSearchRowsPublishOffWindowFavoriteAndRunState() throws {
+        let model = makeModel()
+        let thread = makeThread(id: "thread-search-outside-home-window")
+        let store = model.homeThreadSearchRowsStore
+
+        XCTAssertFalse(
+            model.homeThreadListStore.snapshot.sections.allRows.contains {
+                $0.id == thread.id
+            }
+        )
+        var row = try XCTUnwrap(store.rows(for: [thread]).first)
+        XCTAssertFalse(row.presentation.isFavorite)
+        XCTAssertFalse(row.presentation.isRunning)
+        XCTAssertTrue(row.capabilities.canArchive)
+
+        let favoritePublishCount = store.publishCount
+        model.setThreadFavorite(thread.id, desired: true)
+
+        XCTAssertGreaterThan(store.publishCount, favoritePublishCount)
+        row = try XCTUnwrap(store.rows(for: [thread]).first)
+        XCTAssertTrue(row.presentation.isFavorite)
+
+        let runPublishCount = store.publishCount
+        model.applyTranscriptRunState(
+            GaryxTranscriptRunState(
+                busy: true,
+                activeRunId: "run-search-result",
+                activity: .thinking
+            ),
+            threadId: thread.id
+        )
+
+        XCTAssertGreaterThan(store.publishCount, runPublishCount)
+        row = try XCTUnwrap(store.rows(for: [thread]).first)
+        XCTAssertTrue(row.presentation.isRunning)
+        XCTAssertFalse(row.capabilities.canArchive)
+        XCTAssertEqual(row.capabilities.archiveStrategy, .none)
+    }
+
+    func testHomeThreadSearchRowsScopeTracksEveryGatewayActivation() async {
+        let model = makeModel()
+        let store = model.homeThreadSearchRowsStore
+        let initialToken = model.gatewayRequestToken
+
+        XCTAssertEqual(store.context.gatewayRequestToken, initialToken)
+        XCTAssertTrue(store.context.isGatewayScopeActive)
+        let exitPublishCount = store.publishCount
+        model.exitCurrentGatewayScope(.suspend)
+
+        XCTAssertNotEqual(model.gatewayRequestToken, initialToken)
+        XCTAssertEqual(store.context.gatewayRequestToken, model.gatewayRequestToken)
+        XCTAssertFalse(store.context.isGatewayScopeActive)
+        XCTAssertGreaterThan(store.publishCount, exitPublishCount)
+        do {
+            _ = try await model.fetchHomeThreadSearchPage(
+                GaryxHomeThreadSearchEndpointRequest(
+                    query: "Test thread",
+                    cursor: nil
+                ),
+                gatewayRequestToken: model.gatewayRequestToken
+            )
+            XCTFail("a suspended gateway scope must not start search transport")
+        } catch {
+            XCTAssertTrue(error is CancellationError)
+        }
+
+        let suspendedToken = model.gatewayRequestToken
+        let activationPublishCount = store.publishCount
+        model.gatewayURL = "http://127.0.0.1:31338"
+        model.activateCurrentGatewayScope()
+
+        XCTAssertNotEqual(model.gatewayRequestToken, suspendedToken)
+        XCTAssertEqual(store.context.gatewayRequestToken, model.gatewayRequestToken)
+        XCTAssertTrue(store.context.isGatewayScopeActive)
+        XCTAssertGreaterThan(store.publishCount, activationPublishCount)
+    }
+
+    func testHomeThreadSearchDismissalRetainsQueryUntilMorphCompletes() {
+        let model = makeModel()
+        let store = GaryxHomeThreadSearchStore()
+
+        store.beginPresentation()
+        store.updateQuery("Project thread", model: model)
+        store.beginDismissal()
+
+        XCTAssertEqual(store.queryText, "Project thread")
+        XCTAssertEqual(store.state.query, "Project thread")
+
+        store.completeDismissal()
+
+        XCTAssertEqual(store.queryText, "")
+        XCTAssertNil(store.state.query)
+        XCTAssertEqual(store.state.presentation, .prompt)
+    }
+
     private func makeModel() -> GaryxMobileModel {
         let suiteName = "GaryxHomeObservationBridgeTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!

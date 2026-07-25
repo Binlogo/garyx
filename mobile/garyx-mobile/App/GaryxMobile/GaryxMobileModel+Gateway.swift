@@ -50,6 +50,7 @@ extension GaryxMobileModel {
             scope: scope,
             activationSequence: nextGatewayActivationSequence
         )
+        refreshHomeThreadSearchRowsStore()
         let key = activeComposerPayloadKey
         Task { [weak self] in
             guard let self else { return }
@@ -81,6 +82,7 @@ extension GaryxMobileModel {
             scope: scope,
             activationSequence: nextGatewayActivationSequence
         )
+        refreshHomeThreadSearchRowsStore()
     }
 
     func saveGatewaySettings() {

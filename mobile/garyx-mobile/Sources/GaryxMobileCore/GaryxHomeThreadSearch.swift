@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 
 /// The five user-visible states of Home thread search. Transport and debounce
@@ -38,9 +39,38 @@ public struct GaryxHomeThreadSearchRequest: Equatable, Sendable {
     }
 
     public let generation: UInt64
+    public let gatewayRequestToken: GaryxGatewayRequestToken
     public let query: String
     public let cursor: String?
     public let kind: Kind
+
+    /// Importable production contract for the one gateway endpoint owned by
+    /// Home search. Tests assert this value directly so the call site cannot
+    /// silently inherit a workspace or recent-filter scope.
+    public var endpointRequest: GaryxHomeThreadSearchEndpointRequest {
+        GaryxHomeThreadSearchEndpointRequest(
+            query: query,
+            cursor: cursor
+        )
+    }
+}
+
+public struct GaryxHomeThreadSearchEndpointRequest: Equatable, Sendable {
+    public static let pageLimit = 30
+
+    public let rootWorkspacePath: String?
+    public let tasks: GaryxThreadSummaryTaskFilter
+    public let query: String
+    public let limit: Int
+    public let cursor: String?
+
+    public init(query: String, cursor: String?) {
+        rootWorkspacePath = nil
+        tasks = .include
+        self.query = query
+        limit = Self.pageLimit
+        self.cursor = cursor
+    }
 }
 
 public enum GaryxHomeThreadSearchCompletion: Equatable, Sendable {
@@ -67,12 +97,17 @@ public struct GaryxHomeThreadSearchState: Equatable, Sendable {
     public private(set) var isLoadingMore: Bool
     public private(set) var headFailureMessage: String?
     public private(set) var loadMoreFailed: Bool
+    public private(set) var gatewayRequestToken: GaryxGatewayRequestToken?
+    public private(set) var isGatewayScopeActive: Bool
 
     private var awaitsDebounce: Bool
     private var storeIncarnationId: String?
-    private var serverBootId: String?
 
-    public init(generation: UInt64 = 0) {
+    public init(
+        generation: UInt64 = 0,
+        gatewayRequestToken: GaryxGatewayRequestToken? = nil,
+        isGatewayScopeActive: Bool? = nil
+    ) {
         self.query = nil
         self.generation = generation
         self.threads = []
@@ -82,9 +117,11 @@ public struct GaryxHomeThreadSearchState: Equatable, Sendable {
         self.isLoadingMore = false
         self.headFailureMessage = nil
         self.loadMoreFailed = false
+        self.gatewayRequestToken = gatewayRequestToken
+        self.isGatewayScopeActive = gatewayRequestToken != nil
+            && (isGatewayScopeActive ?? true)
         self.awaitsDebounce = false
         self.storeIncarnationId = nil
-        self.serverBootId = nil
     }
 
     public var presentation: GaryxHomeThreadSearchPresentation {
@@ -125,6 +162,28 @@ public struct GaryxHomeThreadSearchState: Equatable, Sendable {
         )
     }
 
+    /// Rebinds every resident row, cursor, debounce ticket, and in-flight
+    /// request to one exact gateway activation. The user query survives so an
+    /// open search can rerun against the newly active gateway, but no row from
+    /// the previous partition can remain visible.
+    @discardableResult
+    public mutating func replaceGatewayRequestToken(
+        _ nextToken: GaryxGatewayRequestToken,
+        isActive: Bool = true
+    ) -> Bool {
+        guard nextToken != gatewayRequestToken
+                || isActive != isGatewayScopeActive else {
+            return false
+        }
+        advanceGeneration()
+        gatewayRequestToken = nextToken
+        isGatewayScopeActive = isActive
+        threads = []
+        resetPageState()
+        awaitsDebounce = isActive && query != nil
+        return true
+    }
+
     /// Replaces the semantic request query. Returns false when trimming makes
     /// the request identical, so display-only whitespace edits do not restart
     /// transport or invalidate a valid cursor.
@@ -136,7 +195,7 @@ public struct GaryxHomeThreadSearchState: Equatable, Sendable {
         query = nextQuery
         threads = []
         resetPageState()
-        awaitsDebounce = nextQuery != nil
+        awaitsDebounce = isGatewayScopeActive && nextQuery != nil
         return true
     }
 
@@ -159,11 +218,14 @@ public struct GaryxHomeThreadSearchState: Equatable, Sendable {
     /// while pull-to-refresh is in flight, but the old cursor and every prior
     /// request generation are invalidated synchronously.
     public mutating func beginRefresh() -> GaryxHomeThreadSearchRequest? {
-        guard query != nil else { return nil }
+        guard query != nil,
+              gatewayRequestToken != nil,
+              isGatewayScopeActive else {
+            return nil
+        }
         advanceGeneration()
         nextCursor = nil
         storeIncarnationId = nil
-        serverBootId = nil
         isLoadingHead = false
         isLoadingMore = false
         headFailureMessage = nil
@@ -176,6 +238,8 @@ public struct GaryxHomeThreadSearchState: Equatable, Sendable {
         retryingFailure: Bool = false
     ) -> GaryxHomeThreadSearchRequest? {
         guard let query,
+              let gatewayRequestToken,
+              isGatewayScopeActive,
               isPrimed,
               !threads.isEmpty,
               !isLoadingHead,
@@ -190,6 +254,7 @@ public struct GaryxHomeThreadSearchState: Equatable, Sendable {
         isLoadingMore = true
         return GaryxHomeThreadSearchRequest(
             generation: generation,
+            gatewayRequestToken: gatewayRequestToken,
             query: query,
             cursor: nextCursor,
             kind: .page
@@ -213,7 +278,6 @@ public struct GaryxHomeThreadSearchState: Equatable, Sendable {
             isPrimed = true
             headFailureMessage = nil
             storeIncarnationId = page.storeIncarnationId
-            serverBootId = page.serverBootId
             nextCursor = Self.adoptedCursor(from: page)
             return .accepted
 
@@ -222,8 +286,7 @@ public struct GaryxHomeThreadSearchState: Equatable, Sendable {
                   request.cursor == nextCursor else {
                 return .rejectedStale
             }
-            guard page.storeIncarnationId == storeIncarnationId,
-                  page.serverBootId == serverBootId else {
+            guard page.storeIncarnationId == storeIncarnationId else {
                 isLoadingMore = false
                 loadMoreFailed = true
                 return .rejectedStoreIdentity
@@ -256,11 +319,17 @@ public struct GaryxHomeThreadSearchState: Equatable, Sendable {
     }
 
     private mutating func beginHeadRequest() -> GaryxHomeThreadSearchRequest? {
-        guard let query, !isLoadingHead else { return nil }
+        guard let query,
+              let gatewayRequestToken,
+              isGatewayScopeActive,
+              !isLoadingHead else {
+            return nil
+        }
         isLoadingHead = true
         headFailureMessage = nil
         return GaryxHomeThreadSearchRequest(
             generation: generation,
+            gatewayRequestToken: gatewayRequestToken,
             query: query,
             cursor: nil,
             kind: .head
@@ -268,7 +337,9 @@ public struct GaryxHomeThreadSearchState: Equatable, Sendable {
     }
 
     private func owns(_ request: GaryxHomeThreadSearchRequest) -> Bool {
-        request.generation == generation && request.query == query
+        request.generation == generation
+            && request.gatewayRequestToken == gatewayRequestToken
+            && request.query == query
     }
 
     private mutating func resetPageState() {
@@ -279,7 +350,6 @@ public struct GaryxHomeThreadSearchState: Equatable, Sendable {
         headFailureMessage = nil
         loadMoreFailed = false
         storeIncarnationId = nil
-        serverBootId = nil
     }
 
     private mutating func advanceGeneration() {
@@ -333,48 +403,109 @@ public struct GaryxHomeThreadSearchState: Equatable, Sendable {
     }
 }
 
-struct GaryxHomeThreadSearchRowsInput: Equatable, Sendable {
-    var threads: [GaryxThreadSummary]
+struct GaryxHomeThreadSearchRowsContext: Equatable, Sendable {
+    var gatewayRequestToken: GaryxGatewayRequestToken
+    var isGatewayScopeActive: Bool
     var agents: [GaryxAgentSummary]
-    var automations: [GaryxAutomationSummary]
-    var pinnedThreadIds: [String]
-    var favoritedThreadIds: [String]
+    var automationThreadIds: Set<String>
+    var pinnedThreadIds: Set<String>
+    var favoritedThreadIds: Set<String>
     var selectedThreadId: String?
     var runningThreadIds: Set<String>
+
+    init(
+        gatewayRequestToken: GaryxGatewayRequestToken,
+        isGatewayScopeActive: Bool = true,
+        agents: [GaryxAgentSummary] = [],
+        automationThreadIds: Set<String> = [],
+        pinnedThreadIds: Set<String> = [],
+        favoritedThreadIds: Set<String> = [],
+        selectedThreadId: String? = nil,
+        runningThreadIds: Set<String> = []
+    ) {
+        self.gatewayRequestToken = gatewayRequestToken
+        self.isGatewayScopeActive = isGatewayScopeActive
+        self.agents = agents
+        self.automationThreadIds = Self.normalizedIds(automationThreadIds)
+        self.pinnedThreadIds = Self.normalizedIds(pinnedThreadIds)
+        self.favoritedThreadIds = Self.normalizedIds(favoritedThreadIds)
+        self.selectedThreadId = Self.normalizedId(selectedThreadId)
+        self.runningThreadIds = Self.normalizedIds(runningThreadIds)
+    }
+
+    static let initial = GaryxHomeThreadSearchRowsContext(
+        gatewayRequestToken: GaryxGatewayRequestToken(
+            scope: GaryxGatewayScope(identity: "unconfigured", epoch: 1),
+            activationSequence: 1
+        ),
+        isGatewayScopeActive: false
+    )
+
+    private static func normalizedIds(_ ids: Set<String>) -> Set<String> {
+        Set(ids.compactMap(normalizedId))
+    }
+
+    private static func normalizedId(_ rawId: String?) -> String? {
+        let id = rawId?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return id.isEmpty ? nil : id
+    }
+}
+
+/// Dedicated observable boundary for the live row inputs that do not belong
+/// to the recency page. Search results can contain threads outside Home's
+/// loaded window, so their favorite, pin, selection, automation, and run state
+/// must not depend on the recency store deciding to publish.
+@MainActor
+final class GaryxHomeThreadSearchRowsStore: ObservableObject {
+    @Published private(set) var context: GaryxHomeThreadSearchRowsContext
+    private(set) var publishCount = 0
+
+    init(context: GaryxHomeThreadSearchRowsContext = .initial) {
+        self.context = context
+    }
+
+    @discardableResult
+    func apply(_ nextContext: GaryxHomeThreadSearchRowsContext) -> Bool {
+        guard nextContext != context else { return false }
+        context = nextContext
+        publishCount += 1
+        return true
+    }
+
+    func rows(for threads: [GaryxThreadSummary]) -> [GaryxHomeThreadRow] {
+        GaryxHomeThreadSearchRowsBuilder.build(
+            threads: threads,
+            context: context
+        )
+    }
 }
 
 /// Pure row projection for search results. It preserves the gateway's result
 /// order while applying the same identity, action, favorite, pin, selection,
 /// and running presentation used by Home.
 enum GaryxHomeThreadSearchRowsBuilder {
-    static func build(_ input: GaryxHomeThreadSearchRowsInput) -> [GaryxHomeThreadRow] {
-        let pinned = Set(GaryxHomeThreadSectionsBuilder.normalizedPinnedThreadIds(
-            input.pinnedThreadIds
-        ))
-        let favorites = Set(GaryxHomeThreadSectionsBuilder.normalizedPinnedThreadIds(
-            input.favoritedThreadIds
-        ))
-        let automationThreadIds = GaryxHomeThreadSectionsBuilder.automationThreadIds(
-            input.automations
-        )
+    static func build(
+        threads: [GaryxThreadSummary],
+        context: GaryxHomeThreadSearchRowsContext
+    ) -> [GaryxHomeThreadRow] {
         var agentsById: [String: GaryxAgentSummary] = [:]
-        for agent in input.agents where agentsById[agent.id] == nil {
+        for agent in context.agents where agentsById[agent.id] == nil {
             agentsById[agent.id] = agent
         }
 
         var seen = Set<String>()
-        return input.threads.compactMap { thread in
+        return threads.compactMap { thread in
             let id = thread.id.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !id.isEmpty, seen.insert(id).inserted else { return nil }
             return GaryxHomeThreadSectionsBuilder.row(
                 thread: thread,
-                isSelected: input.selectedThreadId == id,
-                isPinned: pinned.contains(id),
-                isFavorite: favorites.contains(id),
-                isRunning: input.runningThreadIds.contains(id),
+                isSelected: context.selectedThreadId == id,
+                isPinned: context.pinnedThreadIds.contains(id),
+                isFavorite: context.favoritedThreadIds.contains(id),
+                isRunning: context.runningThreadIds.contains(id),
                 showsDivider: seen.count > 1,
                 agentsById: agentsById,
-                automationThreadIds: automationThreadIds
+                automationThreadIds: context.automationThreadIds
             )
         }
     }

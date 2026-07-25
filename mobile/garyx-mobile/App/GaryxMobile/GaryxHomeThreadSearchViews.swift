@@ -80,9 +80,99 @@ struct GaryxHomeThreadSearchMorphSurface: View {
         }
         .opacity(motion.allowsSpatialMotion(.morphOpen) || isExpanded ? 1 : 0)
         // The final-width content stays mounted behind the morph's clipping
-        // window. Prevent those off-screen controls from receiving either
-        // touch or accessibility activation at the collapsed endpoint.
+        // window. Disable touch and accessibility while it is clipped down to
+        // the collapsed endpoint.
         .allowsHitTesting(isExpanded)
+        .accessibilityHidden(!isExpanded)
+    }
+}
+
+struct GaryxHomeThreadSearchOverlayHost: View {
+    @ObservedObject var searchStore: GaryxHomeThreadSearchStore
+
+    let anchor: Anchor<CGRect>?
+    let model: GaryxMobileModel
+    let focus: FocusState<Bool>.Binding
+    let onCancel: () -> Void
+
+    @ViewBuilder
+    var body: some View {
+        if searchStore.chromeState.isPresented, let anchor {
+            GeometryReader { geometry in
+                GaryxHomeThreadSearchMorphSurface(
+                    isExpanded: searchStore.chromeState.isExpanded,
+                    anchorRect: geometry[anchor],
+                    containerSize: geometry.size,
+                    queryText: queryBinding,
+                    focus: focus,
+                    onCancel: onCancel
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            }
+        }
+    }
+
+    private var queryBinding: Binding<String> {
+        Binding(
+            get: { searchStore.queryText },
+            set: { searchStore.updateQuery($0, model: model) }
+        )
+    }
+}
+
+struct GaryxHomeThreadSearchModeList<SearchRows: View, RecentRows: View>: View {
+    @ObservedObject var searchStore: GaryxHomeThreadSearchStore
+    @ObservedObject var searchRowsStore: GaryxHomeThreadSearchRowsStore
+
+    let isSidebarDragActive: Bool
+    let onRefreshSearch: () async -> Void
+    let onRefreshRecent: () async -> Void
+    private let searchRows: () -> SearchRows
+    private let recentRows: () -> RecentRows
+
+    init(
+        searchStore: GaryxHomeThreadSearchStore,
+        searchRowsStore: GaryxHomeThreadSearchRowsStore,
+        isSidebarDragActive: Bool,
+        onRefreshSearch: @escaping () async -> Void,
+        onRefreshRecent: @escaping () async -> Void,
+        @ViewBuilder searchRows: @escaping () -> SearchRows,
+        @ViewBuilder recentRows: @escaping () -> RecentRows
+    ) {
+        self.searchStore = searchStore
+        self.searchRowsStore = searchRowsStore
+        self.isSidebarDragActive = isSidebarDragActive
+        self.onRefreshSearch = onRefreshSearch
+        self.onRefreshRecent = onRefreshRecent
+        self.searchRows = searchRows
+        self.recentRows = recentRows
+    }
+
+    var body: some View {
+        // Keep this mode owner outside the Equatable Home body cache. The
+        // search store is the explicit invalidation path for the List builder.
+        List {
+            if searchStore.chromeState.isPresented {
+                searchRows()
+            } else {
+                recentRows()
+            }
+        }
+        .listStyle(.plain)
+        .environment(\.defaultMinListRowHeight, 0)
+        .scrollContentBackground(.hidden)
+        // Rows hide their UIKit backgrounds. Keep one opaque SwiftUI backing
+        // layer so Reduce Transparency never reveals the hosting window.
+        .background(GaryxTheme.background)
+        .scrollDisabled(isSidebarDragActive)
+        .scrollDismissesKeyboard(.interactively)
+        .refreshable {
+            if searchStore.chromeState.isPresented {
+                await onRefreshSearch()
+            } else {
+                await onRefreshRecent()
+            }
+        }
     }
 }
 
@@ -162,6 +252,7 @@ final class GaryxHomeThreadSearchStore: ObservableObject {
     private var headTaskId: UUID?
     private var pageTask: Task<Void, Never>?
     private var pageTaskId: UUID?
+    private var dismissalPending = false
 
     deinit {
         headTask?.cancel()
@@ -175,7 +266,48 @@ final class GaryxHomeThreadSearchStore: ObservableObject {
         let changed = mutate { $0.replaceQuery(rawQuery) }
         guard changed else { return }
         cancelTransport()
+        scheduleDebouncedSearch(model: model)
+    }
 
+    func synchronizeGatewayRequestToken(
+        _ gatewayRequestToken: GaryxGatewayRequestToken,
+        isActive: Bool,
+        model: GaryxMobileModel
+    ) {
+        let changed = mutate {
+            $0.replaceGatewayRequestToken(
+                gatewayRequestToken,
+                isActive: isActive
+            )
+        }
+        guard changed else { return }
+        cancelTransport()
+        guard !dismissalPending else { return }
+        scheduleDebouncedSearch(model: model)
+    }
+
+    func beginDismissal() {
+        dismissalPending = true
+        cancelTransport()
+    }
+
+    func beginPresentation() {
+        dismissalPending = false
+    }
+
+    func completeDismissal() {
+        queryText = ""
+        _ = mutate { $0.replaceQuery(nil) }
+        cancelTransport()
+        dismissalPending = false
+    }
+
+    func setChromeState(_ nextState: GaryxChromeMorphPresentationState) {
+        guard chromeState != nextState else { return }
+        chromeState = nextState
+    }
+
+    private func scheduleDebouncedSearch(model: GaryxMobileModel) {
         guard case let .wait(ticket, nanoseconds) = state.debounceDecision else {
             return
         }
@@ -198,16 +330,6 @@ final class GaryxHomeThreadSearchStore: ObservableObject {
             await execute(request, model: model)
             finishHeadTask(taskId)
         }
-    }
-
-    func cancelSearch() {
-        queryText = ""
-        _ = mutate { $0.replaceQuery(nil) }
-        cancelTransport()
-    }
-
-    func setChromeState(_ nextState: GaryxChromeMorphPresentationState) {
-        chromeState = nextState
     }
 
     func refresh(model: GaryxMobileModel) async {
@@ -270,15 +392,17 @@ final class GaryxHomeThreadSearchStore: ObservableObject {
     ) async {
         do {
             let page = try await model.fetchHomeThreadSearchPage(
-                query: request.query,
-                cursor: request.cursor
+                request.endpointRequest,
+                gatewayRequestToken: request.gatewayRequestToken
             )
             try Task.checkCancellation()
             _ = mutate { $0.complete(request, page: page) }
         } catch {
-            let message = GaryxMobileModel.isCancellationError(error)
-                ? "Could not load threads"
-                : model.displayMessage(for: error)
+            guard !GaryxMobileModel.isCancellationError(error),
+                  !Task.isCancelled else {
+                return
+            }
+            let message = model.displayMessage(for: error)
             _ = mutate { $0.fail(request, message: message) }
         }
     }
@@ -319,32 +443,39 @@ final class GaryxHomeThreadSearchStore: ObservableObject {
 
 extension GaryxMobileModel {
     func fetchHomeThreadSearchPage(
-        query: String,
-        cursor: String?
+        _ request: GaryxHomeThreadSearchEndpointRequest,
+        gatewayRequestToken expectedToken: GaryxGatewayRequestToken
     ) async throws -> GaryxThreadSummariesPage {
-        let runtimeGeneration = gatewayRequestToken
+        guard expectedToken == gatewayRequestToken,
+              gatewayScopeRegistry.activeScope == expectedToken.scope else {
+            throw CancellationError()
+        }
         let page = try await client().listThreadSummaries(
-            tasks: .include,
-            query: query,
-            limit: 30,
-            cursor: cursor
+            rootWorkspacePath: request.rootWorkspacePath,
+            tasks: request.tasks,
+            query: request.query,
+            limit: request.limit,
+            cursor: request.cursor
         )
-        guard runtimeGeneration == gatewayRequestToken else {
+        guard expectedToken == gatewayRequestToken,
+              gatewayScopeRegistry.activeScope == expectedToken.scope else {
             throw CancellationError()
         }
         return page
     }
 
-    func homeThreadSearchRows(
-        _ threads: [GaryxThreadSummary]
-    ) -> [GaryxHomeThreadRow] {
-        GaryxHomeThreadSearchRowsBuilder.build(
-            GaryxHomeThreadSearchRowsInput(
-                threads: threads,
+    func refreshHomeThreadSearchRowsStore() {
+        _ = homeThreadSearchRowsStore.apply(
+            GaryxHomeThreadSearchRowsContext(
+                gatewayRequestToken: gatewayRequestToken,
+                isGatewayScopeActive: gatewayScopeRegistry.activeScope
+                    == gatewayRequestToken.scope,
                 agents: agents,
-                automations: automations,
-                pinnedThreadIds: pinnedThreadIds,
-                favoritedThreadIds: threadFavoritesState.presentedThreadIds,
+                automationThreadIds: GaryxHomeThreadSectionsBuilder.automationThreadIds(
+                    automations
+                ),
+                pinnedThreadIds: Set(pinnedThreadIds),
+                favoritedThreadIds: Set(threadFavoritesState.presentedThreadIds),
                 selectedThreadId: selectedThread?.id,
                 runningThreadIds: remoteBusyThreadIds
             )

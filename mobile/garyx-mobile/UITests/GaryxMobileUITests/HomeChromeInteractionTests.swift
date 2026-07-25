@@ -56,6 +56,16 @@ final class HomeChromeInteractionTests: XCTestCase {
         let cancel = app.buttons["home-thread-search-cancel"]
         XCTAssertTrue(field.waitForExistence(timeout: 5), "expanded thread-search field")
         XCTAssertTrue(cancel.waitForExistence(timeout: 5), "expanded thread-search Cancel button")
+        XCTAssertLessThan(
+            field.frame.minX,
+            collapsedFrame.minX,
+            "the field must expand leftward from the trailing search-button anchor"
+        )
+        XCTAssertGreaterThan(
+            cancel.frame.minX,
+            field.frame.maxX,
+            "the expanded field and Cancel control must occupy one ordered chrome surface"
+        )
         XCTAssertTrue(
             app.staticTexts["Search threads by name"].waitForExistence(timeout: 5),
             "an empty query must show the prompt state"
@@ -79,8 +89,16 @@ final class HomeChromeInteractionTests: XCTestCase {
             app.staticTexts["Thread History"].waitForExistence(timeout: 5),
             "Cancel must restore the Home recency list"
         )
+        XCTAssertTrue(field.waitForNonExistence(timeout: 5))
+        XCTAssertTrue(cancel.waitForNonExistence(timeout: 5))
+        XCTAssertFalse(app.staticTexts["Search threads by name"].exists)
         XCTAssertEqual(search.frame.midX, collapsedFrame.midX, accuracy: 1)
         XCTAssertEqual(search.frame.midY, collapsedFrame.midY, accuracy: 1)
+
+        let collapsedAttachment = XCTAttachment(screenshot: app.screenshot())
+        collapsedAttachment.name = "Home thread search collapsed"
+        collapsedAttachment.lifetime = .keepAlways
+        add(collapsedAttachment)
 
         search.tap()
         XCTAssertTrue(field.waitForExistence(timeout: 5))

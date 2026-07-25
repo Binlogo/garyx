@@ -787,13 +787,14 @@ enum GaryxHomeThreadSectionsBuilder {
             id: thread.id,
             thread: thread,
             presentation: GaryxSidebarThreadRowPresentation(
-                thread: thread,
+                title: thread.title.isEmpty ? "Untitled" : thread.title,
+                subtitle: GaryxThreadSubtitlePresentation.subtitle(for: thread),
+                trailingTimestamp: nil,
                 isSelected: isSelected,
                 isPinned: isPinned,
                 isFavorite: isFavorite,
-                trailingTimestamp: nil,
-                showsRunningState: false
-            ).withRunningState(isRunning),
+                isRunning: isRunning
+            ),
             avatar: GaryxSidebarThreadRowAvatar(
                 agentId: identity.id ?? "",
                 avatarDataUrl: identity.avatarDataUrl ?? "",
