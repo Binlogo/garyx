@@ -30,8 +30,16 @@ export function recentConversationPresentation(
     !feed.isPrimed &&
     !feed.headFailure &&
     (feed.isRefreshingHead || rowCount === 0);
+  // `rowCount` is what actually renders, after pinned threads are excluded, and
+  // it drives the loading skeleton. Emptiness is a different question: the
+  // pinned region shows those threads separately, so a page can render zero rows
+  // while the server feed is not empty at all. Claiming "no recent chats" there
+  // would contradict a visibly populated Pinned region — and would be plainly
+  // wrong while a next page is still being fetched. Only a genuinely empty
+  // server feed is an empty state.
+  const serverFeedIsEmpty = feed.orderedThreadIds.length === 0;
   const emptyLabelKey =
-    feed.isPrimed && rowCount === 0 && !feed.headFailure
+    feed.isPrimed && serverFeedIsEmpty && !feed.headFailure
       ? selectedFilter === "all"
         ? "No recent threads"
         : selectedFilter === "nonTask"

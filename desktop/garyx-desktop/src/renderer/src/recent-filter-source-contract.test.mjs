@@ -158,12 +158,37 @@ test("one feed serves both recent surfaces and either consumer keeps it alive", 
 });
 
 test("the recent list never repeats the sidebar's pinned region", () => {
-  // Pinned threads have their own always-visible region, so both recent
-  // surfaces must exclude them — derived once, not per view.
-  assert.match(appShell, /excludePinnedFromRecent\(/);
-  assert.match(appShell, /pinnedThreadIdSet,\s*\n\s*\),/);
+  // Pinned threads have their own always-visible region, so BOTH recent
+  // surfaces must exclude them: the rail's feed and the sidebar's chat list.
+  // Pin each call site by name — asserting only that some call exists would let
+  // one surface silently lose its filter.
+  const calls = appShell.match(/excludePinnedFromRecent\(/g) ?? [];
+  assert.equal(calls.length, 2, "expected exactly one filter per recent surface");
+  // Rail: applied where the selected feed's threads are derived.
+  assert.match(
+    appShell,
+    /excludePinnedFromRecent\(\s*\n\s*showingFavoriteThreads[\s\S]{0,220}?pinnedThreadIdSet,/,
+  );
+  // Sidebar: applied to the Chats feed read by name.
+  assert.match(
+    appShell,
+    /excludePinnedFromRecent\(\s*\n\s*recentThreadFeeds\.chatsThreads,\s*\n\s*pinnedThreadIdSet,/,
+  );
+  // Never re-derived inside a view.
   assert.doesNotMatch(recentSidebar, /excludePinnedFromRecent/);
   assert.doesNotMatch(sidebarRecentList, /excludePinnedFromRecent/);
+});
+
+test("emptiness is decided by the server feed, not by the filtered row count", () => {
+  // A fully-pinned page renders zero rows while the feed is populated; the
+  // empty-state copy must not fire there. Pin the source of that decision.
+  const model = readFileSync(
+    new URL("./recent-conversation-sidebar-model.ts", import.meta.url),
+    "utf8",
+  );
+  assert.match(model, /const serverFeedIsEmpty = feed\.orderedThreadIds\.length === 0;/);
+  assert.match(model, /feed\.isPrimed && serverFeedIsEmpty && !feed\.headFailure/);
+  assert.doesNotMatch(model, /feed\.isPrimed && rowCount === 0/);
 });
 
 test("closing Recent retains its content until the layout frame releases the rail", () => {

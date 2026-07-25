@@ -45,11 +45,11 @@ test("the recent list drops pinned threads and preserves server order", () => {
   assert.equal(threads.length, 4);
 });
 
-test("an all-pinned page still reads as primed, not as an empty feed", () => {
-  // The pager keeps paging the unfiltered server unit, so a page whose rows are
-  // all pinned renders empty while the feed is healthy. It must not claim a
-  // loading state, and the near-tail loader stays available to fetch more.
-  const feed = {
+test("a fully-pinned page is not an empty feed", () => {
+  // Pinned threads render in their own sidebar region, so a page can produce
+  // zero rows while the server feed is not empty. Claiming "no recent threads"
+  // there would contradict a visibly populated Pinned region.
+  const primed = {
     isPrimed: true,
     isRefreshingHead: false,
     isLoadingMore: false,
@@ -57,9 +57,57 @@ test("an all-pinned page still reads as primed, not as an empty feed", () => {
     loadGate: "ready",
     nextCursor: "cursor-2",
   };
-  const presentation = recentConversationPresentation(feed, 0, "all");
-  assert.equal(presentation.footerKind, "idle");
-  assert.equal(presentation.emptyLabelKey, "No recent threads");
+
+  const allPinned = recentConversationPresentation(
+    { ...primed, orderedThreadIds: ["pinned-a", "pinned-b"] },
+    0,
+    "all",
+  );
+  assert.equal(allPinned.emptyLabelKey, null);
+  assert.equal(allPinned.footerKind, "idle");
+
+  // Same for the sidebar's Chats list and for Favorites.
+  assert.equal(
+    recentConversationPresentation(
+      { ...primed, orderedThreadIds: ["pinned-a"] },
+      0,
+      "nonTask",
+    ).emptyLabelKey,
+    null,
+  );
+  assert.equal(
+    recentConversationPresentation(
+      { ...primed, loadGate: "exhausted", nextCursor: null, orderedThreadIds: ["pinned-a"] },
+      0,
+      "favorites",
+    ).emptyLabelKey,
+    null,
+  );
+
+  // A genuinely empty server feed still reports empty, per filter.
+  const emptyFeed = { ...primed, loadGate: "exhausted", nextCursor: null, orderedThreadIds: [] };
+  assert.equal(
+    recentConversationPresentation(emptyFeed, 0, "all").emptyLabelKey,
+    "No recent threads",
+  );
+  assert.equal(
+    recentConversationPresentation(emptyFeed, 0, "nonTask").emptyLabelKey,
+    "No recent chats",
+  );
+  assert.equal(
+    recentConversationPresentation(emptyFeed, 0, "favorites").emptyLabelKey,
+    "No favorite threads",
+  );
+
+  // An unprimed feed is loading, never empty.
+  assert.equal(
+    recentConversationPresentation(
+      { ...primed, isPrimed: false, orderedThreadIds: [] },
+      0,
+      "nonTask",
+    ).footerKind,
+    "initialLoading",
+  );
 });
 
 test("Recent segmented tabs switch with both arrow keys", () => {
@@ -118,6 +166,16 @@ function feed(overrides = {}) {
   };
 }
 
+// A rendered row count is always derived from the server feed (summary lookup
+// plus the pinned exclusion), so it can never exceed that feed's length. Keep
+// fixtures self-consistent: any case that renders N rows needs >= N feed ids.
+function feedHolding(count, overrides = {}) {
+  return feed({
+    orderedThreadIds: Array.from({ length: count }, (_, i) => `thread-${i}`),
+    ...overrides,
+  });
+}
+
 test("Recent presentation distinguishes initial, empty, and cached refresh states", () => {
   assert.deepEqual(recentConversationPresentation(feed(), 0, "all"), {
     emptyLabelKey: null,
@@ -137,7 +195,7 @@ test("Recent presentation distinguishes initial, empty, and cached refresh state
   );
   assert.deepEqual(
     recentConversationPresentation(
-      feed({ isPrimed: true, isRefreshingHead: true }),
+      feedHolding(3, { isPrimed: true, isRefreshingHead: true }),
       3,
       "all",
     ),
@@ -153,7 +211,7 @@ test("Recent presentation distinguishes initial, empty, and cached refresh state
   );
   assert.equal(
     recentConversationPresentation(
-      feed({ isPrimed: true, headFailure: "offline" }),
+      feedHolding(3, { isPrimed: true, headFailure: "offline" }),
       3,
       "all",
     ).footerKind,
@@ -164,7 +222,7 @@ test("Recent presentation distinguishes initial, empty, and cached refresh state
 test("Recent presentation maps every load-more footer gate", () => {
   assert.equal(
     recentConversationPresentation(
-      feed({ isPrimed: true, isLoadingMore: true }),
+      feedHolding(3, { isPrimed: true, isLoadingMore: true }),
       3,
       "all",
     ).footerKind,
@@ -172,7 +230,7 @@ test("Recent presentation maps every load-more footer gate", () => {
   );
   assert.equal(
     recentConversationPresentation(
-      feed({ isPrimed: true, loadGate: "failed" }),
+      feedHolding(3, { isPrimed: true, loadGate: "failed" }),
       3,
       "all",
     ).footerKind,
@@ -180,7 +238,7 @@ test("Recent presentation maps every load-more footer gate", () => {
   );
   assert.equal(
     recentConversationPresentation(
-      feed({ isPrimed: true, nextCursor: "cursor-next" }),
+      feedHolding(3, { isPrimed: true, nextCursor: "cursor-next" }),
       3,
       "all",
     ).footerKind,
@@ -188,7 +246,7 @@ test("Recent presentation maps every load-more footer gate", () => {
   );
   assert.equal(
     recentConversationPresentation(
-      feed({
+      feedHolding(3, {
         isPrimed: true,
         loadGate: "exhausted",
         nextCursor: "cursor-next",
