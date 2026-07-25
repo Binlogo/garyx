@@ -2303,7 +2303,8 @@ impl ThreadTranscriptStore {
         let mut recent_queries: std::collections::VecDeque<usize> =
             std::collections::VecDeque::with_capacity(target_user_queries);
         #[cfg(test)]
-        self.user_query_forward_scans.fetch_add(1, Ordering::Relaxed);
+        self.user_query_forward_scans
+            .fetch_add(1, Ordering::Relaxed);
         let mut index = 0usize;
         self.for_each_transcript_record(thread_id, &path, |cached| {
             if index >= end {
@@ -2340,10 +2341,13 @@ impl ThreadTranscriptStore {
     /// strictly increasing, and committed tests pin imported transcripts that
     /// start at seq 41 and seq 7, so this returns the wrong slice for them. The
     /// defect predates the cached newest-window path in `user_query_page`, which
-    /// deliberately does not route through here; fixing it means auditing every
-    /// index-based pager together (`page_before_index`, `page_after_index`, and
-    /// `page_before_user_queries` with `before_index: Some`) and is tracked
-    /// separately. Do not treat the `index == seq - 1` mapping as sound.
+    /// deliberately does not route through here — but only a cache *hit* skips
+    /// this function. A tail miss still lands here, so `before_index: None` is
+    /// fixed only when the window is served from the cached tail. Fixing the
+    /// mapping means auditing every index-based pager together
+    /// (`page_before_index`, `page_after_index`, `page_before_user_queries` with
+    /// `before_index: Some`, and `before_index: None` on a tail miss) and is
+    /// tracked separately. Do not treat the `index == seq - 1` mapping as sound.
     async fn page_messages_by_index(
         &self,
         thread_id: &str,

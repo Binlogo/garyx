@@ -6,16 +6,18 @@
 #
 #   scripts/bench/thread-history-latency.sh [thread_count] [samples]
 #
-# Cache state matters and this script cannot control it. The gateway keeps a
-# per-thread parsed tail (bounded by a store-wide budget), so a long-running
-# gateway serves most of these WARM. To measure the cold path, restart the
-# gateway first and run with samples=1:
+# Reports the median of `samples` runs per cell, for both user-query targets in
+# use: iOS asks for 3, desktop for 10. The cached-tail fast path is far more
+# likely to miss at 10, so a regression can hide entirely if only 3 is measured.
 #
-#   garyx gateway restart && scripts/bench/thread-history-latency.sh 3 1
+# EVERYTHING HERE IS THE WARM PATH. The gateway keeps a per-thread parsed tail,
+# and the first request against a thread builds it; with samples>1 the median is
+# warm by construction. There is no way to measure the cold path from inside
+# this script — that needs a gateway restart followed by exactly ONE request per
+# thread, with nothing else touching that thread first.
 #
-# Every row reports the median of `samples` runs. Responses are validated: a
-# 200 can still carry a history error, and a silently empty page would
-# otherwise read as a fast result.
+# Responses are validated: a 200 can still carry a history error, and a silently
+# empty page would otherwise read as a fast result.
 set -euo pipefail
 
 COUNT="${1:-6}"
@@ -59,7 +61,8 @@ print(f"{statistics.median(times):.4f} {returned} {total if total is not None el
 PY
 }
 
-printf '%9s  %12s  %10s  %10s  %10s  %14s\n' SIZE 'BYTES' 'window' 'delta' 'no-uql' 'returned/total'
+printf '%9s  %12s  %10s  %10s  %10s  %10s  %10s\n' \
+  SIZE 'BYTES' 'win(K=3)' 'win(K=10)' 'delta(3)' 'delta(10)' 'no-uql'
 for f in $(ls -S "${TRANSCRIPTS}"/*.jsonl 2>/dev/null | head -n "$COUNT"); do
   size=$(du -h "$f" | cut -f1)
   bytes=$(wc -c < "$f" | tr -d ' ')
@@ -68,28 +71,26 @@ for f in $(ls -S "${TRANSCRIPTS}"/*.jsonl 2>/dev/null | head -n "$COUNT"); do
   case "$tid" in thread::*) ;; *) continue ;; esac
   enc=$(python3 -c "import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1],safe=''))" "$tid")
 
-  # Ask the API for its own record count first; never assert against `wc -l`,
-  # which counts Session headers and misses a final unterminated line. When the
-  # response carries no page_info, fall back to a line-count *approximation*
-  # purely to pick a near-tail probe offset — it is never reported as a total.
-  read -r _ _ api_total <<<"$(probe "${BASE}?thread_id=${enc}&limit=1&include_tool_messages=true")"
-  if [ "$api_total" != "-" ] 2>/dev/null; then
-    approx="$api_total"
-  else
-    approx=$(wc -l < "$f" | tr -d ' ')
-  fi
+  # Pick a near-tail probe offset from the line count. This is an
+  # approximation (it counts the Session header and misses a final
+  # unterminated line) and is only ever used to choose an offset — it is never
+  # reported or asserted as a total. Deliberately no API probe here: one would
+  # build the cache before the measurements below.
+  approx=$(wc -l < "$f" | tr -d ' ')
   after=0
   if [ "$approx" -gt 140 ] 2>/dev/null; then
     after=$(( approx - 140 ))
   fi
 
-  # Cold newest-window open: what the app requests on entering a thread.
-  read -r w_t w_n w_tot <<<"$(probe "${BASE}?thread_id=${enc}&limit=100&include_tool_messages=true&user_query_limit=3")"
+  # Newest-window open: what a client requests on entering a thread.
+  read -r w3_t _ _ <<<"$(probe "${BASE}?thread_id=${enc}&limit=100&include_tool_messages=true&user_query_limit=3")"
+  read -r w10_t _ _ <<<"$(probe "${BASE}?thread_id=${enc}&limit=100&include_tool_messages=true&user_query_limit=10")"
   # One iteration of the client's forward delta paging loop.
-  read -r d_t _ _ <<<"$(probe "${BASE}?thread_id=${enc}&limit=100&after_index=${after}&user_query_limit=3&include_tool_messages=true")"
+  read -r d3_t _ _ <<<"$(probe "${BASE}?thread_id=${enc}&limit=100&after_index=${after}&user_query_limit=3&include_tool_messages=true")"
+  read -r d10_t _ _ <<<"$(probe "${BASE}?thread_id=${enc}&limit=100&after_index=${after}&user_query_limit=10&include_tool_messages=true")"
   # Control: identical request without the user-query window.
   read -r c_t _ _ <<<"$(probe "${BASE}?thread_id=${enc}&limit=100&after_index=${after}&include_tool_messages=true")"
 
-  printf '%9s  %12s  %9ss  %9ss  %9ss  %14s\n' \
-    "$size" "$bytes" "$w_t" "$d_t" "$c_t" "${w_n}/${w_tot}"
+  printf '%9s  %12s  %9ss  %9ss  %9ss  %9ss  %9ss\n' \
+    "$size" "$bytes" "$w3_t" "$w10_t" "$d3_t" "$d10_t" "$c_t"
 done

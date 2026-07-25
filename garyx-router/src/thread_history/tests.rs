@@ -2794,16 +2794,20 @@ fn user_query_transcript(
     format!("{}\n", lines.join("\n"))
 }
 
-/// The physical-records oracle: what `[start, total)` must contain, derived
-/// from the file itself rather than from any seq arithmetic.
-fn physical_user_query_start(body: &str, target: usize, fallback: usize) -> (usize, usize) {
-    let messages: Vec<Value> = body
-        .lines()
+/// Every message in file order, derived from the file itself rather than from
+/// any seq arithmetic. This is the oracle the cached window must reproduce.
+fn physical_messages(body: &str) -> Vec<Value> {
+    body.lines()
         .filter(|line| !line.trim().is_empty())
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
         .filter(|value| value.get("type").and_then(Value::as_str) == Some("message"))
         .map(|value| value.get("message").cloned().unwrap_or(Value::Null))
-        .collect();
+        .collect()
+}
+
+/// The physical-records oracle for the window start.
+fn physical_user_query_start(body: &str, target: usize, fallback: usize) -> (usize, usize) {
+    let messages = physical_messages(body);
     let total = messages.len();
     let mut hits = Vec::new();
     for (index, message) in messages.iter().enumerate() {
@@ -2887,7 +2891,11 @@ async fn newest_user_query_window_matches_the_oracle_for_an_imported_offset_tran
         .unwrap();
 
     assert_eq!((total, start), (expected_total, expected_start));
-    assert_eq!(messages.len(), expected_total - expected_start);
+    assert_eq!(
+        messages,
+        physical_messages(&body)[expected_start..].to_vec(),
+        "the window must equal the physical records slice, value for value"
+    );
     assert_eq!(
         messages.first().and_then(|m| m.get("role")),
         Some(&json!("user")),
@@ -2945,6 +2953,9 @@ async fn newest_user_query_window_with_no_user_queries_uses_the_fallback_limit()
     write_transcript(dir.path(), thread_id, &body).await;
     let store = ThreadTranscriptStore::file(dir.path()).await.unwrap();
 
+    let baseline = store
+        .user_query_forward_scans
+        .load(CacheTestOrdering::Relaxed);
     let (messages, total, start) = store
         .page_before_user_queries(thread_id, None, 3, 10)
         .await
@@ -2952,7 +2963,14 @@ async fn newest_user_query_window_with_no_user_queries_uses_the_fallback_limit()
 
     assert_eq!(total, 30);
     assert_eq!(start, 20, "no user query -> newest `fallback` messages");
-    assert_eq!(messages.len(), 10);
+    assert_eq!(messages, physical_messages(&body)[20..].to_vec());
+    assert_eq!(
+        store
+            .user_query_forward_scans
+            .load(CacheTestOrdering::Relaxed),
+        baseline,
+        "the whole file is cached, so this branch must be a hit, not a fall-through"
+    );
 }
 
 #[tokio::test]
@@ -2965,13 +2983,23 @@ async fn newest_user_query_window_below_target_over_whole_file_starts_at_zero() 
     write_transcript(dir.path(), thread_id, &body).await;
     let store = ThreadTranscriptStore::file(dir.path()).await.unwrap();
 
+    let baseline = store
+        .user_query_forward_scans
+        .load(CacheTestOrdering::Relaxed);
     let (messages, total, start) = store
         .page_before_user_queries(thread_id, None, 3, 50)
         .await
         .unwrap();
 
     assert_eq!((total, start), (6, 0));
-    assert_eq!(messages.len(), 6);
+    assert_eq!(messages, physical_messages(&body));
+    assert_eq!(
+        store
+            .user_query_forward_scans
+            .load(CacheTestOrdering::Relaxed),
+        baseline,
+        "the whole file is cached, so this branch must be a hit, not a fall-through"
+    );
 }
 
 #[tokio::test]
@@ -3019,4 +3047,67 @@ async fn newest_user_query_window_is_empty_for_an_absent_transcript() {
         .unwrap();
     assert!(messages.is_empty());
     assert_eq!((total, start), (0, 0));
+}
+
+#[tokio::test]
+async fn newest_user_query_window_stays_consistent_with_a_concurrent_append() {
+    let dir = tempdir().unwrap();
+    let thread_id = "thread::uq-concurrent";
+    let body = user_query_transcript(thread_id, 40, 1, 1, 6);
+    write_transcript(dir.path(), thread_id, &body).await;
+    let store = std::sync::Arc::new(ThreadTranscriptStore::file(dir.path()).await.unwrap());
+
+    // Readers and a writer race on the same thread slot. Every read must see a
+    // self-consistent (messages, total, start), never a window stitched across
+    // two generations of the file.
+    let writer = {
+        let store = store.clone();
+        tokio::spawn(async move {
+            for i in 0..12 {
+                store
+                    .append_committed_messages(
+                        thread_id,
+                        None,
+                        &[json!({"role": "user", "content": format!("concurrent {i}")})],
+                    )
+                    .await
+                    .unwrap();
+            }
+        })
+    };
+    let readers: Vec<_> = (0..4)
+        .map(|_| {
+            let store = store.clone();
+            tokio::spawn(async move {
+                for _ in 0..12 {
+                    let (messages, total, start) = store
+                        .page_before_user_queries(thread_id, None, 3, 50)
+                        .await
+                        .unwrap();
+                    assert!(start <= total);
+                    assert_eq!(
+                        messages.len(),
+                        total - start,
+                        "the page must match the window it reports"
+                    );
+                }
+            })
+        })
+        .collect();
+
+    writer.await.unwrap();
+    for reader in readers {
+        reader.await.unwrap();
+    }
+
+    let (messages, total, start) = store
+        .page_before_user_queries(thread_id, None, 3, 50)
+        .await
+        .unwrap();
+    assert_eq!(total, 52);
+    assert_eq!(messages.len(), total - start);
+    assert_eq!(
+        messages.last().and_then(|m| m.get("content")),
+        Some(&json!("concurrent 11"))
+    );
 }
