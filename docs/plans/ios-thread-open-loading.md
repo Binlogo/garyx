@@ -55,9 +55,9 @@
      而 `GaryxTranscriptMirrorStore.clearAll` **只给已存在的线程**递增 generation ——
      首次冷 hydrate 的线程本就不在 mirror 里,generation 救不了,只有 scope token 能
      判断这份解码结果属于已离开的 scope。
-3. **hydrate 事务**(`hydrateTranscriptMirrorFromDisk`):seed mirror → 若为当前选中线程
-   且窗口带 render snapshot 则 `lockSelectedTurnRowsWindowFloorIfNeeded()` →
-   递增专用 revision。
+3. **hydrate 事务**(`hydrateTranscriptMirrorFromDisk`):seed mirror → **若不是当前
+   选中线程则到此为止**(不锁 floor、不发布);是选中线程时,窗口带 render snapshot 则
+   `lockSelectedTurnRowsWindowFloorIfNeeded()`,然后递增专用 revision。
 
 `GaryxMobileModel.swift`:新增 `@Published transcriptMirrorHydrationRevision`
 (与既有 `selectedTurnRowsWindowRevision` 同样式,internal setter)+ in-flight 表。
@@ -92,22 +92,25 @@ TTL 24h 封顶,首帧实时快照覆盖自愈。
 
 ## 验证
 
-`Tests/GaryxMobileTests/GaryxTranscriptDiskHydrationPublishTests.swift`,14 例。
-竞态用例用真实 happens-before:fake store 在 `load` 内阻塞(跑在主 actor 之外),
-测试在主 actor 完成变更后才放行,不依赖 `Task` 调度顺序。
+`Tests/GaryxMobileTests/GaryxTranscriptDiskHydrationPublishTests.swift`,15 例。
+**加载期间**的竞态用例(直播写入、nil-clear、gateway 切换)用真实 happens-before:
+gated fake store 在 `load` 内阻塞(跑在主 actor 之外),测试在主 actor 完成变更后才放行,
+不依赖 `Task` 调度顺序;进入通知用带超时的 `XCTestExpectation`,回归不会挂死 suite。
+**完成之后**的 waiter 窗口则不经 store 直接构造(装入一个已完成的 in-flight 条目,
+再 seed 并清空 mirror)。
 
-- 新代码 **14/14 PASS**(连跑 3 次无抖动)。
+- 新代码 **15/15 PASS**(连跑 3 次无抖动)。
 - 摘掉 hydrate 事务的旧行为探针:**6 FAIL**(含发布断言、floor 滑动 `turn:21`→`turn:31`)。
 - 退回单一 `if let current` 新鲜度检查的探针:**5 FAIL**(nil-clear 复活、
   gateway 切换后旧 scope 窗口复活并在后续选择时可见)。
 - 摘掉 per-entrant scope 复检的探针:**1 FAIL** ——
   `testEntrantFromAnExitedScopeNeverReceivesTheDestinationScopesWindow`,
   origin entrant 收到了 destination scope 的窗口。
-  ("冻结共享返回值"那条我没做出干净的隔离探针:能想到的构造都会重新进入被 gate 的
-  fake store 从而污染结果。该分支目前只由
-  `testClearLandingAfterTheHydrateIsNotReturnedToTheEntrant` 的构造本身保证。)
+- "冻结共享返回值"由 `testEntrantResumingOnACompletedEntryRereadsTheMirror` 隔离固化
+  (构造来自 review #TASK-2712):在 `1f6f15d44` 上 FAIL(返回冻结的旧窗口),
+  在 `030f611b5` 上 PASS。
 - `swift test`(GaryxMobileCore)1595 passed。
-- `xcodebuild -only-testing:GaryxMobileTests` 219 passed。
+- `xcodebuild -only-testing:GaryxMobileTests` 220 passed。
 - app target `xcodebuild build` SUCCEEDED。
 - 新增测试文件后跑了 `xcodegen generate`(工程按目录收录;已验证引用文件集合只多了
   该文件,其余为 UUID 规范化抖动)。
@@ -123,5 +126,20 @@ TTL 24h 封顶,首帧实时快照覆盖自愈。
 本机开过且磁盘缓存仍在(TTL 24h 内)的线程 → hydrate 落地即出内容;**P4 内存淘汰过的
 线程同样受益**,因为淘汰只清内存投影,磁盘缓存仍在。
 
-从未在本机开过、或超出 TTL 的线程仍需等网络 —— 那属于服务端全文件扫描问题
-(transcript 索引、`spawn_blocking`、缓存预算),不在本轮范围。
+从未在本机开过、或超出 TTL 的线程仍需等网络。本轮之后对服务端做了实测(localhost,
+388MB / 55541 行的线程):
+
+| | |
+|---|---|
+| `/api/threads/history` | 1.05s,响应仅 419KB |
+| warm 重跑 | 1.14s / 1.19s —— 缓存对这条路径**完全无效** |
+| 延迟 vs 文件大小 | 线性,约 2.7 ms/MB |
+| 同一请求去掉 `user_query_limit` | **0.004s**(返回 100 条真实消息) |
+
+所以慢的不是"文件大",而是 `user_query_limit` 触发 `page_before_user_queries`
+从字节 0 正向扫描找最近 N 个 user turn,且绕过缓存。iOS 的分页循环每页都带这个参数
+(最多 50 页),于是每翻一页重扫一次整个文件 —— 这才是多秒延迟的来源。
+
+修法应为**从尾部倒扫**找 user turn(store 已有 64KB 反向分块机制),而不是建索引或
+调缓存预算 —— 实测证明后两者对这条路径无效。次要项:剩余整文件读移入 `spawn_blocking`,
+避免单个大线程占住 tokio worker。均不在本轮范围。

@@ -146,8 +146,10 @@ final class GaryxTranscriptDiskHydrationPublishTests: XCTestCase {
         )
         model.transcriptCacheStore = store
 
+        let entered = expectation(description: "load entered")
+        store.armEntryExpectation(entered)
         let handle = Task { await model.transcriptSnapshotAsync(for: thread.id) }
-        await store.waitUntilLoadEntered()
+        await fulfillment(of: [entered], timeout: 10)
         model.setTranscriptMirror(live, for: thread.id)
         store.releaseLoad()
         let resolved = await handle.value
@@ -174,8 +176,10 @@ final class GaryxTranscriptDiskHydrationPublishTests: XCTestCase {
         model.transcriptCacheStore = store
         model.setTranscriptMirror(nil, for: thread.id)
 
+        let entered = expectation(description: "load entered")
+        store.armEntryExpectation(entered)
         let handle = Task { await model.transcriptSnapshotAsync(for: thread.id) }
-        await store.waitUntilLoadEntered()
+        await fulfillment(of: [entered], timeout: 10)
         model.clearTranscriptCache(for: thread.id)
         store.releaseLoad()
         let resolved = await handle.value
@@ -184,14 +188,40 @@ final class GaryxTranscriptDiskHydrationPublishTests: XCTestCase {
         XCTAssertNil(resolved, "the cleared window must not escape to the caller")
     }
 
-    /// The two gates only establish that the *hydrate* was valid when it ran. A
-    /// clear that lands after it, but before the entrant resumes, must still win:
-    /// the entrant reads the mirror fresh instead of returning a window frozen by
-    /// the shared task.
+    /// The waiter window, isolated: an in-flight entry that has already completed,
+    /// with the mirror seeded and then cleared behind it. A coalesced entrant that
+    /// resumes here must re-read the mirror rather than hand back the window the
+    /// shared task produced — and must not touch the store to find that out.
     ///
-    /// The clear is issued from the hydrate's own publish, so it is synchronously
-    /// ordered after the seed and before any entrant resumes.
-    func testClearLandingAfterTheHydrateIsNotReturnedToTheEntrant() async {
+    /// Constructed without the store so nothing else can influence the outcome.
+    /// (Probe supplied by review #TASK-2712: fails on 1f6f15d44, passes here.)
+    func testEntrantResumingOnACompletedEntryRereadsTheMirror() async {
+        let model = makeModel()
+        let thread = makeThread(id: "thread::hydrate-waiter-window")
+        model.selectedThread = thread
+        let store = FakeTranscriptCacheStore(windows: [:])
+        model.transcriptCacheStore = store
+
+        let completed = Task<Void, Never> {}
+        await completed.value
+        model.transcriptDiskHydrationTasks[thread.id] = completed
+        model.setTranscriptMirror(window(for: thread.id, text: "stale"), for: thread.id)
+        model.setTranscriptMirror(nil, for: thread.id)
+
+        let resolved = await model.transcriptSnapshotAsync(for: thread.id)
+
+        XCTAssertNil(resolved, "a frozen shared result must not outlive the mirror")
+        XCTAssertEqual(store.loadCount, 0, "resolving a coalesced entrant reads no disk")
+    }
+
+    /// A clear issued *reentrantly*, from inside the hydrate's own floor-lock
+    /// publish, must not leave the entrant holding the seeded window.
+    ///
+    /// Scope: this fires while the hydrate is still on the stack — before the
+    /// shared task completes — so it stresses publish reentrancy, not the
+    /// post-completion waiter window. That window is covered by
+    /// `testEntrantResumingOnACompletedEntryRereadsTheMirror`.
+    func testClearIssuedReentrantlyFromTheHydratePublishIsNotReturnedToTheEntrant() async {
         let model = makeModel()
         let thread = makeThread(id: "thread::hydrate-late-clear")
         model.selectedThread = thread
@@ -229,8 +259,10 @@ final class GaryxTranscriptDiskHydrationPublishTests: XCTestCase {
         )
         model.transcriptCacheStore = store
 
+        let entered = expectation(description: "load entered")
+        store.armEntryExpectation(entered)
         let handle = Task { await model.transcriptSnapshotAsync(for: thread.id) }
-        await store.waitUntilLoadEntered()
+        await fulfillment(of: [entered], timeout: 10)
         model.resetGatewayRuntimeState()
         model.gatewayRequestToken = GaryxGatewayRequestToken(
             scope: GaryxGatewayScope(identity: "destination-gateway", epoch: 1),
@@ -264,8 +296,10 @@ final class GaryxTranscriptDiskHydrationPublishTests: XCTestCase {
         )
         model.transcriptCacheStore = store
 
+        let entered = expectation(description: "load entered")
+        store.armEntryExpectation(entered)
         let handle = Task { await model.transcriptSnapshotAsync(for: thread.id) }
-        await store.waitUntilLoadEntered()
+        await fulfillment(of: [entered], timeout: 10)
         model.resetGatewayRuntimeState()
         model.gatewayRequestToken = GaryxGatewayRequestToken(
             scope: GaryxGatewayScope(identity: "other-gateway", epoch: 1),
@@ -491,14 +525,15 @@ private final class FakeTranscriptCacheStore: GaryxTranscriptCacheStore, @unchec
     /// mutate model state on the main actor and know that mutation is ordered
     /// before the load returns — a real happens-before instead of a race.
     ///
-    /// Entry is announced through a continuation rather than a semaphore: waiting
-    /// on `DispatchSemaphore` from an async context is unavailable in Swift 6 and
-    /// would burn a second cooperative worker. The release side stays a semaphore
-    /// because the store protocol's `load` is synchronous, and it is bounded so a
-    /// failing test cannot hang the suite.
+    /// Entry is announced through an `XCTestExpectation` so the waiting side has a
+    /// timeout: a regression that stops `load` from being reached fails the test
+    /// instead of hanging the suite forever. (A bare continuation cannot be timed
+    /// out, and `DispatchSemaphore.wait` is unavailable from async contexts in
+    /// Swift 6.) The release side stays a semaphore — the store protocol's `load`
+    /// is synchronous — and is bounded for the same reason.
     private let gated: Bool
     private var enteredLoad = false
-    private var entryWaiter: CheckedContinuation<Void, Never>?
+    private var entryExpectation: XCTestExpectation?
     private let release = DispatchSemaphore(value: 0)
 
     init(windows: [String: GaryxCachedTranscript], gated: Bool = false) {
@@ -512,17 +547,14 @@ private final class FakeTranscriptCacheStore: GaryxTranscriptCacheStore, @unchec
         return loads
     }
 
-    func waitUntilLoadEntered() async {
-        await withCheckedContinuation { continuation in
-            lock.lock()
-            if enteredLoad {
-                lock.unlock()
-                continuation.resume()
-                return
-            }
-            entryWaiter = continuation
-            lock.unlock()
-        }
+    /// Arm an expectation that fulfills when `load` is entered. Await it with
+    /// `fulfillment(of:timeout:)`.
+    func armEntryExpectation(_ expectation: XCTestExpectation) {
+        lock.lock()
+        let already = enteredLoad
+        if !already { entryExpectation = expectation }
+        lock.unlock()
+        if already { expectation.fulfill() }
     }
 
     func releaseLoad() {
@@ -533,15 +565,15 @@ private final class FakeTranscriptCacheStore: GaryxTranscriptCacheStore, @unchec
         lock.lock()
         loads += 1
         let window = windows[threadId]
-        var waiter: CheckedContinuation<Void, Never>?
+        var expectation: XCTestExpectation?
         if gated {
             enteredLoad = true
-            waiter = entryWaiter
-            entryWaiter = nil
+            expectation = entryExpectation
+            entryExpectation = nil
         }
         lock.unlock()
         if gated {
-            waiter?.resume()
+            expectation?.fulfill()
             _ = release.wait(timeout: .now() + 10)
         }
         return window
