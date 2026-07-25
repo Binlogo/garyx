@@ -1067,6 +1067,147 @@ final class GaryxProductionRouteIntentIntegrationTests: XCTestCase {
         XCTAssertEqual(model.routeNotFoundStore.selection?.title, "Skill File Not Found")
     }
 
+    /// A drawer bot row whose main endpoint is bound to a thread opens that
+    /// conversation through the shared thread-open funnel. The navigation
+    /// drawer is home chrome, so the push must collapse it: the main-endpoint
+    /// branch used to return early from `openBotGroup` and leave the drawer
+    /// open on top of the pushed conversation.
+    func testDrawerBotMainThreadOpenCollapsesTheNavigationDrawer() async {
+        let session = routePreparationSession { request in
+            try self.routePreparationResponse(
+                request,
+                data: Data(#"{"messages":[]}"#.utf8)
+            )
+        }
+        let model = routePreparationModel(session: session)
+        model.connectionState = .ready(version: "test")
+        _ = attachGlobalRevealHost(to: model)
+        model.drawerRevealInteraction.configure(extent: 330, restingPosition: .closed)
+
+        let thread = GaryxMobileModel.placeholderThreadSummary(id: "thread-bot-main")
+        model.cacheThreadSummaries([thread])
+        model.setSidebarVisible(true, animated: false)
+        XCTAssertTrue(model.sidebarVisible)
+        XCTAssertEqual(model.drawerRevealInteraction.presentation.target, .open)
+
+        await model.openBotGroup(botGroupFixture(mainThreadId: thread.id))
+
+        XCTAssertEqual(
+            model.productionRouteStore.path.map(\.destination),
+            [.conversation(threadID: thread.id)]
+        )
+        XCTAssertFalse(
+            model.sidebarVisible,
+            "opening a bot's main-endpoint thread must collapse the navigation drawer"
+        )
+        XCTAssertEqual(model.drawerRevealInteraction.presentation.target, .closed)
+    }
+
+    /// A widget row tap opens its thread through prepared-route admission,
+    /// never through `showSelectedThread`. It is driven here as the real URL
+    /// the widget builds, so a collapse owned by any single conversation-open
+    /// helper cannot satisfy this test.
+    func testWidgetThreadLinkCollapsesTheNavigationDrawer() async throws {
+        let session = routePreparationSession { request in
+            try self.routePreparationResponse(
+                request,
+                data: Data(#"{"messages":[]}"#.utf8)
+            )
+        }
+        let model = routePreparationModel(session: session)
+        model.connectionState = .ready(version: "test")
+        _ = attachGlobalRevealHost(to: model)
+        model.drawerRevealInteraction.configure(extent: 330, restingPosition: .closed)
+
+        let thread = GaryxMobileModel.placeholderThreadSummary(id: "thread-widget-link")
+        model.cacheThreadSummaries([thread])
+        model.setSidebarVisible(true, animated: false)
+        XCTAssertTrue(model.sidebarVisible)
+
+        let link = try XCTUnwrap(GaryxMobileThreadLink.make(threadId: thread.id))
+        await model.handleOpenURL(link)
+
+        XCTAssertEqual(
+            model.productionRouteStore.path.map(\.destination),
+            [.conversation(threadID: thread.id)]
+        )
+        XCTAssertFalse(
+            model.sidebarVisible,
+            "a widget thread link must collapse the navigation drawer it pushed over"
+        )
+        XCTAssertEqual(model.drawerRevealInteraction.presentation.target, .closed)
+    }
+
+    /// Ordering guard for the attached renderer: the canonical commit
+    /// force-terminalizes the reveal at whatever sidebar position it observes,
+    /// so the collapse must publish after that commit. Collapsing earlier
+    /// snaps the drawer shut instead of animating it closed with the push.
+    func testAdmittedRouteCollapsesTheDrawerAfterItsCanonicalCommit() {
+        let model = routePreparationModel(session: .shared)
+        _ = attachGlobalRevealHost(to: model)
+        model.drawerRevealInteraction.configure(extent: 330, restingPosition: .closed)
+        let store = model.productionRouteStore
+        var sidebarPositionsAtCommit: [GaryxHorizontalRevealPosition] = []
+        var callbacks = GaryxRouteStackContainerCallbacks()
+        callbacks.phaseChanged = { [weak store] phase in
+            store?.routePhaseChanged(phase)
+        }
+        callbacks.canonicalPathChanged = { [weak model, weak store] path in
+            guard let model else { return }
+            sidebarPositionsAtCommit.append(model.sidebarVisible ? .open : .closed)
+            store?.applyCanonicalPath(path)
+            model.commitCanonicalRouteDataOwnership(path)
+        }
+        callbacks.visibleRouteActivated = { [weak store] node in
+            store?.visibleRouteActivated(node)
+        }
+        callbacks.rendererBecameIdle = { [weak store] in
+            store?.rendererBecameIdle()
+        }
+        let container = GaryxRouteStackContainer(
+            initialPath: [],
+            callbacks: callbacks,
+            preferencesProvider: {
+                .init(reduceMotion: false, prefersCrossFadeTransitions: false)
+            },
+            hostBuilder: { node in AnyView(Text(String(describing: node))) }
+        )
+        store.attach(container)
+        model.setSidebarVisible(true, animated: false)
+
+        model.openPanel(.agents, source: .sidebar)
+
+        XCTAssertEqual(
+            sidebarPositionsAtCommit,
+            [.open],
+            "the canonical commit must still observe the open drawer"
+        )
+        XCTAssertFalse(model.sidebarVisible)
+        XCTAssertEqual(model.drawerRevealInteraction.presentation.target, .closed)
+    }
+
+    private func botGroupFixture(mainThreadId: String) -> GaryxMobileBotGroup {
+        GaryxMobileBotGroup(
+            id: "telegram::main",
+            channel: "telegram",
+            channelDisplayName: "Telegram",
+            accountId: "main",
+            title: "Test Bot",
+            subtitle: "Telegram Bot · main",
+            agentId: nil,
+            rootBehavior: "open_main",
+            status: "idle",
+            endpointCount: 1,
+            boundEndpointCount: 1,
+            workspaceDir: nil,
+            mainThreadId: mainThreadId,
+            defaultOpenThreadId: mainThreadId,
+            endpoints: [],
+            conversationNodes: [],
+            iconDataUrl: nil
+        )
+    }
+
     private func entry(
         _ id: String,
         _ destination: GaryxRouteDestination

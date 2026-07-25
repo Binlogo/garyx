@@ -42,6 +42,13 @@ final class GaryxProductionRouteStore: ObservableObject {
     private var hasDeferredCanonicalPathObservation = false
     var presentationBarrierActivated:
         @MainActor (GaryxObservableSettlementTiming) -> Void = { _ in }
+    /// Every canonical navigation — direct `open`, queued deep-link plan, or
+    /// barrier-released intent — is accepted in `execute(_:)`. Chrome that
+    /// belongs to the surface being left (the navigation drawer) collapses
+    /// from this one admission boundary instead of from each caller, which is
+    /// how a caller could previously navigate without collapsing it.
+    var routeAdmissionAccepted:
+        @MainActor (GaryxRouteDestination) -> Void = { _ in }
     private var navigationScopes: @MainActor () -> GaryxGatewayScopeRegistry = {
         GaryxGatewayScopeRegistry(
             initialActiveScope: GaryxGatewayScope(identity: "route-runtime", epoch: 1)
@@ -430,6 +437,7 @@ final class GaryxProductionRouteStore: ObservableObject {
                 : plan.entries
             applyCanonicalPath(nextPath)
             activePlan = nil
+            notifyRouteAdmissionAccepted(plan)
             plan.onVisible?()
             return
         }
@@ -445,8 +453,10 @@ final class GaryxProductionRouteStore: ObservableObject {
         if !accepted {
             activePlan = nil
             assertionFailure("terminal navigation plan was rejected by the route renderer")
-        } else if let destination = plan.entries.last?.destination,
-                  case .conversation(let threadID) = destination {
+            return
+        }
+        if let destination = plan.entries.last?.destination,
+           case .conversation(let threadID) = destination {
             // A prepared host appeared before the probe started. Re-report its
             // opening chrome while the accepted transaction is still
             // synchronous and before the first animated frame. Transcript
@@ -455,6 +465,18 @@ final class GaryxProductionRouteStore: ObservableObject {
                 .metadata(forThreadID: threadID)
                 .markPushPresentation()
         }
+        notifyRouteAdmissionAccepted(plan)
+    }
+
+    /// Runs after the transaction that installs the plan is accepted, never
+    /// when it is only queued or rejected. Observers therefore see exactly the
+    /// navigations that reached the canonical path, in the same synchronous
+    /// turn as the push and after its canonical commit — a collapse published
+    /// before that commit would be force-terminalized into a snap instead of
+    /// animating alongside the transition.
+    private func notifyRouteAdmissionAccepted(_ plan: PendingRoutePlan) {
+        guard let destination = plan.entries.last?.destination else { return }
+        routeAdmissionAccepted(destination)
     }
 
     private func discardPlansNoLongerQueued() {

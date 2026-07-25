@@ -704,6 +704,9 @@ final class GaryxMobileModel: ObservableObject {
                 observableSettlement: observableSettlement
             )
         }
+        productionRouteStore.routeAdmissionAccepted = { [weak self] _ in
+            self?.collapseNavigationDrawerForAdmittedRoute()
+        }
         refreshHomeObservationSnapshot()
         refreshShellChromeSnapshot()
         refreshNavigationDrawerSnapshot()

@@ -446,7 +446,6 @@ extension GaryxMobileModel {
             freezesSelection: freezesAgentTarget
         )
         clearNewThreadModelOverride()
-        setSidebarVisible(false)
         lastError = nil
     }
 
@@ -477,7 +476,6 @@ extension GaryxMobileModel {
             if existingThreadId == nil {
                 clearMessages(for: thread.id)
             }
-            setSidebarVisible(false)
         } catch {
             guard runtimeGeneration == gatewayRequestToken else { return }
             lastError = displayMessage(for: error)
@@ -548,7 +546,6 @@ extension GaryxMobileModel {
             draftThreadTitle = thread.title
             activePanel = .chat
             clearMessages(for: thread.id)
-            setSidebarVisible(false)
         } catch {
             guard runtimeGeneration == gatewayRequestToken else { return }
             lastError = displayMessage(for: error)
@@ -599,7 +596,6 @@ extension GaryxMobileModel {
         if !productionRouteStore.isAttached {
             applyCanonicalRouteProjection(productionRouteStore.path)
         }
-        setSidebarVisible(false)
         lastError = nil
     }
 

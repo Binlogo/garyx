@@ -124,6 +124,16 @@ extension GaryxMobileModel {
         productionRouteStore.resetToHome()
     }
 
+    /// The navigation drawer is home chrome: it only exists over the home
+    /// root, so every admitted canonical route leaves it behind. The route
+    /// store owns that moment (`routeAdmissionAccepted`), which is why no
+    /// `open*` entry point repeats the collapse — a drawer bot row bound to a
+    /// main-endpoint thread, a widget link, and a deep link all reach the
+    /// same boundary even though they navigate through different call paths.
+    func collapseNavigationDrawerForAdmittedRoute() {
+        setSidebarVisible(false)
+    }
+
     func setSidebarVisible(_ visible: Bool, animated: Bool = true) {
         guard sidebarVisible != visible else { return }
         drawerRevealInteraction.setTarget(
@@ -186,7 +196,6 @@ extension GaryxMobileModel {
         if !productionRouteStore.isAttached {
             ensureSelectedThreadStreamForVisibleConversation()
         }
-        setSidebarVisible(false)
     }
 
     func openPanel(_ panel: GaryxMobilePanel, source: GaryxMobilePanelOpenSource = .current) {
@@ -197,7 +206,6 @@ extension GaryxMobileModel {
         if !productionRouteStore.isAttached {
             applyCanonicalRouteProjection(productionRouteStore.path)
         }
-        setSidebarVisible(false)
     }
 
     func openSettings(tab: GaryxMobileSettingsTab = .manage, source: GaryxMobilePanelOpenSource = .sidebar) {
@@ -224,7 +232,6 @@ extension GaryxMobileModel {
         if !productionRouteStore.isAttached {
             applyCanonicalRouteProjection(productionRouteStore.path)
         }
-        setSidebarVisible(false)
     }
 
     func openWorkspaceBotsDrilldown(
@@ -239,7 +246,6 @@ extension GaryxMobileModel {
         if !productionRouteStore.isAttached {
             applyCanonicalRouteProjection(productionRouteStore.path)
         }
-        setSidebarVisible(false)
     }
 
     func openWorkspaceFilesPanel(source: GaryxMobilePanelOpenSource = .current) {
