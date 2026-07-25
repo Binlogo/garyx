@@ -33,3 +33,29 @@ mechanism and decided to KEEP provider titles: `ai-title` results are
 generally satisfactory, and the provider override of `garyx_prompt` labels
 is intentional accepted behavior. Do not remove or weaken the provider
 thread-title path, and do not re-open this as a bug.
+
+## Transcript window spacers and layout-environment changes
+
+Recorded from the adversarial review of the transcript performance work
+(#TASK-2707, NIT N13). Collapsed-row heights are cached as intrinsic values
+measured in the layout environment that was current when the row last
+rendered. A change to that environment — Dynamic Type, or any width change —
+re-measures live rows but not collapsed ones, so a spacer keeps its
+pre-change height until the reader scrolls that run back into the live band,
+where it re-renders and re-measures.
+
+This is self-limiting (the error only exists off-screen, and any replan after
+the run becomes live corrects it) and it is the inherent cost of windowing by
+measurement rather than by estimation. It is the only remaining path by which
+a spacer height can be wrong. Fix, if it ever matters in practice: invalidate
+the height cache on layout-environment identity change (Dynamic Type size,
+container width) so affected runs render live once before collapsing again.
+
+## Transcript row spacing is declared in two places
+
+Same review, NIT N11. The transcript row stack declares
+`VStack(alignment: .leading, spacing: 14)` while the window planner is fed
+`transcriptRowSpacing = 14` from a separate constant several hundred lines
+away. Changing the stack alone would silently shift every spacer by
+(N-1) × delta, and no test would fail. Fix: have the stack consume the same
+constant so the two cannot drift.
