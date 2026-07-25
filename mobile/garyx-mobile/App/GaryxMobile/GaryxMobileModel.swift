@@ -193,6 +193,18 @@ final class GaryxMobileModel: ObservableObject {
     /// a window change re-renders; the window state itself stays non-published so
     /// the pure body getter never publishes during a view update.
     @Published var selectedTurnRowsWindowRevision = 0
+    /// Bumped by the one-shot **disk hydrate** of a thread's persisted committed
+    /// window (`transcriptSnapshotAsync`), and by nothing else.
+    ///
+    /// `transcriptMirror` is deliberately non-published: live-stream writes touch
+    /// it per committed message and publishing those would storm view
+    /// invalidation. But the mirror is also the fallback render source
+    /// (`renderSnapshot(for:)`), so the disk hydrate — which runs before the
+    /// stream/history network calls and can carry a server-owned render snapshot
+    /// — silently made content renderable without telling SwiftUI. Bumping this
+    /// publishes the model (invalidating the observing conversation views) for
+    /// that one transition, while every live mirror write stays silent.
+    @Published var transcriptMirrorHydrationRevision = 0
     /// Legacy-shaped read bridges over `runTracker`.
     var isSending: Bool { runTracker.hasLocalActiveRun }
     var activeRunThreadId: String? { runTracker.localActiveRunThreadId }
@@ -459,6 +471,13 @@ final class GaryxMobileModel: ObservableObject {
     /// restore policy compares against — a write path can no longer bypass the
     /// freshness gate (TASK-1751 P1).
     var transcriptMirror = GaryxTranscriptMirrorStore()
+    /// In-flight disk hydrates, keyed by thread, so concurrent entrants coalesce
+    /// onto one load. `transcriptSnapshotAsync` checks the mirror *before* it
+    /// awaits, and the stream request builder and the initial history fetch both
+    /// reach it while the mirror is still cold — without this they each read the
+    /// file, each `set` the mirror, and each advance the per-thread generation the
+    /// cold-open restore policy compares against.
+    var transcriptDiskHydrationTasks: [String: Task<GaryxCachedTranscript?, Never>] = [:]
     var transcriptCachePersistenceGenerations: [String: UInt64] = [:]
     /// Monotonic per-thread cold-open generation, bumped in `showSelectedThread`
     /// on a thread-id change; the async restore task captures it at spawn and

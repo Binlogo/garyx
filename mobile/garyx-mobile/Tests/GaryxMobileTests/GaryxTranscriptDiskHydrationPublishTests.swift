@@ -1,0 +1,388 @@
+import Combine
+import XCTest
+@testable import GaryxMobile
+
+/// The disk hydrate of a thread's persisted committed window must be a
+/// **visible** transition.
+///
+/// `transcriptMirror` is non-published on purpose (live-stream writes touch it
+/// per committed message). But `renderSnapshot(for:)` falls back to the mirror,
+/// so seeding it with a window that carries a server-owned render snapshot makes
+/// content renderable. Before this change nothing published on that seed, so the
+/// conversation stayed on the skeleton until an unrelated `@Published` write —
+/// in practice a network completion — happened to invalidate the view. The user
+/// waited out the network for pixels the model already held.
+@MainActor
+final class GaryxTranscriptDiskHydrationPublishTests: XCTestCase {
+    // MARK: - The regression
+
+    func testDiskHydratePublishesSoContentReplacesSkeletonWithoutNetwork() async {
+        let model = makeModel()
+        let thread = makeThread(id: "thread::hydrate-publish")
+        model.selectedThread = thread
+        let store = FakeTranscriptCacheStore(windows: [thread.id: window(for: thread.id)])
+        model.transcriptCacheStore = store
+
+        XCTAssertTrue(
+            model.isSelectedThreadAwaitingInitialHistory,
+            "precondition: a cold thread with nothing in memory shows the skeleton"
+        )
+
+        var publishes = 0
+        let cancellable = model.objectWillChange.sink { _ in publishes += 1 }
+        defer { cancellable.cancel() }
+
+        _ = await model.transcriptSnapshotAsync(for: thread.id)
+
+        // The load itself is the assertion that matters: before this change the
+        // seed was silent and `publishes` stayed 0 here.
+        XCTAssertGreaterThan(publishes, 0, "the disk hydrate must publish")
+        XCTAssertEqual(model.transcriptMirrorHydrationRevision, 1)
+
+        XCTAssertNotNil(model.renderSnapshot(for: thread.id), "mirror fallback now renders")
+        XCTAssertFalse(model.isSelectedThreadAwaitingInitialHistory)
+        XCTAssertEqual(
+            GaryxConversationTranscriptTreatmentPolicy.treatment(
+                localRenderableRowCount: model.selectedThreadTurnRows().count,
+                hasRenderedSnapshot: model.renderSnapshot(for: thread.id) != nil,
+                isAwaitingInitialHistory: model.isSelectedThreadAwaitingInitialHistory
+            ),
+            .content
+        )
+    }
+
+    /// The hydrate must not borrow the live render-snapshot channel: writing
+    /// `renderSnapshotsByThread` would flip `hasRenderSnapshot` in
+    /// `GaryxColdOpenRestorePolicy.State` and permanently block the dedicated
+    /// cold-open restore from applying its messages.
+    func testDiskHydrateDoesNotWriteTheLiveRenderSnapshotChannel() async {
+        let model = makeModel()
+        let thread = makeThread(id: "thread::hydrate-channel")
+        model.selectedThread = thread
+        model.transcriptCacheStore = FakeTranscriptCacheStore(
+            windows: [thread.id: window(for: thread.id)]
+        )
+
+        _ = await model.transcriptSnapshotAsync(for: thread.id)
+
+        XCTAssertNil(model.renderSnapshotsByThread[thread.id])
+    }
+
+    /// A hydrate that lands before the cold-open restore spawns must leave that
+    /// restore able to apply its messages: the restore captures the already
+    /// advanced mirror generation, so the generation gate still matches.
+    func testHydrateBeforeColdOpenRestoreSpawnStillAllowsMessageRestore() async {
+        let model = makeModel()
+        let thread = makeThread(id: "thread::hydrate-then-restore")
+        model.selectedThread = thread
+        model.transcriptCacheStore = FakeTranscriptCacheStore(
+            windows: [thread.id: window(for: thread.id)]
+        )
+
+        _ = await model.transcriptSnapshotAsync(for: thread.id)
+
+        // What the restore captures at spawn — i.e. after the hydrate.
+        let captured = model.transcriptMirror.generation(for: thread.id)
+        let state = GaryxColdOpenRestorePolicy.State(
+            restoredThreadId: thread.id,
+            selectedThreadId: model.selectedThread?.id,
+            capturedGeneration: model.selectedThreadColdOpenGeneration,
+            currentGeneration: model.selectedThreadColdOpenGeneration,
+            capturedMirrorGeneration: captured,
+            currentMirrorGeneration: model.transcriptMirror.generation(for: thread.id),
+            threadHistoryLoaded: model.threadHistoryLoadedIds.contains(thread.id),
+            hasRenderSnapshot: model.renderSnapshotsByThread[thread.id] != nil,
+            hasMessages: !model.cachedMessages(for: thread.id).isEmpty
+        )
+
+        XCTAssertTrue(GaryxColdOpenRestorePolicy.shouldApply(state))
+    }
+
+    // MARK: - Concurrency
+
+    /// The mirror check in `transcriptSnapshotAsync` happens before its await, so
+    /// on a cold open the stream request builder and the initial history fetch
+    /// both pass it. Without coalescing each reads the file, each seeds the
+    /// mirror, and each advances the generation the restore policy compares.
+    func testConcurrentEntrantsCoalesceOntoOneLoadOneSeedOnePublish() async {
+        let model = makeModel()
+        let thread = makeThread(id: "thread::hydrate-coalesce")
+        model.selectedThread = thread
+        let store = FakeTranscriptCacheStore(windows: [thread.id: window(for: thread.id)])
+        model.transcriptCacheStore = store
+
+        async let first = model.transcriptSnapshotAsync(for: thread.id)
+        async let second = model.transcriptSnapshotAsync(for: thread.id)
+        let results = await [first, second]
+
+        XCTAssertEqual(store.loadCount, 1, "one disk read")
+        XCTAssertEqual(model.transcriptMirror.generation(for: thread.id), 1, "one mirror seed")
+        XCTAssertEqual(model.transcriptMirrorHydrationRevision, 1, "one publish")
+        XCTAssertEqual(results.compactMap { $0 }.count, 2, "both entrants get the window")
+        XCTAssertEqual(results[0], results[1])
+    }
+
+    /// A live committed/render write — or a `clearTranscriptCache` from stream
+    /// control-rewrite recovery — can win the mirror while the load is in flight.
+    /// The older disk window must not overwrite it.
+    func testLiveMirrorWriteDuringLoadIsNotOverwrittenByTheDiskWindow() async {
+        let model = makeModel()
+        let thread = makeThread(id: "thread::hydrate-freshness")
+        model.selectedThread = thread
+        let live = window(for: thread.id, text: "live", basedOnSeq: 9)
+        let store = FakeTranscriptCacheStore(
+            windows: [thread.id: window(for: thread.id, text: "stale", basedOnSeq: 2)],
+            onLoad: { [weak model] in
+                // Runs on the persistence actor, mid-flight for the caller.
+                Task { @MainActor in model?.setTranscriptMirror(live, for: thread.id) }
+            }
+        )
+        model.transcriptCacheStore = store
+
+        let resolved = await model.transcriptSnapshotAsync(for: thread.id)
+
+        XCTAssertEqual(model.transcriptMirror.snapshot(for: thread.id), live)
+        XCTAssertEqual(resolved, live, "the caller sees the winning window, not the disk one")
+    }
+
+    // MARK: - Window floor
+
+    func testHydrateAnchorsTheWindowFloor() async {
+        let model = makeModel()
+        let thread = makeThread(id: "thread::hydrate-floor")
+        model.selectedThread = thread
+        model.transcriptCacheStore = FakeTranscriptCacheStore(
+            windows: [thread.id: window(for: thread.id)]
+        )
+
+        XCTAssertNil(model.selectedTurnRowsWindowState.floorRowId)
+
+        _ = await model.transcriptSnapshotAsync(for: thread.id)
+
+        XCTAssertNotNil(
+            model.selectedTurnRowsWindowState.floorRowId,
+            "the hydrate must anchor the P3 floor the way setRenderSnapshot does"
+        )
+    }
+
+    /// The reason the floor matters: with it anchored, an active run appending
+    /// tail rows grows the window at the bottom instead of sliding the head.
+    func testAnchoredFloorKeepsTheHeadStableWhenARunAppendsTailRows() async {
+        let model = makeModel()
+        let thread = makeThread(id: "thread::hydrate-floor-append")
+        model.selectedThread = thread
+        let turns = GaryxTurnRowsWindowPlannerLimits.initialLimit + 10
+        model.transcriptCacheStore = FakeTranscriptCacheStore(
+            windows: [thread.id: window(for: thread.id, turns: turns)]
+        )
+
+        _ = await model.transcriptSnapshotAsync(for: thread.id)
+        let headBeforeAppend = model.selectedThreadTurnRows().first?.id
+        XCTAssertNotNil(headBeforeAppend)
+
+        // A run appends at the tail, exactly as a live frame would.
+        model.setTranscriptMirror(window(for: thread.id, turns: turns + 5), for: thread.id)
+
+        XCTAssertEqual(
+            model.selectedThreadTurnRows().first?.id,
+            headBeforeAppend,
+            "an anchored floor must not slide when rows are appended"
+        )
+    }
+
+    // MARK: - Windows with no render snapshot
+
+    func testWindowWithoutRenderSnapshotStillSeedsAndPublishesButAnchorsNoFloor() async {
+        let model = makeModel()
+        let thread = makeThread(id: "thread::hydrate-no-snapshot")
+        model.selectedThread = thread
+        model.transcriptCacheStore = FakeTranscriptCacheStore(
+            windows: [thread.id: window(for: thread.id, includeRenderSnapshot: false)]
+        )
+
+        _ = await model.transcriptSnapshotAsync(for: thread.id)
+
+        XCTAssertNotNil(model.transcriptMirror.snapshot(for: thread.id), "cursor seed still happens")
+        XCTAssertEqual(model.transcriptMirrorHydrationRevision, 1)
+        XCTAssertNil(model.selectedTurnRowsWindowState.floorRowId, "nothing renderable to anchor")
+        XCTAssertTrue(model.isSelectedThreadAwaitingInitialHistory, "still genuinely waiting")
+    }
+
+    // MARK: - Non-selected threads
+
+    func testHydrateForANonSelectedThreadSeedsWithoutTouchingSelectedPresentation() async {
+        let model = makeModel()
+        let selected = makeThread(id: "thread::hydrate-selected")
+        let other = makeThread(id: "thread::hydrate-other")
+        model.selectedThread = selected
+        model.transcriptCacheStore = FakeTranscriptCacheStore(
+            windows: [other.id: window(for: other.id)]
+        )
+
+        _ = await model.transcriptSnapshotAsync(for: other.id)
+
+        XCTAssertNotNil(model.transcriptMirror.snapshot(for: other.id))
+        XCTAssertEqual(model.transcriptMirrorHydrationRevision, 0, "not the selected thread")
+        XCTAssertNil(model.selectedTurnRowsWindowState.floorRowId)
+    }
+
+    // MARK: - Live writes stay silent
+
+    func testLiveMirrorWritesDoNotBumpTheHydrationRevision() {
+        let model = makeModel()
+        let thread = makeThread(id: "thread::hydrate-live-silent")
+        model.selectedThread = thread
+
+        for seq in 1...5 {
+            model.setTranscriptMirror(
+                window(for: thread.id, basedOnSeq: seq),
+                for: thread.id
+            )
+        }
+
+        XCTAssertEqual(
+            model.transcriptMirrorHydrationRevision,
+            0,
+            "only the disk hydrate publishes; streaming writes must stay silent"
+        )
+    }
+
+    // MARK: - Fixtures
+
+    private func makeModel() -> GaryxMobileModel {
+        let suiteName = "GaryxTranscriptDiskHydrationPublishTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defaults.removePersistentDomain(forName: suiteName)
+        return GaryxMobileModel(defaults: defaults)
+    }
+
+    private func makeThread(id: String) -> GaryxThreadSummary {
+        GaryxThreadSummary(
+            id: id,
+            title: "Hydration Thread",
+            createdAt: nil,
+            updatedAt: nil,
+            lastMessagePreview: "",
+            workspacePath: nil,
+            messageCount: nil,
+            agentId: nil,
+            providerType: nil,
+            recentRunId: nil,
+            activeRunId: nil,
+            runState: nil,
+            worktreePath: nil
+        )
+    }
+
+    /// A persisted window shaped like one the SSE path writes: committed
+    /// messages plus the server-owned render snapshot that references them.
+    private func window(
+        for threadId: String,
+        text: String = "cached",
+        basedOnSeq: Int = 2,
+        turns: Int = 1,
+        includeRenderSnapshot: Bool = true
+    ) -> GaryxCachedTranscript {
+        var messages: [GaryxTranscriptMessage] = []
+        var rows: [GaryxRenderRow] = []
+        for turn in 0..<turns {
+            let userSeq = turn * 2 + 1
+            let replySeq = userSeq + 1
+            messages.append(
+                GaryxTranscriptMessage(index: userSeq - 1, role: .user, text: "\(text) ask \(turn)")
+            )
+            messages.append(
+                GaryxTranscriptMessage(
+                    index: replySeq - 1,
+                    role: .assistant,
+                    text: "\(text) reply \(turn)"
+                )
+            )
+            rows.append(
+                .userTurn(GaryxRenderUserTurnRow(
+                    id: "turn:\(userSeq)",
+                    user: GaryxRenderMessageRef(id: "seq:\(userSeq)", seq: userSeq, role: "user"),
+                    activity: [
+                        .assistantReply(GaryxRenderAssistantReplyRow(
+                            id: "reply:\(replySeq)",
+                            message: GaryxRenderMessageRef(
+                                id: "seq:\(replySeq)",
+                                seq: replySeq,
+                                role: "assistant"
+                            )
+                        )),
+                    ]
+                ))
+            )
+        }
+        let snapshot: GaryxRenderSnapshot? = includeRenderSnapshot
+            ? GaryxRenderSnapshot(
+                basedOnSeq: max(basedOnSeq, turns * 2),
+                rows: rows,
+                tailActivity: .none
+            )
+            : nil
+        return GaryxCachedTranscript(
+            threadId: threadId,
+            savedAt: Date(timeIntervalSince1970: 0),
+            messages: messages,
+            renderSnapshot: snapshot,
+            hasMoreBefore: false,
+            nextBeforeIndex: nil
+        )
+    }
+}
+
+/// Mirrors `GaryxTurnRowsWindowPlanner.initialLimit`, which is internal to
+/// GaryxMobileCore.
+private enum GaryxTurnRowsWindowPlannerLimits {
+    static let initialLimit = 60
+}
+
+private final class FakeTranscriptCacheStore: GaryxTranscriptCacheStore, @unchecked Sendable {
+    private let lock = NSLock()
+    private var windows: [String: GaryxCachedTranscript]
+    private var loads = 0
+    private let onLoad: (@Sendable () -> Void)?
+
+    init(
+        windows: [String: GaryxCachedTranscript],
+        onLoad: (@Sendable () -> Void)? = nil
+    ) {
+        self.windows = windows
+        self.onLoad = onLoad
+    }
+
+    var loadCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return loads
+    }
+
+    func load(threadId: String) -> GaryxCachedTranscript? {
+        lock.lock()
+        loads += 1
+        let window = windows[threadId]
+        lock.unlock()
+        onLoad?()
+        return window
+    }
+
+    func save(_ snapshot: GaryxCachedTranscript) {
+        lock.lock()
+        defer { lock.unlock() }
+        windows[snapshot.threadId] = snapshot
+    }
+
+    func remove(threadId: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        windows[threadId] = nil
+    }
+
+    func clearAll() {
+        lock.lock()
+        defer { lock.unlock() }
+        windows.removeAll()
+    }
+}

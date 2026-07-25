@@ -31,19 +31,71 @@ extension GaryxMobileModel {
         return loaded
     }
 
+    /// Read the persisted committed window, seeding the in-memory mirror on a
+    /// disk hit. Concurrent entrants for one thread coalesce onto a single load,
+    /// and the seed is a **visible** hydrate (see `hydrateTranscriptMirrorFromDisk`).
     func transcriptSnapshotAsync(for threadId: String) async -> GaryxCachedTranscript? {
         if let cached = transcriptMirror.snapshot(for: threadId) {
             return cached
         }
-        let store = transcriptCacheStore
-        guard let loaded = await GaryxTranscriptCachePersistenceQueue.shared.load(
-            threadId: threadId,
-            store: store
-        ) else {
-            return nil
+        // Coalesce: the check above happens before the await below, so the stream
+        // request builder and the initial history fetch both pass it on a cold
+        // open. A follower prefers the mirror the leader hydrated, and falls back
+        // to the shared loaded window when it resumes first.
+        if let inFlight = transcriptDiskHydrationTasks[threadId] {
+            let shared = await inFlight.value
+            return transcriptMirror.snapshot(for: threadId) ?? shared
         }
-        setTranscriptMirror(loaded, for: threadId)
+        let store = transcriptCacheStore
+        let load = Task<GaryxCachedTranscript?, Never> {
+            await GaryxTranscriptCachePersistenceQueue.shared.load(
+                threadId: threadId,
+                store: store
+            )
+        }
+        transcriptDiskHydrationTasks[threadId] = load
+        let loaded = await load.value
+        transcriptDiskHydrationTasks[threadId] = nil
+        guard let loaded else { return nil }
+        // Post-await freshness: a live committed/render write — or a
+        // `clearTranscriptCache` from stream control-rewrite recovery — may have
+        // won the mirror while this load was in flight. Never overwrite it with
+        // the older disk window.
+        if let current = transcriptMirror.snapshot(for: threadId) {
+            return current
+        }
+        hydrateTranscriptMirrorFromDisk(loaded, for: threadId)
         return loaded
+    }
+
+    /// Seed the mirror from disk **and** make that seed visible.
+    ///
+    /// TASK-1751 treated a mirror seed as cursor-only bookkeeping that "never
+    /// changes visible rows", so `setTranscriptMirror` publishes nothing. That no
+    /// longer holds: `renderSnapshot(for:)` falls back to the mirror, so a seeded
+    /// window carrying a server-owned render snapshot is renderable content the
+    /// view was never told about — it stayed on the skeleton until some unrelated
+    /// `@Published` write happened to invalidate it (in practice a network
+    /// completion), i.e. it waited out the network for pixels it already had.
+    ///
+    /// This is one transaction: seed, anchor the P3 window floor the way the
+    /// dedicated cold-open restore does through `setRenderSnapshot`, then publish
+    /// once. Without the floor lock the body would render the newest rows but
+    /// discard the resolved floor, and an active run appending tail rows would
+    /// slide the visible suffix.
+    ///
+    /// Only this disk-hydrate path publishes; every live mirror write stays
+    /// silent.
+    private func hydrateTranscriptMirrorFromDisk(
+        _ window: GaryxCachedTranscript,
+        for threadId: String
+    ) {
+        setTranscriptMirror(window, for: threadId)
+        guard selectedThread?.id == threadId else { return }
+        if window.renderSnapshot != nil {
+            lockSelectedTurnRowsWindowFloorIfNeeded()
+        }
+        transcriptMirrorHydrationRevision &+= 1
     }
 
     /// Load the persisted window from disk **without** seeding the in-memory
