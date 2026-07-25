@@ -98,9 +98,13 @@ private final class GaryxConversationHostScrollViewBox {
 /// row's displacement out of this box — the exact height inserted above it.
 private final class GaryxTurnRowGeometryBox {
     private var minYByRowId: [String: CGFloat] = [:]
+    private var heightByRowId: [String: CGFloat] = [:]
 
-    func record(_ rowId: String, minY: CGFloat) {
+    func record(_ rowId: String, minY: CGFloat, height: CGFloat) {
         minYByRowId[rowId] = minY
+        if height > 0 {
+            heightByRowId[rowId] = height
+        }
     }
 
     func minY(of rowId: String) -> CGFloat? {
@@ -113,6 +117,12 @@ private final class GaryxTurnRowGeometryBox {
         minYByRowId
     }
 
+    /// Measured row heights. Intrinsic, so a collapsed row's entry stays
+    /// correct however far the layout above it moves.
+    var measuredHeight: [String: CGFloat] {
+        heightByRowId
+    }
+
     func bottommostRow() -> (id: String, minY: CGFloat)? {
         minYByRowId.max { lhs, rhs in lhs.value < rhs.value }
             .map { (id: $0.key, minY: $0.value) }
@@ -122,6 +132,7 @@ private final class GaryxTurnRowGeometryBox {
     /// map without bound.
     func retain(only rowIds: Set<String>) {
         minYByRowId = minYByRowId.filter { rowIds.contains($0.key) }
+        heightByRowId = heightByRowId.filter { rowIds.contains($0.key) }
     }
 }
 
@@ -767,11 +778,11 @@ struct GaryxConversationView: View {
         turnRowCallbackSink.onNearHistoryBoundary = {
             prefetchOlderHistoryIfNeeded()
         }
-        turnRowCallbackSink.onRowContentMinYChange = { rowId, minY in
+        turnRowCallbackSink.onRowContentGeometryChange = { rowId, minY, height in
             // Plain box write: content-space geometry never changes from
             // scrolling, so this only fires on layout changes and never
             // invalidates the body.
-            rowGeometryBox.record(rowId, minY: minY)
+            rowGeometryBox.record(rowId, minY: minY, height: height)
         }
         return ScrollView {
             ZStack(alignment: .topLeading) {
@@ -1102,7 +1113,12 @@ struct GaryxConversationView: View {
             .init(
                 rowIDs: rowIDs,
                 measuredMinY: rowGeometryBox.measuredMinY,
-                viewportTopInContent: -contentTopOffset,
+                measuredHeight: rowGeometryBox.measuredHeight,
+                rowSpacing: Self.transcriptRowSpacing,
+                // The content coordinate space starts above the stack's top
+                // padding, so the viewport's content-space origin includes it
+                // (review #TASK-2707 N5).
+                viewportTopInContent: -contentTopOffset + Self.transcriptContentTopPadding,
                 viewportHeight: metrics.viewportHeight,
                 overscan: metrics.viewportHeight,
                 pinnedTailRowCount: Self.transcriptWindowPinnedTailRows,
@@ -1118,6 +1134,11 @@ struct GaryxConversationView: View {
         }
     }
 
+    /// Spacing between transcript rows, mirrored from the row stack so the
+    /// planner can account for the gaps a collapse removes.
+    private static let transcriptRowSpacing: CGFloat = 14
+    /// Top padding inside the measured content coordinate space.
+    private static let transcriptContentTopPadding: CGFloat = 18
     /// Trailing rows that always lay out: the tail owns bottom anchoring,
     /// streaming growth, and the send/thinking region.
     private static let transcriptWindowPinnedTailRows = 6

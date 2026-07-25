@@ -4,9 +4,10 @@ Status: approved for implementation (design by Gary, 2026-07-24). Implemented
 by Gary personally; downstream agents only measure, reproduce, and review.
 
 Inputs:
-- Measured baseline and root-cause ranking: `#TASK-2703` report
-  (`docs/design/ios-conversation-scroll-performance-baseline.md`, harness
-  commit `5ea359b6d`).
+- Measured baseline and root-cause ranking: `#TASK-2703` report and harness
+  (commit `5ea359b6d`, on the measurement branch — deliberately not merged
+  into this product branch, since it carries probe wiring); retest data in
+  `#TASK-2704`, final retest in `#TASK-2706`.
 - Product decisions (boss, 2026-07-24 evening): send-anchoring cancelled
   (already removed in `e6e3f7760`); tool results may be stored locally and
   fetched on demand, transcript shows a label/list instead; sending must be

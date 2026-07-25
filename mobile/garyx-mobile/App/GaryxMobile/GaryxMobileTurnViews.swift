@@ -16,7 +16,13 @@ let garyxConversationContentSpaceName = "garyx-conversation-content"
 /// lifetime of its occurrence and only mutates the handlers inside it.
 final class GaryxTurnRowCallbackSink {
     var onNearHistoryBoundary: () -> Void = {}
-    var onRowContentMinYChange: (_ rowId: String, _ minY: CGFloat) -> Void = { _, _ in }
+    /// One callback carries both facts the transcript needs from a row:
+    /// its scroll-invariant content-space start (prepend compensation) and its
+    /// own height (window planning). Height is intrinsic, so it stays valid
+    /// while the row is collapsed — unlike a position, which goes stale the
+    /// moment the row stops reporting (review #TASK-2707 BLOCKER-2).
+    var onRowContentGeometryChange: (_ rowId: String, _ minY: CGFloat, _ height: CGFloat) -> Void
+        = { _, _, _ in }
 }
 
 struct GaryxMobileTurnRowsView: View {
@@ -40,37 +46,24 @@ struct GaryxMobileTurnRowsView: View {
     }
 
     var body: some View {
-        if windowPlan.isEmpty {
-            unwindowedRows
-        } else {
-            windowedRows
-        }
-    }
-
-    /// Plan-driven layout: live rows render, each off-screen run becomes one
-    /// spacer of exactly the height it occupied. Collapsed rows keep their
-    /// recorded geometry, so content-space positions — and therefore the
-    /// bottom anchor and prepend compensation — are unchanged.
-    @ViewBuilder
-    private var windowedRows: some View {
-        let indexByID = Dictionary(
-            uniqueKeysWithValues: rows.enumerated().map { ($0.element.id, $0.offset) }
-        )
-        ForEach(plannedEntries) { entry in
-            switch entry.segment {
-            case .spacer(let height, _):
+        // Rows are the single source of truth for WHAT exists; the plan only
+        // proposes what collapses. A row the plan does not mention renders
+        // live, so a plan computed one frame ago can delay a collapse but can
+        // never hide content — the failure mode review #TASK-2707 measured as
+        // a 204ms invisible message right after sending.
+        ForEach(renderEntries) { entry in
+            switch entry.kind {
+            case .row(let rowIndex):
+                GaryxMobileTurnRowView(
+                    row: rows[rowIndex],
+                    isWithinHistoryPrefetchBoundary: rowIndex <= prefetchBoundaryRowCount,
+                    sink: sink
+                )
+                .equatable()
+            case .spacer(let height):
                 Color.clear
                     .frame(height: height)
                     .accessibilityHidden(true)
-            case .row(let id):
-                if let rowIndex = indexByID[id] {
-                    GaryxMobileTurnRowView(
-                        row: rows[rowIndex],
-                        isWithinHistoryPrefetchBoundary: rowIndex <= prefetchBoundaryRowCount,
-                        sink: sink
-                    )
-                    .equatable()
-                }
             }
         }
         .onAppear {
@@ -81,49 +74,54 @@ struct GaryxMobileTurnRowsView: View {
         }
     }
 
-    /// Stable identity per planned entry: rows keep their own id so SwiftUI
-    /// preserves their state across replans, and a spacer is identified by the
-    /// first row it folds away.
-    private struct PlannedEntry: Identifiable {
-        let id: String
-        let segment: GaryxTranscriptWindowPlanner.Segment
+    private enum RenderKind {
+        case row(rowIndex: Int)
+        case spacer(height: CGFloat)
     }
 
-    private var plannedEntries: [PlannedEntry] {
-        windowPlan.map { segment in
-            switch segment {
-            case .row(let id):
-                return PlannedEntry(id: id, segment: segment)
-            case .spacer(_, let collapsedRowIDs):
-                return PlannedEntry(
-                    id: "garyx-collapsed-\(collapsedRowIDs.first ?? "")",
-                    segment: segment
+    /// Stable identity per entry: a row keeps its own id so SwiftUI preserves
+    /// its state across replans; a spacer is identified by the first row it
+    /// folds away.
+    private struct RenderEntry: Identifiable {
+        let id: String
+        let kind: RenderKind
+    }
+
+    /// Walk the row list in order, folding only runs the plan collapses.
+    private var renderEntries: [RenderEntry] {
+        guard !windowPlan.isEmpty else {
+            return rows.enumerated().map { index, row in
+                RenderEntry(id: row.id, kind: .row(rowIndex: index))
+            }
+        }
+        var collapsedHeightByFirstRowID: [String: CGFloat] = [:]
+        var collapsedRowIDs: [String: String] = [:]  // row id -> run's first row id
+        for segment in windowPlan {
+            guard case .spacer(let height, let ids) = segment, let first = ids.first else {
+                continue
+            }
+            collapsedHeightByFirstRowID[first] = height
+            for id in ids {
+                collapsedRowIDs[id] = first
+            }
+        }
+
+        var entries: [RenderEntry] = []
+        var emittedRuns: Set<String> = []
+        for (index, row) in rows.enumerated() {
+            guard let runFirstID = collapsedRowIDs[row.id],
+                  let height = collapsedHeightByFirstRowID[runFirstID] else {
+                entries.append(RenderEntry(id: row.id, kind: .row(rowIndex: index)))
+                continue
+            }
+            // One spacer per collapsed run, at the position of its first row.
+            if emittedRuns.insert(runFirstID).inserted {
+                entries.append(
+                    RenderEntry(id: "garyx-collapsed-\(runFirstID)", kind: .spacer(height: height))
                 )
             }
         }
-    }
-
-    @ViewBuilder
-    private var unwindowedRows: some View {
-        ForEach(Array(rows.enumerated()), id: \.element.id) { rowIndex, row in
-            // `.equatable()` is the point of this whole structure: a streaming
-            // delta changes exactly one row, so every other row compares equal
-            // and SwiftUI skips its body entirely. Before this, one delta
-            // rebuilt all resident rows — the measured structural主因
-            // (#TASK-2703: 60 rows re-evaluated per root update).
-            GaryxMobileTurnRowView(
-                row: row,
-                isWithinHistoryPrefetchBoundary: rowIndex <= prefetchBoundaryRowCount,
-                sink: sink
-            )
-            .equatable()
-        }
-        .onAppear {
-            GaryxRoutePushPerformanceProbe.shared?.markConversationContent(rowCount: rows.count)
-        }
-        .onChange(of: rows.count) { _, count in
-            GaryxRoutePushPerformanceProbe.shared?.markConversationContent(rowCount: count)
-        }
+        return entries
     }
 }
 
@@ -150,10 +148,10 @@ struct GaryxMobileTurnRowView: View, Equatable {
         VStack(alignment: .leading, spacing: 14) {
             content
         }
-        .onGeometryChange(for: CGFloat.self) { proxy in
-            proxy.frame(in: .named(garyxConversationContentSpaceName)).minY
-        } action: { minY in
-            sink.onRowContentMinYChange(row.id, minY)
+        .onGeometryChange(for: CGRect.self) { proxy in
+            proxy.frame(in: .named(garyxConversationContentSpaceName))
+        } action: { frame in
+            sink.onRowContentGeometryChange(row.id, frame.minY, frame.height)
         }
         .onAppear {
             guard isWithinHistoryPrefetchBoundary else { return }

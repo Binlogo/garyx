@@ -452,6 +452,20 @@ public struct GaryxConversationScrollState: Equatable {
         }
         if metrics.isNearBottom {
             anchoring = .followingTail
+        } else if isFollowingTail,
+                  !isUserScrollInteracting,
+                  Self.isTailGrowthRatherThanReaderTravel(
+                      from: previousMetrics,
+                      to: metrics
+                  ) {
+            // A single large tail landing (one tool result, a capsule card, an
+            // image) can exceed the near-bottom band in one frame. Judging that
+            // by distance alone dropped following with no reader gesture at all
+            // and popped the scroll-to-bottom button (review #TASK-2707
+            // MAJOR-3). The reader's own travel moves the content TOP; growth
+            // below only moves the content BOTTOM, so the two are structurally
+            // distinguishable — keep following and correct once.
+            return TailScrollRequest(reason: .repair, animated: false)
         } else if isFollowingTail, !hasUserScrolledSinceOpen, !isUserScrollInteracting {
             // The tail drifted away before the reader ever scrolled: late
             // layout settling pushed the content down (heavy markdown,
@@ -618,6 +632,22 @@ public struct GaryxConversationScrollState: Equatable {
 
     private mutating func markTailGeometryChanged() {
         tailGeometryEpoch &+= 1
+    }
+
+    /// True when the content bottom moved down while the content top stayed
+    /// put: content grew below the viewport rather than the reader travelling.
+    private static func isTailGrowthRatherThanReaderTravel(
+        from previous: GaryxConversationLayoutMetrics,
+        to current: GaryxConversationLayoutMetrics
+    ) -> Bool {
+        guard let previousTop = previous.contentTopOffset,
+              let currentTop = current.contentTopOffset else {
+            return false
+        }
+        let topHeldStill = abs(currentTop - previousTop) <= stableLayoutTolerance
+        let bottomGrew = current.contentBottomOffset > previous.contentBottomOffset
+            + stableLayoutTolerance
+        return topHeldStill && bottomGrew
     }
 
     private static func tailLayoutGeometryChanged(

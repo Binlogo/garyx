@@ -199,8 +199,17 @@ struct GaryxMessageListSignature: Equatable, Sendable {
     ///
     /// Sampling the UTF-8 view through its contiguous buffer makes the length
     /// and all three sample windows plain byte offsets, so cost no longer
-    /// scales with field size. Byte windows are also a strictly finer
-    /// fingerprint than grapheme windows of the same nominal width.
+    /// scales with field size.
+    ///
+    /// The whole-hash budget is expressed in BYTES and sized so ordinary prose
+    /// still hashes whole in every script: 1024 graphemes of CJK is ~3 KiB, so
+    /// a 1 KiB byte budget would have started sampling a 342-character Chinese
+    /// message. That matters beyond fingerprint precision, because `sampled`
+    /// gates a dedupe fast path — sampling early would have permanently
+    /// disabled it for Chinese threads and made this "optimization" a
+    /// regression for exactly this product's users (review #TASK-2707
+    /// MAJOR-4). Hashing 4 KiB is trivially cheap; only genuinely large
+    /// payloads sample.
     @discardableResult
     private static func combineTextSignature(_ value: String, into hasher: inout Hasher) -> Bool {
         let byteCount = value.utf8.count
@@ -246,8 +255,9 @@ struct GaryxMessageListSignature: Equatable, Sendable {
         combineWindow(from: max(0, count - window), to: count)
     }
 
-    /// Fields at or below this byte length are hashed whole.
-    static let wholeTextSignatureByteLimit = 1_024
+    /// Fields at or below this byte length are hashed whole. Sized to cover
+    /// ordinary prose in any script (1024 graphemes of CJK ~= 3 KiB).
+    static let wholeTextSignatureByteLimit = 4_096
     /// Byte width of each head/middle/tail sample window for longer fields.
     static let textSignatureSampleByteWindow = 256
 

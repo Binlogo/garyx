@@ -77,10 +77,75 @@ final class GaryxMessageListSignatureTests: XCTestCase {
         // agree so a signature never flips on storage form alone.
         let native = String(repeating: "élan ", count: 20_000)
         let bridged = String(NSString(string: native))
+        // Prove the fallback branch is actually exercised, instead of two
+        // native strings comparing themselves (review #TASK-2707 MAJOR-5).
+        XCTAssertNil(bridged.utf8.withContiguousStorageIfAvailable { _ in () })
         XCTAssertEqual(
             GaryxMessageListSignature.make(for: [message(text: native)]),
             GaryxMessageListSignature.make(for: [message(text: bridged)])
         )
+    }
+
+    // MARK: Discriminating guards (review #TASK-2707 MAJOR-5)
+    //
+    // The first version of this file passed unchanged against the OLD
+    // grapheme-walking implementation, so it could not have caught the commit
+    // being reverted. These cases exercise the properties that actually differ.
+
+    func testOrdinaryChineseProseIsHashedWholeAndKeepsTheDedupeFastPath() {
+        // `sampled` gates a dedupe fast path, so sampling early would disable
+        // it for entire Chinese threads. 400 CJK characters is ~1.2 KiB: well
+        // past a 1 KiB byte budget, comfortably inside the real one.
+        let prose = String(repeating: "性能优化真机验收", count: 50)
+        XCTAssertGreaterThan(prose.utf8.count, 1_024)
+        let signature = GaryxMessageListSignature.make(for: [message(text: prose)])
+        XCTAssertFalse(
+            signature.sampled,
+            "ordinary CJK prose must stay whole-hashed or the dedupe path dies"
+        )
+        // Whole hashing also means every edit is observed.
+        var edited = Array(prose)
+        edited[edited.count / 2] = "改"
+        XCTAssertNotEqual(
+            signature,
+            GaryxMessageListSignature.make(for: [message(text: String(edited))])
+        )
+    }
+
+    func testEmojiProseStaysWholeHashed() {
+        // A ZWJ family emoji is 25 bytes per grapheme: the byte budget must
+        // still cover a realistic message.
+        let prose = String(repeating: "👨‍👩‍👧‍👦", count: 60)
+        XCTAssertGreaterThan(prose.utf8.count, 1_024)
+        XCTAssertFalse(GaryxMessageListSignature.make(for: [message(text: prose)]).sampled)
+    }
+
+    func testNonAsciiPayloadSignatureStaysConstantTime() {
+        // The ASCII ceiling was not a real guard: String.count has an O(1)
+        // fast path for ASCII, so the old implementation passed it. CJK has no
+        // such path.
+        let payload = String(repeating: "工具结果超长输出", count: 200_000)
+        XCTAssertGreaterThan(payload.utf8.count, 4 * 1_024 * 1_024)
+        let messages = [message(text: payload)]
+        let started = Date()
+        for _ in 0..<20 {
+            _ = GaryxMessageListSignature.make(for: messages)
+        }
+        XCTAssertLessThan(
+            Date().timeIntervalSince(started),
+            0.5,
+            "cost must not scale with field size in any script"
+        )
+    }
+
+    func testWholeHashBoundaryIsExpressedInBytes() {
+        let underBudget = String(
+            repeating: "a",
+            count: GaryxMessageListSignature.wholeTextSignatureByteLimit
+        )
+        let overBudget = underBudget + "aa"
+        XCTAssertFalse(GaryxMessageListSignature.make(for: [message(text: underBudget)]).sampled)
+        XCTAssertTrue(GaryxMessageListSignature.make(for: [message(text: overBudget)]).sampled)
     }
 
     func testLargePayloadSignatureStaysConstantTime() {

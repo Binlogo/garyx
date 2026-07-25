@@ -9,19 +9,26 @@ import Foundation
 /// (`sizeThatFits`) became the top hotspot (#TASK-2703 baseline, #TASK-2704
 /// retest). Cutting the laid-out row count is the remaining lever.
 ///
-/// Two hard rules keep the existing scroll contracts intact:
+/// Three hard rules keep the existing scroll contracts intact:
 ///
-/// 1. **Only measured rows may collapse.** A collapsed run's height is derived
-///    from real content-space measurements (`minY` of the row after the run
-///    minus `minY` of the run's first row), which already includes inter-row
-///    spacing. Nothing is ever estimated: estimated row heights are exactly
-///    what broke `defaultScrollAnchor(.bottom)` and scroll-to-tail in the
-///    reverted v1 attempt, because the synthetic bottom anchor landed inside
-///    phantom space.
+/// 1. **Only measured rows may collapse**, and a run's height is the sum of
+///    the rows' own measured HEIGHTS plus the stack spacing the collapse
+///    removes. Heights are intrinsic: a collapsed row's content does not
+///    change, so its cached height stays valid however much the layout above
+///    it moves. Deriving the height from position differences instead
+///    (successor `minY` minus run-start `minY`) silently mixes two layout
+///    generations, because a collapsed row stops reporting its position while
+///    live rows keep updating theirs — review #TASK-2707 BLOCKER-2. Nothing
+///    is ever estimated either way: estimated heights are what broke
+///    `defaultScrollAnchor(.bottom)` in the reverted v1 attempt.
 /// 2. **The tail and the reading window always render.** The tail rows own
 ///    bottom anchoring and streaming; rows within the viewport plus an
 ///    overscan margin own the reader's experience. Only fully off-screen,
 ///    already-measured runs collapse.
+/// 3. **The plan never decides what exists.** It only proposes which rows
+///    collapse; the view renders from the row list and treats an unmentioned
+///    row as live, so a stale plan can delay a collapse but can never hide
+///    content — review #TASK-2707 BLOCKER-1.
 public struct GaryxTranscriptWindowPlanner: Equatable, Sendable {
     /// One entry of the planned layout, in order.
     public enum Segment: Equatable, Sendable {
@@ -36,7 +43,14 @@ public struct GaryxTranscriptWindowPlanner: Equatable, Sendable {
         /// Row ids in transcript order (oldest first).
         public var rowIDs: [String]
         /// Content-space `minY` per row, for rows measured at least once.
+        /// Used to place rows against the viewport, never to derive heights.
         public var measuredMinY: [String: CGFloat]
+        /// Measured height per row. A row may only collapse when its own
+        /// height is known.
+        public var measuredHeight: [String: CGFloat]
+        /// Spacing the enclosing stack puts between rows. Collapsing N rows
+        /// into one spacer removes N-1 of those gaps.
+        public var rowSpacing: CGFloat
         /// Content-space Y of the viewport's top edge.
         public var viewportTopInContent: CGFloat
         public var viewportHeight: CGFloat
@@ -54,6 +68,8 @@ public struct GaryxTranscriptWindowPlanner: Equatable, Sendable {
         public init(
             rowIDs: [String],
             measuredMinY: [String: CGFloat],
+            measuredHeight: [String: CGFloat],
+            rowSpacing: CGFloat,
             viewportTopInContent: CGFloat,
             viewportHeight: CGFloat,
             overscan: CGFloat,
@@ -63,6 +79,8 @@ public struct GaryxTranscriptWindowPlanner: Equatable, Sendable {
         ) {
             self.rowIDs = rowIDs
             self.measuredMinY = measuredMinY
+            self.measuredHeight = measuredHeight
+            self.rowSpacing = rowSpacing
             self.viewportTopInContent = viewportTopInContent
             self.viewportHeight = viewportHeight
             self.overscan = overscan
@@ -90,23 +108,20 @@ public struct GaryxTranscriptWindowPlanner: Equatable, Sendable {
         let pinnedLeadingUpperBound = max(0, input.pinnedLeadingRowCount)
         let pinnedTailLowerBound = rowIDs.count - max(0, input.pinnedTailRowCount)
 
-        // A row may collapse only when its own span AND its successor's start
-        // are known, because the spacer height comes from those measurements.
-        func spanEnd(after index: Int) -> CGFloat? {
-            guard index + 1 < rowIDs.count else { return nil }
-            return input.measuredMinY[rowIDs[index + 1]]
-        }
-
+        // A row may collapse only when both its position and its own height
+        // are known: the position decides whether it is off-screen, the height
+        // is what the spacer replaces.
         var collapsible = [Bool](repeating: false, count: rowIDs.count)
         for (index, rowID) in rowIDs.enumerated() {
             guard index >= pinnedLeadingUpperBound, index < pinnedTailLowerBound else {
                 continue
             }
-            guard let minY = input.measuredMinY[rowID], let end = spanEnd(after: index) else {
+            guard let minY = input.measuredMinY[rowID],
+                  let height = input.measuredHeight[rowID] else {
                 continue
             }
             // Fully outside the live band, in either direction.
-            collapsible[index] = end <= liveTop || minY >= liveBottom
+            collapsible[index] = (minY + height) <= liveTop || minY >= liveBottom
         }
 
         var segments: [Segment] = []
@@ -122,19 +137,16 @@ public struct GaryxTranscriptWindowPlanner: Equatable, Sendable {
             while runEnd + 1 < rowIDs.count, collapsible[runEnd + 1] {
                 runEnd += 1
             }
-            // Height of the whole run: from the first collapsed row's start to
-            // the next rendered row's start. Content-space positions are
-            // scroll-invariant, so this is exactly the space the run occupied,
-            // spacing included.
-            let start = input.measuredMinY[rowIDs[runStart]] ?? 0
-            let end = spanEnd(after: runEnd) ?? start
-            let height = max(0, end - start)
-            if height > 0 {
+            // Height of the whole run: the rows' own measured heights plus
+            // the stack gaps the collapse removes (N rows become 1 view, so
+            // N-1 gaps disappear). Both terms are generation-independent.
+            let collapsedIDs = Array(rowIDs[runStart...runEnd])
+            let heights = collapsedIDs.compactMap { input.measuredHeight[$0] }
+            let height = heights.reduce(0, +)
+                + CGFloat(max(0, collapsedIDs.count - 1)) * max(0, input.rowSpacing)
+            if height > 0, heights.count == collapsedIDs.count {
                 segments.append(
-                    .spacer(
-                        height: height,
-                        collapsedRowIDs: Array(rowIDs[runStart...runEnd])
-                    )
+                    .spacer(height: height, collapsedRowIDs: collapsedIDs)
                 )
             } else {
                 // Degenerate measurement: render rather than risk a height of
@@ -148,7 +160,9 @@ public struct GaryxTranscriptWindowPlanner: Equatable, Sendable {
         return segments
     }
 
-    /// Rows the plan lays out, in order — the projection the view needs.
+    /// Rows the plan lays out, in order. Diagnostic/test projection: the view
+    /// walks its own row list and consults the plan only for collapses, so it
+    /// never depends on this.
     public static func renderedRowIDs(_ segments: [Segment]) -> [String] {
         segments.compactMap { segment in
             switch segment {
