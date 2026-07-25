@@ -163,15 +163,50 @@ final class GaryxConversationScrollStateTests: XCTestCase {
         XCTAssertEqual(request, .init(reason: .openingThread, animated: false))
     }
 
-    func testTailGrowthFollowsWhileFollowingWithoutAnimatedScroll() {
+    func testTailGrowthRequestsNoProgrammaticScroll() {
+        // The transcript's own bottom size-change anchor pins the tail in the
+        // same layout pass. A programmatic chain here would drive the same
+        // intent a frame later and fight it — the send/stream shake.
         var state = GaryxConversationScrollState()
         let request = state.contentChanged(
             isInitialLoad: false,
             isHistoryPrepend: false,
             hasTailContent: true
         )
-        XCTAssertEqual(request, .init(reason: .tailUpdate, animated: false))
+        XCTAssertNil(request)
         XCTAssertFalse(state.showsScrollToBottomButton)
+    }
+
+    func testMeasuredTailDriftWhileFollowingCorrectsOnce() {
+        var state = GaryxConversationScrollState()
+        _ = state.contentChanged(isInitialLoad: true, isHistoryPrepend: false, hasTailContent: true)
+
+        // Sub-threshold drift is left to the layout system.
+        XCTAssertNil(
+            state.metricsChanged(
+                GaryxConversationLayoutMetrics(
+                    contentTopOffset: -1_000,
+                    contentBottomOffset: 804,
+                    viewportHeight: 800
+                ),
+                hasTailContent: true
+            )
+        )
+
+        // Perceptible drift (the near-bottom band the anchor does not hold)
+        // gets exactly one unanimated correction.
+        XCTAssertEqual(
+            state.metricsChanged(
+                GaryxConversationLayoutMetrics(
+                    contentTopOffset: -1_000,
+                    contentBottomOffset: 860,
+                    viewportHeight: 800
+                ),
+                hasTailContent: true
+            ),
+            .init(reason: .repair, animated: false)
+        )
+        XCTAssertTrue(state.isFollowingTail)
     }
 
     func testSameIdentityGeometryGrowthStillFollowsTail() {
@@ -185,7 +220,7 @@ final class GaryxConversationScrollStateTests: XCTestCase {
             hasTailContent: true
         )
 
-        XCTAssertEqual(request, .init(reason: .tailUpdate, animated: false))
+        XCTAssertNil(request, "growth in place is absorbed by the bottom anchor")
     }
 
     func testTailGrowthWhileBrowsingShowsButtonInsteadOfScrolling() {
@@ -255,12 +290,9 @@ final class GaryxConversationScrollStateTests: XCTestCase {
         XCTAssertEqual(request, .init(reason: .repair, animated: false))
     }
 
-    func testThinkingIndicatorFollowsOnlyWhileFollowing() {
+    func testThinkingIndicatorRequestsNoProgrammaticScroll() {
         var state = GaryxConversationScrollState()
-        XCTAssertEqual(
-            state.thinkingIndicatorShown(),
-            .init(reason: .tailUpdate, animated: false)
-        )
+        XCTAssertNil(state.thinkingIndicatorShown())
 
         simulateUserScroll(&state)
         _ = state.metricsChanged(browsingMetrics(), hasTailContent: true)
@@ -326,75 +358,38 @@ final class GaryxConversationScrollStateTests: XCTestCase {
         XCTAssertTrue(state.shouldRunTailScrollAttempt(index: 1, reason: .openingThread))
     }
 
-    func testTailUpdateRetriesStopAfterReaderLeavesTail() {
+    func testCrossScopeMessageChangeRequestsNoProgrammaticScroll() {
+        // A cross-thread replay is content movement, not a position intent:
+        // the new thread's own opening path owns positioning.
         var state = GaryxConversationScrollState()
-        _ = state.contentChanged(isInitialLoad: true, isHistoryPrepend: false, hasTailContent: true)
-
-        XCTAssertTrue(state.shouldRunTailScrollAttempt(index: 1, reason: .tailUpdate))
-
-        simulateUserScroll(&state)
-        _ = state.metricsChanged(browsingMetrics(), hasTailContent: true)
-        XCTAssertTrue(state.shouldRunTailScrollAttempt(index: 0, reason: .tailUpdate))
-        XCTAssertFalse(state.shouldRunTailScrollAttempt(index: 1, reason: .tailUpdate))
+        XCTAssertNil(
+            state.messagesChanged(
+                previous: ["history:5"],
+                current: ["history:5"],
+                id: { $0 },
+                previousScopeIdentity: "thread:a",
+                currentScopeIdentity: "thread:b",
+                hasTailContent: true
+            )
+        )
     }
 
-    func testCrossScopeMessageTailUpdateCannotCancelOpeningRetryChain() throws {
-        var state = GaryxConversationScrollState()
-        var scheduler = GaryxConversationTailScrollScheduler()
-        let opening = scheduler.schedule(reason: state.threadOpened().reason)
-        let switchUpdate = state.messagesChanged(
-            previous: ["history:5"],
-            current: ["history:5"],
-            id: { $0 },
-            previousScopeIdentity: "thread:a",
-            currentScopeIdentity: "thread:b",
-            hasTailContent: true
-        )
-
-        XCTAssertEqual(switchUpdate?.reason, .tailUpdate)
-        let switchToken = scheduler.schedule(reason: try XCTUnwrap(switchUpdate).reason)
-
-        XCTAssertTrue(
-            scheduler.isCurrent(opening),
-            "A switch callback must not truncate the opening chain's late settling retries."
-        )
-        XCTAssertTrue(scheduler.isCurrent(switchToken))
-    }
-
-    func testCachedThinkingTailUpdateCannotCancelOpeningRetryChain() throws {
-        var state = GaryxConversationScrollState()
-        var scheduler = GaryxConversationTailScrollScheduler()
-        let opening = scheduler.schedule(reason: state.threadOpened().reason)
-        let thinkingReveal = try XCTUnwrap(state.thinkingIndicatorShown())
-
-        XCTAssertEqual(thinkingReveal.reason, .tailUpdate)
-        let thinkingToken = scheduler.schedule(reason: thinkingReveal.reason)
-
-        XCTAssertTrue(
-            scheduler.isCurrent(opening),
-            "A cached thinking reveal must not truncate the opening chain's late settling retries."
-        )
-        XCTAssertTrue(scheduler.isCurrent(thinkingToken))
-    }
-
-    func testTailScrollSchedulerCoalescesWithinHorizonAndLongChainSupersedesAll() {
+    func testNewestScheduledRequestSupersedesEveryEarlierChain() {
+        // One lane: every remaining reason writes a position the layout
+        // system will not reach by itself, so the newest intent owns the
+        // viewport and stale chains must not outlive it.
         var scheduler = GaryxConversationTailScrollScheduler()
         let opening = scheduler.schedule(reason: .openingThread)
-        let firstTailUpdate = scheduler.schedule(reason: .tailUpdate)
-        let latestTailUpdate = scheduler.schedule(reason: .tailUpdate)
-
-        XCTAssertTrue(scheduler.isCurrent(opening))
-        XCTAssertFalse(scheduler.isCurrent(firstTailUpdate))
-        XCTAssertEqual(scheduler.lifecycle(of: firstTailUpdate), .superseded)
-        XCTAssertTrue(scheduler.isCurrent(latestTailUpdate))
-
         let repair = scheduler.schedule(reason: .repair)
+
         XCTAssertFalse(scheduler.isCurrent(opening))
         XCTAssertEqual(scheduler.lifecycle(of: opening), .superseded)
-        XCTAssertFalse(scheduler.isCurrent(latestTailUpdate))
-        XCTAssertEqual(scheduler.lifecycle(of: latestTailUpdate), .superseded)
         XCTAssertTrue(scheduler.isCurrent(repair))
         XCTAssertEqual(scheduler.lifecycle(of: repair), .requested)
+
+        let manual = scheduler.schedule(reason: .manual)
+        XCTAssertFalse(scheduler.isCurrent(repair))
+        XCTAssertTrue(scheduler.isCurrent(manual))
     }
 
     func testTailScrollSchedulerSettlesStableSatisfiedPlacementPermanently() {
@@ -629,7 +624,6 @@ final class GaryxConversationScrollStateTests: XCTestCase {
         XCTAssertNil(state.userScrollInteractionChanged(isInteracting: true))
         XCTAssertNil(state.metricsChanged(tailGapMetrics(), hasTailContent: true))
         XCTAssertFalse(state.shouldRunTailScrollAttempt(index: 0, reason: .repair))
-        XCTAssertFalse(state.shouldRunTailScrollAttempt(index: 0, reason: .tailUpdate))
         XCTAssertFalse(state.shouldRunTailScrollAttempt(index: 1, reason: .openingThread))
         XCTAssertTrue(state.shouldRunTailScrollAttempt(index: 0, reason: .manual))
     }

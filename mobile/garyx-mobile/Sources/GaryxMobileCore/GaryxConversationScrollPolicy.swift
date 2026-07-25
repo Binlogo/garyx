@@ -236,14 +236,11 @@ public struct GaryxConversationScrollState: Equatable {
 
     public enum TailScrollReason: Equatable {
         case openingThread
-        case tailUpdate
         case manual
         case repair
 
         public var retryHorizon: TailScrollRetryHorizon {
             switch self {
-            case .tailUpdate:
-                .tailGrowth
             case .openingThread, .manual, .repair:
                 .settling
             }
@@ -257,19 +254,19 @@ public struct GaryxConversationScrollState: Equatable {
         /// attempts become eligible.
         public var retryDelayMilliseconds: [Int] {
             switch retryHorizon {
-            case .tailGrowth:
-                // Ordinary tail growth during send/streaming should stay
-                // pinned, but a long retry chain visibly wobbles the
-                // transcript while composer geometry also settles.
-                [0, 40, 140]
             case .settling:
                 [0, 16, 40, 140, 320, 650, 1_000]
             }
         }
     }
 
+    /// One horizon remains: every programmatic write now exists to reach a
+    /// position the layout system will not reach on its own (opening jump,
+    /// explicit manual scroll, measured drift or gap repair). The former
+    /// short `tailGrowth` lane drove ordinary streaming growth that the
+    /// bottom size-change anchor already handles, and its speculative
+    /// retries fought that anchor.
     public enum TailScrollRetryHorizon: Equatable {
-        case tailGrowth
         case settling
     }
 
@@ -315,6 +312,10 @@ public struct GaryxConversationScrollState: Equatable {
     public static let upwardTravelIntentThreshold: CGFloat = 24
     /// Size jitter tolerated while still treating two frames as same-layout.
     private static let stableLayoutTolerance: CGFloat = 2
+    /// Tail drift below the viewport bottom tolerated while following before
+    /// one unanimated correction runs. Above a perceptible threshold so
+    /// ordinary anchored streaming issues no programmatic write at all.
+    public static let tailFollowDriftTolerance: CGFloat = 8
     /// Tracks the visible-tail-gap level so repairs fire on its rising edge
     /// only. A persistent gap (such as lazy-layout estimation drift around a
     /// collapsed tail row) must not regenerate a repair on every frame, or
@@ -360,9 +361,15 @@ public struct GaryxConversationScrollState: Equatable {
     /// - Initial load jumps to the tail without animation.
     /// - Older-history prepends never move the viewport; the view preserves
     ///   the reading position.
-    /// - Tail growth (new messages, streaming text, tool activity) follows
-    ///   the tail only while `.followingTail`; a browsing reader is never
-    ///   yanked.
+    /// - Ordinary tail growth (new messages, streaming text, tool activity)
+    ///   requests NOTHING: while the reader sits at the tail, the transcript's
+    ///   own `defaultScrollAnchor(.bottom, for: .sizeChanges)` already keeps
+    ///   the tail pinned as content grows, in the same layout pass and with no
+    ///   programmatic write. The retry chain this used to schedule drove the
+    ///   same intent a second time, one to three frames later, and that
+    ///   competition is what made sending and streaming visibly shake
+    ///   (boss report, 2026-07-24). Late layout settling is still repaired,
+    ///   but only through the edge-triggered `metricsChanged` gap path.
     public mutating func contentChanged(
         isInitialLoad: Bool,
         isHistoryPrepend: Bool,
@@ -375,8 +382,7 @@ public struct GaryxConversationScrollState: Equatable {
             anchoring = .followingTail
             return TailScrollRequest(reason: .openingThread, animated: false)
         }
-        guard isFollowingTail else { return nil }
-        return TailScrollRequest(reason: .tailUpdate, animated: false)
+        return nil
     }
 
     /// Route-scoped message geometry changed. The observed values deliberately
@@ -410,12 +416,12 @@ public struct GaryxConversationScrollState: Equatable {
     }
 
     /// The tail thinking indicator appeared (run started with no visible
-    /// activity yet).
+    /// activity yet). Like ordinary tail growth this is a size change the
+    /// system bottom anchor absorbs, so no programmatic scroll is requested.
     public mutating func thinkingIndicatorShown() -> TailScrollRequest? {
         markTailGeometryChanged()
         hasTailContent = true
-        guard isFollowingTail else { return nil }
-        return TailScrollRequest(reason: .tailUpdate, animated: false)
+        return nil
     }
 
     /// Live measurement update from the scroll view. Derives the anchoring
@@ -464,6 +470,22 @@ public struct GaryxConversationScrollState: Equatable {
         let gapAppeared = metrics.hasVisibleTailGap && !hadVisibleTailGap
         hadVisibleTailGap = metrics.hasVisibleTailGap
         if isFollowingTail, hasTailContent, gapAppeared, !isUserScrollInteracting {
+            return TailScrollRequest(reason: .repair, animated: false)
+        }
+        // Tail growth is normally absorbed by the transcript's own bottom
+        // size-change anchor, which pins the tail in the same layout pass
+        // with no programmatic write. The anchor only holds while the scroll
+        // view actually sits at its bottom edge, so a reader inside the
+        // near-bottom band can still accumulate real drift as content grows.
+        // One unanimated correction per measured drift converges immediately
+        // and stays invisible; sub-threshold drift is ignored so ordinary
+        // streaming never produces a programmatic write (this replaced the
+        // speculative [0,40,140]ms chains that competed with the anchor and
+        // made sending and streaming shake).
+        if isFollowingTail,
+           hasTailContent,
+           !isUserScrollInteracting,
+           metrics.distanceFromBottom > Self.tailFollowDriftTolerance {
             return TailScrollRequest(reason: .repair, animated: false)
         }
         return nil
@@ -583,8 +605,6 @@ public struct GaryxConversationScrollState: Equatable {
         switch reason {
         case .openingThread, .manual:
             return true
-        case .tailUpdate:
-            return isFollowingTail
         case .repair:
             // Until the reader's first gesture, repairs chase late layout
             // settling across their whole retry window — single attempts
@@ -775,39 +795,20 @@ public struct GaryxConversationTailScrollScheduler: Equatable {
         var lastAuthorizedGeometryEpoch: UInt64?
     }
 
-    private var tailGrowthGeneration = 0
     private var settlingGeneration = 0
-    private var tailGrowthChain: Chain?
     private var settlingChain: Chain?
 
     public init() {}
 
+    /// One lane: a newer request always supersedes the previous one, because
+    /// every remaining reason writes a position the layout system will not
+    /// reach by itself and the newest intent is the correct one.
     public mutating func schedule(
         reason: GaryxConversationScrollState.TailScrollReason
     ) -> Token {
         switch reason.retryHorizon {
-        case .tailGrowth:
-            // Coalesce ordinary streaming/tail-growth chains with each other,
-            // but never let their short retry window truncate a still-live
-            // opening/manual/repair chain whose late attempts are needed for
-            // heavy transcript layout settling.
-            tailGrowthGeneration &+= 1
-            let token = Token(
-                retryHorizon: .tailGrowth,
-                generation: tailGrowthGeneration
-            )
-            tailGrowthChain = Chain(
-                generation: token.generation,
-                lifecycle: .requested,
-                lastAuthorizedGeometryEpoch: nil
-            )
-            return token
         case .settling:
-            // A fresh long-horizon chain covers every earlier attempt. Cancel
-            // both lanes so stale short retries cannot outlive the new owner.
             settlingGeneration &+= 1
-            tailGrowthGeneration &+= 1
-            tailGrowthChain = nil
             let token = Token(
                 retryHorizon: .settling,
                 generation: settlingGeneration
@@ -870,8 +871,6 @@ public struct GaryxConversationTailScrollScheduler: Equatable {
 
     private func chain(for token: Token) -> Chain? {
         switch token.retryHorizon {
-        case .tailGrowth:
-            tailGrowthChain
         case .settling:
             settlingChain
         }
@@ -882,8 +881,6 @@ public struct GaryxConversationTailScrollScheduler: Equatable {
         for retryHorizon: GaryxConversationScrollState.TailScrollRetryHorizon
     ) {
         switch retryHorizon {
-        case .tailGrowth:
-            tailGrowthChain = chain
         case .settling:
             settlingChain = chain
         }

@@ -109,7 +109,10 @@ final class GaryxMessageSendJitterReproTests: XCTestCase {
             currentScopeIdentity: threadScope,
             hasTailContent: true
         )
-        XCTAssertEqual(appendRequest, .init(reason: .tailUpdate, animated: false))
+        XCTAssertNil(
+            appendRequest,
+            "the optimistic append is absorbed by the bottom size-change anchor"
+        )
 
         let materializationRequest = scrollState.messagesChanged(
             previous: optimisticGeometry,
