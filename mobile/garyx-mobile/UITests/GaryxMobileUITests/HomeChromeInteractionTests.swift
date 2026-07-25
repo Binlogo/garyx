@@ -42,6 +42,55 @@ final class HomeChromeInteractionTests: XCTestCase {
         )
     }
 
+    func testThreadSearchMorphsInPlaceFocusesAndCancels() throws {
+        let app = launchHome()
+        let search = app.buttons["home-thread-search-button"]
+        XCTAssertTrue(search.waitForExistence(timeout: 10), "Home thread-search button")
+        XCTAssertEqual(search.frame.width, 44, accuracy: 1)
+        XCTAssertEqual(search.frame.height, 44, accuracy: 1)
+        let collapsedFrame = search.frame
+
+        search.tap()
+
+        let field = app.textFields["home-thread-search-field"]
+        let cancel = app.buttons["home-thread-search-cancel"]
+        XCTAssertTrue(field.waitForExistence(timeout: 5), "expanded thread-search field")
+        XCTAssertTrue(cancel.waitForExistence(timeout: 5), "expanded thread-search Cancel button")
+        XCTAssertTrue(
+            app.staticTexts["Search threads by name"].waitForExistence(timeout: 5),
+            "an empty query must show the prompt state"
+        )
+
+        let attachment = XCTAttachment(screenshot: app.screenshot())
+        attachment.name = "Home thread search expanded"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+
+        // Sending text through the application requires the field to already
+        // own keyboard focus; spaces also prove the no-request prompt path.
+        app.typeText("   ")
+        XCTAssertEqual(field.value as? String, "   ")
+        XCTAssertTrue(app.staticTexts["Search threads by name"].exists)
+
+        cancel.tap()
+
+        XCTAssertTrue(search.waitForExistence(timeout: 5), "collapsed thread-search button")
+        XCTAssertTrue(
+            app.staticTexts["Thread History"].waitForExistence(timeout: 5),
+            "Cancel must restore the Home recency list"
+        )
+        XCTAssertEqual(search.frame.midX, collapsedFrame.midX, accuracy: 1)
+        XCTAssertEqual(search.frame.midY, collapsedFrame.midY, accuracy: 1)
+
+        search.tap()
+        XCTAssertTrue(field.waitForExistence(timeout: 5))
+        XCTAssertNotEqual(
+            field.value as? String,
+            "   ",
+            "Cancel must clear the query before the next expansion"
+        )
+    }
+
     func testFabBandClearAreaStillScrollsList() throws {
         let app = launchHome(useScrollFixture: true)
         let fab = app.buttons["New chat"]

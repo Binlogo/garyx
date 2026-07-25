@@ -2,6 +2,39 @@ import XCTest
 @testable import GaryxMobileCore
 
 final class GaryxThreadSummaryGatewayContractTests: XCTestCase {
+    func testHomeSearchUsesGlobalIncludeScopeAndCarriesQueryAndCursor() async throws {
+        let (client, session) = makeClient()
+        defer {
+            ThreadSummaryURLProtocolStub.handler = nil
+            session.invalidateAndCancel()
+        }
+        ThreadSummaryURLProtocolStub.handler = { request in
+            let components = try XCTUnwrap(
+                request.url.flatMap { URLComponents(url: $0, resolvingAgainstBaseURL: false) }
+            )
+            XCTAssertEqual(components.percentEncodedPath, "/base/api/thread-summaries")
+            let values = Dictionary(
+                uniqueKeysWithValues: (components.queryItems ?? []).map { ($0.name, $0.value) }
+            )
+            XCTAssertFalse(values.keys.contains("root_workspace_path"))
+            XCTAssertEqual(values["tasks"]!, "include")
+            XCTAssertEqual(values["q"]!, "Test thread")
+            XCTAssertEqual(values["limit"]!, "30")
+            XCTAssertEqual(values["cursor"]!, "search-cursor")
+            return try response(
+                request,
+                status: 200,
+                body: summaryPageJSON(ids: ["thread::search-result"])
+            )
+        }
+
+        let page = try await client.listThreadSummaries(
+            query: "Test thread",
+            cursor: "search-cursor"
+        )
+        XCTAssertEqual(page.threads.map(\.id), ["thread::search-result"])
+    }
+
     func testListThreadSummariesCarriesScopeSearchTasksAndCursorExactly() async throws {
         let (client, session) = makeClient()
         defer {

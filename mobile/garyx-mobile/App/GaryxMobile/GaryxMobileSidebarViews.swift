@@ -63,6 +63,7 @@ struct GaryxRootNavigationView: View, Equatable {
     private var homeContent: some View {
         GaryxHomeThreadListView(
             homeListStore: homeListStore,
+            model: model,
             isSidebarDragActive: isSidebarDragActive,
             onOpenDrawer: onOpenDrawer,
             onRefreshAll: onRefreshAll,
@@ -161,7 +162,10 @@ enum GaryxSidebarMetrics {
 
 struct GaryxHomeThreadListView: View, Equatable {
     @ObservedObject var homeListStore: GaryxHomeThreadListStore
+    let model: GaryxMobileModel
     @Environment(\.garyxMotion) private var motion
+    @StateObject private var threadSearchStore = GaryxHomeThreadSearchStore()
+    @FocusState private var searchFieldFocused: Bool
     // Stable identity without observation: the controller is an imperative
     // UIKit lifecycle box, and business changes return through callbacks.
     @State private var pinnedDragLifecycle = GaryxPinnedDragLifecycleController()
@@ -199,6 +203,7 @@ struct GaryxHomeThreadListView: View, Equatable {
 
     static func == (lhs: GaryxHomeThreadListView, rhs: GaryxHomeThreadListView) -> Bool {
         lhs.homeListStore === rhs.homeListStore
+            && lhs.model === rhs.model
             && lhs.isSidebarDragActive == rhs.isSidebarDragActive
     }
 
@@ -218,9 +223,14 @@ struct GaryxHomeThreadListView: View, Equatable {
             .garyxAdaptiveTopBar {
                 GaryxHomeHeaderView(
                     selectedRecentFilter: homeListStore.presentationSnapshot.selectedRecentFilter,
+                    threadSearchStore: threadSearchStore,
                     onOpenDrawer: onOpenDrawer,
+                    onOpenSearch: presentSearch,
                     onSelectRecentFilter: onSelectRecentFilter
                 )
+            }
+            .overlayPreferenceValue(GaryxHomeThreadSearchChromeAnchorKey.self) { anchor in
+                searchChromeOverlay(anchor: anchor)
             }
             .task(id: homeListStore.snapshot.isHomeVisible) {
                 await runSilentSidebarRefreshLoop()
@@ -248,7 +258,11 @@ struct GaryxHomeThreadListView: View, Equatable {
         // Animation Hitches). Headers/spacers/footer are flat rows (no Section)
         // to keep the non-sticky parity of the old LazyVStack.
         List {
-            sidebarThreadRows
+            if threadSearchStore.chromeState.isPresented {
+                searchThreadRows
+            } else {
+                sidebarThreadRows
+            }
         }
         .listStyle(.plain)
         .environment(\.defaultMinListRowHeight, 0)
@@ -260,8 +274,112 @@ struct GaryxHomeThreadListView: View, Equatable {
         .scrollDisabled(isSidebarDragActive)
         .scrollDismissesKeyboard(.interactively)
         .refreshable {
-            await refreshAll()
+            if threadSearchStore.chromeState.isPresented {
+                await threadSearchStore.refresh(model: model)
+            } else {
+                await refreshAll()
+            }
         }
+    }
+
+    @ViewBuilder
+    private var searchThreadRows: some View {
+        let state = threadSearchStore.state
+        let rows = model.homeThreadSearchRows(state.threads)
+        let prefetchTriggerRowId = GaryxThreadListPageMerge.prefetchTriggerRowId(
+            recentIds: rows.map(\.id)
+        )
+
+        Group {
+            spacerRow(height: 4)
+
+            switch state.presentation {
+            case .prompt:
+                GaryxSidebarEmptyRow(title: "Search threads by name")
+
+            case .loading:
+                GaryxSidebarSkeletonRows(
+                    rowCount: 6,
+                    accessibilityLabel: "Loading thread search results"
+                )
+
+            case .results:
+                ForEach(rows) { row in
+                    GaryxThreadListRowButton(
+                        input: GaryxThreadListRowInput(
+                            thread: row.thread,
+                            presentation: row.presentation,
+                            avatar: row.avatar,
+                            timestampValue: row.timestampValue,
+                            capabilities: row.capabilities,
+                            showsDivider: row.showsDivider,
+                            openSource: .replace
+                        ),
+                        onOpenThread: onOpenThread,
+                        onPrepareOpen: onPrepareThread,
+                        onSetPinned: { threadId, desired in
+                            if desired {
+                                onTogglePinnedThread(threadId)
+                            } else {
+                                onUnpinThread(threadId)
+                            }
+                        },
+                        onSetFavorite: { threadId, _ in
+                            onToggleFavoriteThread(threadId)
+                        },
+                        onArchive: { thread, _ in
+                            Task {
+                                await onArchiveThread(thread)
+                                await threadSearchStore.refresh(model: model)
+                            }
+                        }
+                    )
+                    .equatable()
+                    .onAppear {
+                        guard row.id == prefetchTriggerRowId else { return }
+                        Task { await threadSearchStore.loadMore(model: model) }
+                    }
+                }
+
+                if let message = state.headFailureMessage {
+                    Button {
+                        Task { await threadSearchStore.retry(model: model) }
+                    } label: {
+                        GaryxSidebarEmptyRow(title: "Couldn't refresh · Tap to retry")
+                    }
+                    .buttonStyle(GaryxPressableRowStyle())
+                    .accessibilityHint(message)
+                }
+
+                GaryxHomeThreadSearchFooter(
+                    state: state.footerState,
+                    onLoadMore: {
+                        await threadSearchStore.loadMore(model: model)
+                    },
+                    onRetry: {
+                        await threadSearchStore.loadMore(
+                            model: model,
+                            retryingFailure: true
+                        )
+                    }
+                )
+
+            case .empty(let query):
+                GaryxSidebarEmptyRow(title: "No threads named \"\(query)\"")
+
+            case .failed(_, let message):
+                Button {
+                    Task { await threadSearchStore.retry(model: model) }
+                } label: {
+                    GaryxSidebarEmptyRow(title: "Could not load threads · Tap to retry")
+                }
+                .buttonStyle(GaryxPressableRowStyle())
+                .accessibilityHint(message)
+            }
+        }
+        .listRowSeparator(.hidden)
+        .listRowInsets(EdgeInsets())
+        .listRowBackground(Color.clear)
     }
 
     @ViewBuilder
@@ -415,6 +533,76 @@ struct GaryxHomeThreadListView: View, Equatable {
 
     private func refreshAll() async {
         await onRefreshAll()
+    }
+
+    private var searchQueryBinding: Binding<String> {
+        Binding(
+            get: { threadSearchStore.queryText },
+            set: { threadSearchStore.updateQuery($0, model: model) }
+        )
+    }
+
+    @ViewBuilder
+    private func searchChromeOverlay(anchor: Anchor<CGRect>?) -> some View {
+        if threadSearchStore.chromeState.isPresented, let anchor {
+            GeometryReader { geometry in
+                GaryxHomeThreadSearchMorphSurface(
+                    isExpanded: threadSearchStore.chromeState.isExpanded,
+                    anchorRect: geometry[anchor],
+                    containerSize: geometry.size,
+                    queryText: searchQueryBinding,
+                    focus: $searchFieldFocused,
+                    onCancel: cancelSearch
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            }
+        }
+    }
+
+    private func presentSearch() {
+        applySearchMorphEvent(.requestPresent)
+    }
+
+    private func cancelSearch() {
+        searchFieldFocused = false
+        threadSearchStore.cancelSearch()
+        applySearchMorphEvent(.requestDismiss)
+    }
+
+    private func applySearchMorphEvent(_ event: GaryxChromeMorphPresentationEvent) {
+        let transition = GaryxChromeMorphPresentationReducer.reduce(
+            state: threadSearchStore.chromeState,
+            event: event,
+            transitionMode: motion.resolution(.morphOpen).mode
+        )
+        switch transition.animation {
+        case .none:
+            threadSearchStore.setChromeState(transition.state)
+        case .open:
+            withAnimation(motion.animation(.morphOpen)) {
+                threadSearchStore.setChromeState(transition.state)
+            }
+        case .close:
+            withAnimation(
+                motion.animation(.morphClose),
+                completionCriteria: .logicallyComplete
+            ) {
+                threadSearchStore.setChromeState(transition.state)
+            } completion: {
+                applySearchMorphEvent(.dismissAnimationCompleted)
+            }
+        }
+
+        switch transition.schedule {
+        case .none:
+            if transition.state == .expanded {
+                Task { @MainActor in searchFieldFocused = true }
+            }
+        case .expandOnNextTick:
+            Task { @MainActor in applySearchMorphEvent(.expandTick) }
+        case .completeDismissAfterAnimation:
+            break
+        }
     }
 
     private func runSilentSidebarRefreshLoop() async {
@@ -728,13 +916,19 @@ struct GaryxHomeThreadListView: View, Equatable {
 
 struct GaryxHomeHeaderView: View {
     let selectedRecentFilter: GaryxRecentThreadFilter
+    @ObservedObject var threadSearchStore: GaryxHomeThreadSearchStore
     let onOpenDrawer: () -> Void
+    let onOpenSearch: () -> Void
     let onSelectRecentFilter: (GaryxRecentThreadFilter) -> Void
 
     var body: some View {
+        let isSearchPresented = threadSearchStore.chromeState.isPresented
         GaryxAdaptiveGlassContainer(spacing: 10) {
             HStack(alignment: .center, spacing: 12) {
                 GaryxSidebarMenuButton(action: onOpenDrawer)
+                    .opacity(isSearchPresented ? 0 : 1)
+                    .allowsHitTesting(!isSearchPresented)
+                    .accessibilityHidden(isSearchPresented)
 
                 Text("Garyx")
                     .font(GaryxFont.title(weight: .semibold))
@@ -744,13 +938,23 @@ struct GaryxHomeHeaderView: View {
                     // The wordmark shares a fixed navigation row with the
                     // drawer and filter controls, so growth stops after XXL.
                     .garyxTypographyBoundary(.navigationChrome)
+                    .opacity(isSearchPresented ? 0 : 1)
+                    .accessibilityHidden(isSearchPresented)
 
                 Spacer(minLength: 0)
+
+                GaryxHomeThreadSearchButton(
+                    isHidden: isSearchPresented,
+                    action: onOpenSearch
+                )
 
                 GaryxRecentThreadFilterMenu(
                     selection: selectedRecentFilter,
                     onSelect: onSelectRecentFilter
                 )
+                .opacity(isSearchPresented ? 0 : 1)
+                .allowsHitTesting(!isSearchPresented)
+                .accessibilityHidden(isSearchPresented)
             }
         }
         .padding(.horizontal, 16)
@@ -1011,9 +1215,10 @@ struct GaryxSidebarRowDivider: View {
     }
 }
 
-private struct GaryxSidebarSkeletonRows: View {
+struct GaryxSidebarSkeletonRows: View {
     @Environment(\.garyxMotion) private var motion
     let rowCount: Int
+    var accessibilityLabel = "Loading recent threads"
 
     var body: some View {
         let count = max(0, rowCount)
@@ -1047,7 +1252,7 @@ private struct GaryxSidebarSkeletonRows: View {
             }
         }
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Loading recent threads")
+        .accessibilityLabel(accessibilityLabel)
     }
 }
 
@@ -1095,7 +1300,7 @@ private struct GaryxSidebarSkeletonRow: View {
     }
 }
 
-private struct GaryxSidebarEmptyRow: View {
+struct GaryxSidebarEmptyRow: View {
     let title: String
 
     var body: some View {
