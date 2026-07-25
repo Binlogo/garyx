@@ -7,7 +7,7 @@ import { BotSidebar } from '../../BotSidebar';
 import { PinnedThreadsSidebar, type PinnedThreadRow } from '../../PinnedThreadsSidebar';
 import { SidebarTabs } from '../../SidebarTabs';
 import { WorkspaceThreadSidebar } from '../../WorkspaceThreadSidebar';
-import { SIDEBAR_TAB_PANEL_ID, type SidebarTab } from '../../sidebar-tab-model';
+import type { SidebarTab } from '../../sidebar-tab-model';
 import { UpdatePill } from './UpdatePill';
 import { buildBotGroups } from '../../bot-console-model';
 import { buildWorkspaceThreadGroups } from '../../thread-model';
@@ -257,21 +257,11 @@ export function AppLeftRail({
           <SidebarTabs onSelectTab={onSelectSidebarTab} selectedTab={sidebarTab} />
 
           {sidebarTab === 'threads' ? (
-            <div
-              aria-label={t('Threads')}
-              className="sidebar-tab-panel"
-              id={SIDEBAR_TAB_PANEL_ID}
-              role="tabpanel"
-            >
+            <div aria-label={t('Threads')} className="sidebar-tab-panel" role="group">
               {recentThreadsSlot ?? null}
             </div>
           ) : (
-            <div
-              aria-label={t('Projects')}
-              className="sidebar-scroll-area"
-              id={SIDEBAR_TAB_PANEL_ID}
-              role="tabpanel"
-            >
+            <div aria-label={t('Projects')} className="sidebar-scroll-area" role="group">
               <BotSidebar
                 activeConversationGroupId={activeBotConversationGroupId}
                 groups={botGroups}

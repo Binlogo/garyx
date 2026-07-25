@@ -829,7 +829,6 @@ export function TasksPanel({
             className="tasks-segmented"
             layout="inline"
             onChange={setViewMode}
-            semantics="radiogroup"
             options={[
               {
                 value: 'board',

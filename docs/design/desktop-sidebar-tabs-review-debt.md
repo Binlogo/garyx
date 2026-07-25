@@ -50,7 +50,12 @@ Either surface it as a "Tasks" filter or drop it from the wire contract.
 
 ## 5. Three hand-rolled segmented controls — RESOLVED
 
-Closed by `components/SegmentedControl.tsx` + `styles/segmented.css`: one
-recipe, two layouts (`fill`, `inline`), and per-surface semantics (`tabs` vs
-`radiogroup`) so unifying the visuals did not flatten the accessibility. The
-four surfaces now compose it.
+Closed by `components/SegmentedControl.tsx` + `styles/segmented.css`: one recipe,
+two layouts (`fill`, `inline`), one accessibility contract.
+
+All four surfaces are radio groups, including the sidebar's Threads/Projects
+switch. The tabs pattern was considered and rejected: it requires every tab to
+reference its own tabpanel, which means keeping every panel mounted, and the
+Threads panel holds hundreds of rows. A single dynamic panel with two tabs
+pointing at it is worse than either option — it tells assistive tech that the
+inactive tab controls the panel the active one labels.

@@ -34,7 +34,6 @@ export function RecentFilterTabs({
       ariaLabel={t("Recent filter")}
       className={`recent-filter-tabs ${className ?? ""}`.trim()}
       onChange={onSelectFilter}
-      semantics="radiogroup"
       options={FILTERS.map((filter) => ({
         value: filter,
         label: t(recentThreadFilterLabel(filter)),

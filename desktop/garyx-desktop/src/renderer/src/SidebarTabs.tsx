@@ -1,11 +1,6 @@
 import { SegmentedControl } from './components/SegmentedControl';
 import { useI18n } from './i18n';
-import {
-  SIDEBAR_TABS,
-  SIDEBAR_TAB_PANEL_ID,
-  sidebarTabLabel,
-  type SidebarTab,
-} from './sidebar-tab-model';
+import { SIDEBAR_TABS, sidebarTabLabel, type SidebarTab } from './sidebar-tab-model';
 
 type SidebarTabsProps = {
   onSelectTab: (tab: SidebarTab) => void;
@@ -25,8 +20,6 @@ export function SidebarTabs({ onSelectTab, selectedTab }: SidebarTabsProps) {
       className="sidebar-tabs"
       emphasis="strong"
       onChange={onSelectTab}
-      panelId={SIDEBAR_TAB_PANEL_ID}
-      semantics="tabs"
       options={SIDEBAR_TABS.map((tab) => ({
         value: tab,
         label: t(sidebarTabLabel(tab)),
