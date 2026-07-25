@@ -8,6 +8,14 @@ import SwiftUI
 /// unaffected by concurrent tail growth or reader scrolling.
 let garyxConversationContentSpaceName = "garyx-conversation-content"
 
+/// The single owner of the gap between transcript rows.
+///
+/// Both the row stack that produces the gap and the window planner that
+/// accounts for the gaps a collapse removes read this one value: a drift
+/// between them would silently shift every spacer by (N-1) x delta with no
+/// test failing (review #TASK-2707 N11).
+let garyxConversationRowSpacing: CGFloat = 14
+
 /// Stable sink for the transcript's per-row callbacks.
 ///
 /// Callbacks live behind a reference so a row view can be `Equatable`: closure
@@ -145,7 +153,7 @@ struct GaryxMobileTurnRowView: View, Equatable {
         // geometry to observe. Its spacing matches the transcript stack,
         // so the wrapped layout stays pixel-identical to the previously
         // flattened children.
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: garyxConversationRowSpacing) {
             content
         }
         .onGeometryChange(for: CGRect.self) { proxy in

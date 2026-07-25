@@ -801,7 +801,7 @@ struct GaryxConversationView: View {
                     // that the anchor-based metrics could not detect. Long-thread
                     // scroll cost is controlled by keeping per-frame measurements
                     // out of SwiftUI state (`scrollStateBox`) instead.
-                    VStack(alignment: .leading, spacing: 14) {
+                    VStack(alignment: .leading, spacing: garyxConversationRowSpacing) {
                         Color.clear
                             .frame(height: 1)
                             .background {
@@ -1114,7 +1114,7 @@ struct GaryxConversationView: View {
                 rowIDs: rowIDs,
                 measuredMinY: rowGeometryBox.measuredMinY,
                 measuredHeight: rowGeometryBox.measuredHeight,
-                rowSpacing: Self.transcriptRowSpacing,
+                rowSpacing: garyxConversationRowSpacing,
                 // The content coordinate space starts above the stack's top
                 // padding, so the viewport's content-space origin includes it
                 // (review #TASK-2707 N5).
@@ -1134,9 +1134,6 @@ struct GaryxConversationView: View {
         }
     }
 
-    /// Spacing between transcript rows, mirrored from the row stack so the
-    /// planner can account for the gaps a collapse removes.
-    private static let transcriptRowSpacing: CGFloat = 14
     /// Top padding inside the measured content coordinate space.
     private static let transcriptContentTopPadding: CGFloat = 18
     /// Trailing rows that always lay out: the tail owns bottom anchoring,
