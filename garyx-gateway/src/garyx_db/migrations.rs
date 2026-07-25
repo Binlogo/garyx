@@ -10,9 +10,15 @@ pub(crate) const THREAD_META_SCHEMA_MIGRATION_NAME: &str = "thread_meta_schema_v
 
 pub(super) const THREAD_META_SCHEMA_MIGRATION_VERSION: i64 = 2;
 
+pub(super) const THREAD_META_SCHEMA_V2_PROJECTION_VERSION: i64 = 6;
+
 pub(crate) const THREAD_PREVIEW_USER_FIRST_MIGRATION_NAME: &str = "thread_preview_user_first_v1";
 
 pub(super) const THREAD_PREVIEW_USER_FIRST_MIGRATION_VERSION: i64 = 1;
+
+pub(crate) const THREAD_META_SEARCH_TITLE_MIGRATION_NAME: &str = "thread_meta_search_title_v1";
+
+pub(super) const THREAD_META_SEARCH_TITLE_MIGRATION_VERSION: i64 = 1;
 
 pub(crate) const THREAD_META_WORKSPACE_MEMBERSHIP_MIGRATION_NAME: &str =
     "thread_meta_workspace_membership_v1";
@@ -231,6 +237,159 @@ pub(super) fn insert_thread_id(thread_ids: &mut BTreeSet<String>, value: &str) {
     if is_thread_key(value) {
         thread_ids.insert(value.to_owned());
     }
+}
+
+/// Immutable thread_meta_summary_v1/thread_preview_user_first_v1 protocol.
+/// Runtime projection and queries never consume this retired corpus.
+fn legacy_thread_meta_search_text(data: &Value, last_message_preview: Option<&str>) -> String {
+    let title = garyx_router::label_from_value(data);
+    let workspace_dir = garyx_router::workspace_dir_from_value(data);
+    let agent_id = garyx_router::agent_id_from_value(data);
+    crate::thread_meta_projection::normalize_for_search(&format!(
+        "{}\n{}\n{}\n{}",
+        title.as_deref().unwrap_or_default(),
+        workspace_dir.as_deref().unwrap_or_default(),
+        agent_id.as_deref().unwrap_or_default(),
+        last_message_preview.unwrap_or_default(),
+    ))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ThreadMetaSchemaV2Shape {
+    LegacySearchText,
+    SearchTitle,
+}
+
+impl ThreadMetaSchemaV2Shape {
+    fn from_columns(columns: &BTreeSet<String>) -> Option<Self> {
+        if columns.contains("search_text") {
+            // A historical search column wins when both are present. Schema
+            // initialization may already have added the forward title column,
+            // but the committed v2 protocol must still preserve search_text
+            // until thread_meta_search_title_v1 performs its own cutover.
+            Some(Self::LegacySearchText)
+        } else if columns.contains("search_title") {
+            Some(Self::SearchTitle)
+        } else {
+            None
+        }
+    }
+
+    fn search_column(self) -> &'static str {
+        match self {
+            Self::LegacySearchText => "search_text",
+            Self::SearchTitle => "search_title",
+        }
+    }
+
+    fn expected_columns(self) -> Vec<String> {
+        THREAD_META_SCHEMA_V2_COLUMNS
+            .iter()
+            .map(|name| {
+                if *name == "search_text" {
+                    self.search_column()
+                } else {
+                    name
+                }
+            })
+            .map(ToOwned::to_owned)
+            .collect()
+    }
+
+    fn allows_extra(self, name: &str) -> bool {
+        THREAD_META_SCHEMA_V2_RETIRED_COLUMNS.contains(&name)
+            || (self == Self::LegacySearchText && name == "search_title")
+    }
+
+    fn projection_default(self) -> i64 {
+        match self {
+            Self::LegacySearchText => THREAD_META_SCHEMA_V2_PROJECTION_VERSION,
+            Self::SearchTitle => CURRENT_THREAD_META_PROJECTION_VERSION,
+        }
+    }
+}
+
+fn rebuild_thread_meta_schema_v2_tx(
+    tx: &Transaction<'_>,
+    shape: ThreadMetaSchemaV2Shape,
+) -> GaryxDbResult<()> {
+    let search_column = shape.search_column();
+    let projection_default = shape.projection_default();
+    tx.execute_batch(&format!(
+        "DROP TABLE IF EXISTS thread_meta_schema_v2;
+         CREATE TABLE thread_meta_schema_v2 (
+            thread_id TEXT PRIMARY KEY,
+            workspace_dir TEXT,
+            thread_type TEXT NOT NULL DEFAULT 'chat',
+            thread_label TEXT,
+            agent_id TEXT,
+            provider_type TEXT,
+            created_at TEXT,
+            updated_at TEXT,
+            message_count INTEGER NOT NULL DEFAULT 0,
+            last_user_message TEXT,
+            last_assistant_message TEXT,
+            last_message_preview TEXT,
+            recent_run_id TEXT,
+            active_run_id TEXT,
+            worktree_json TEXT,
+            last_delivery_context_json TEXT,
+            last_delivery_updated_at TEXT,
+            default_list_hidden INTEGER NOT NULL DEFAULT 0,
+            sort_updated_at_us INTEGER NOT NULL DEFAULT 0,
+            {search_column} TEXT NOT NULL DEFAULT '',
+            provider_key TEXT,
+            selected_model TEXT,
+            selected_model_reasoning_effort TEXT,
+            selected_model_service_tier TEXT,
+            sdk_session_id TEXT,
+            projection_version INTEGER NOT NULL DEFAULT {projection_default},
+            projected_at TEXT NOT NULL,
+            root_workspace_path TEXT,
+            workspace_origin TEXT
+         ) STRICT;"
+    ))?;
+    let projection_version = match shape {
+        ThreadMetaSchemaV2Shape::LegacySearchText => "?1",
+        ThreadMetaSchemaV2Shape::SearchTitle => "projection_version",
+    };
+    let copy_sql = format!(
+        "INSERT INTO thread_meta_schema_v2 (
+            thread_id, workspace_dir, thread_type, thread_label, agent_id,
+            provider_type, created_at, updated_at, message_count,
+            last_user_message, last_assistant_message, last_message_preview,
+            recent_run_id, active_run_id, worktree_json,
+            last_delivery_context_json, last_delivery_updated_at,
+            default_list_hidden, sort_updated_at_us, {search_column},
+            provider_key, selected_model, selected_model_reasoning_effort,
+            selected_model_service_tier, sdk_session_id, projection_version,
+            projected_at, root_workspace_path, workspace_origin
+         )
+         SELECT thread_id, workspace_dir, thread_type, thread_label, agent_id,
+                provider_type, created_at, updated_at, message_count,
+                last_user_message, last_assistant_message, last_message_preview,
+                recent_run_id, active_run_id, worktree_json,
+                last_delivery_context_json, last_delivery_updated_at,
+                default_list_hidden, sort_updated_at_us, {search_column},
+                provider_key, selected_model, selected_model_reasoning_effort,
+                selected_model_service_tier, sdk_session_id, {projection_version},
+                projected_at, root_workspace_path, workspace_origin
+           FROM thread_meta"
+    );
+    match shape {
+        ThreadMetaSchemaV2Shape::LegacySearchText => {
+            tx.execute(&copy_sql, params![THREAD_META_SCHEMA_V2_PROJECTION_VERSION])?;
+        }
+        ThreadMetaSchemaV2Shape::SearchTitle => {
+            tx.execute(&copy_sql, [])?;
+        }
+    }
+    tx.execute_batch(
+        "DROP TABLE thread_meta;
+         ALTER TABLE thread_meta_schema_v2 RENAME TO thread_meta;",
+    )?;
+    ensure_thread_meta_indexes(tx)?;
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -688,6 +847,7 @@ impl GaryxDbService {
         self.migrate_canonical_exclusion_strip_v3()?;
         self.migrate_thread_meta_schema_v2()?;
         self.migrate_thread_preview_user_first_v1()?;
+        self.migrate_thread_meta_search_title_v1()?;
         self.migrate_thread_meta_workspace_membership_v1()?;
         self.migrate_recent_thread_workspace_membership_v1()?;
         self.migrate_endpoint_holder_dedup_v1()?;
@@ -1964,6 +2124,15 @@ impl GaryxDbService {
             });
         }
 
+        let columns = thread_meta_column_names(&tx)?;
+        let has_legacy_search_text = columns.iter().any(|name| name == "search_text");
+        let has_search_title = columns.iter().any(|name| name == "search_title");
+        if !has_legacy_search_text && !has_search_title {
+            return Err(GaryxDbError::Configuration(
+                "thread_meta summary cutover requires a search projection column".to_owned(),
+            ));
+        }
+
         let source_rows = {
             let mut stmt = tx.prepare(
                 "SELECT meta.thread_id, record.body
@@ -1998,17 +2167,35 @@ impl GaryxDbService {
                         "thread_meta summary cutover rejected canonical id {thread_id}"
                     ))
                 })?;
-            updated_row_count += tx.execute(
-                "UPDATE thread_meta
-                    SET sort_updated_at_us = ?1,
-                        search_text = ?2
-                  WHERE thread_id = ?3",
-                params![
-                    projection.thread_meta.sort_updated_at_us,
-                    projection.thread_meta.search_text,
-                    thread_id,
-                ],
-            )?;
+            updated_row_count += if has_legacy_search_text {
+                let search_text = legacy_thread_meta_search_text(
+                    &data,
+                    projection.thread_meta.last_message_preview.as_deref(),
+                );
+                tx.execute(
+                    "UPDATE thread_meta
+                        SET sort_updated_at_us = ?1,
+                            search_text = ?2
+                      WHERE thread_id = ?3",
+                    params![
+                        projection.thread_meta.sort_updated_at_us,
+                        search_text,
+                        thread_id,
+                    ],
+                )?
+            } else {
+                tx.execute(
+                    "UPDATE thread_meta
+                        SET sort_updated_at_us = ?1,
+                            search_title = ?2
+                      WHERE thread_id = ?3",
+                    params![
+                        projection.thread_meta.sort_updated_at_us,
+                        projection.thread_meta.search_title,
+                        thread_id,
+                    ],
+                )?
+            };
         }
         record_projection_state_tx(
             &tx,
@@ -2048,6 +2235,15 @@ impl GaryxDbService {
             });
         }
 
+        let columns = thread_meta_column_names(&tx)?;
+        let has_legacy_search_text = columns.iter().any(|name| name == "search_text");
+        let has_search_title = columns.iter().any(|name| name == "search_title");
+        if !has_legacy_search_text && !has_search_title {
+            return Err(GaryxDbError::Configuration(
+                "thread preview cutover requires a search projection column".to_owned(),
+            ));
+        }
+
         let source_rows = {
             let mut stmt = tx.prepare(
                 "SELECT meta.thread_id, record.body
@@ -2084,27 +2280,52 @@ impl GaryxDbService {
                 })?
                 .thread_meta;
             let recent_preview = projected.last_message_preview.clone().unwrap_or_default();
-            let meta_updates = tx.execute(
-                "UPDATE thread_meta
-                    SET last_user_message = ?1,
-                        last_assistant_message = ?2,
-                        last_message_preview = ?3,
-                        search_text = ?4
-                  WHERE thread_id = ?5
-                    AND (
-                        last_user_message IS NOT ?1
-                        OR last_assistant_message IS NOT ?2
-                        OR last_message_preview IS NOT ?3
-                        OR search_text IS NOT ?4
-                    )",
-                params![
-                    projected.last_user_message.as_deref(),
-                    projected.last_assistant_message.as_deref(),
+            let meta_updates = if has_legacy_search_text {
+                let search_text = legacy_thread_meta_search_text(
+                    &data,
                     projected.last_message_preview.as_deref(),
-                    projected.search_text,
-                    thread_id,
-                ],
-            )?;
+                );
+                tx.execute(
+                    "UPDATE thread_meta
+                        SET last_user_message = ?1,
+                            last_assistant_message = ?2,
+                            last_message_preview = ?3,
+                            search_text = ?4
+                      WHERE thread_id = ?5
+                        AND (
+                            last_user_message IS NOT ?1
+                            OR last_assistant_message IS NOT ?2
+                            OR last_message_preview IS NOT ?3
+                            OR search_text IS NOT ?4
+                        )",
+                    params![
+                        projected.last_user_message.as_deref(),
+                        projected.last_assistant_message.as_deref(),
+                        projected.last_message_preview.as_deref(),
+                        search_text,
+                        thread_id,
+                    ],
+                )?
+            } else {
+                tx.execute(
+                    "UPDATE thread_meta
+                        SET last_user_message = ?1,
+                            last_assistant_message = ?2,
+                            last_message_preview = ?3
+                      WHERE thread_id = ?4
+                        AND (
+                            last_user_message IS NOT ?1
+                            OR last_assistant_message IS NOT ?2
+                            OR last_message_preview IS NOT ?3
+                        )",
+                    params![
+                        projected.last_user_message.as_deref(),
+                        projected.last_assistant_message.as_deref(),
+                        projected.last_message_preview.as_deref(),
+                        thread_id,
+                    ],
+                )?
+            };
             let recent_updates = tx.execute(
                 "UPDATE recent_threads
                     SET last_message_preview = ?1
@@ -2130,13 +2351,111 @@ impl GaryxDbService {
         })
     }
 
-    /// Advance the physical thread-summary projection schema without
-    /// reusing the generation-aware v1 backfill marker. Depending on their
-    /// upgrade path, legacy databases have the retained columns in an older
-    /// order and may have one extra column. Rebuilding from the explicit v2
-    /// set canonicalizes every known legacy shape while preserving every live
-    /// value. Unknown columns still stop the migration instead of being
-    /// silently discarded.
+    /// Replace the retired multi-field search corpus with the normalized
+    /// thread title. The label projection is already authoritative, so this
+    /// cutover reads only thread_meta and never re-parses canonical records.
+    /// Column evolution, row backfill, legacy-column removal, and the durable
+    /// marker are committed atomically.
+    pub(crate) fn migrate_thread_meta_search_title_v1(
+        &self,
+    ) -> GaryxDbResult<OneShotMigrationSummary> {
+        let mut conn = self.conn()?;
+        let tx = conn.transaction()?;
+        let completed_source_count = tx
+            .query_row(
+                "SELECT source_row_count
+                   FROM projection_states
+                  WHERE projection_name = ?1 AND projection_version = ?2",
+                params![
+                    THREAD_META_SEARCH_TITLE_MIGRATION_NAME,
+                    THREAD_META_SEARCH_TITLE_MIGRATION_VERSION,
+                ],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?;
+        let columns = thread_meta_column_names(&tx)?;
+        let has_search_title = columns.iter().any(|name| name == "search_title");
+        let has_search_text = columns.iter().any(|name| name == "search_text");
+        if let Some(source_row_count) = completed_source_count {
+            if !has_search_title || has_search_text {
+                return Err(GaryxDbError::Configuration(
+                    "thread_meta_search_title_v1 marker exists for an incompatible schema"
+                        .to_owned(),
+                ));
+            }
+            tx.commit()?;
+            return Ok(OneShotMigrationSummary {
+                source_row_count: usize::try_from(source_row_count).unwrap_or(usize::MAX),
+                updated_row_count: 0,
+                already_completed: true,
+            });
+        }
+
+        if !has_search_title {
+            tx.execute(
+                "ALTER TABLE thread_meta
+                     ADD COLUMN search_title TEXT NOT NULL DEFAULT ''",
+                [],
+            )?;
+        }
+        let source_rows = {
+            let mut stmt = tx.prepare(
+                "SELECT thread_id, thread_label
+                   FROM thread_meta
+                  ORDER BY thread_id ASC",
+            )?;
+            stmt.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?
+        };
+        let source_row_count = i64::try_from(source_rows.len()).unwrap_or(i64::MAX);
+        let mut updated_row_count = 0usize;
+        for (thread_id, thread_label) in source_rows {
+            let search_title =
+                crate::thread_meta_projection::summary_search_title(thread_label.as_deref());
+            updated_row_count += tx.execute(
+                "UPDATE thread_meta
+                    SET search_title = ?1,
+                        projection_version = ?2
+                  WHERE thread_id = ?3
+                    AND (
+                        search_title IS NOT ?1
+                        OR projection_version != ?2
+                    )",
+                params![
+                    search_title,
+                    CURRENT_THREAD_META_PROJECTION_VERSION,
+                    thread_id,
+                ],
+            )?;
+        }
+        if has_search_text {
+            tx.execute("ALTER TABLE thread_meta DROP COLUMN search_text", [])?;
+        }
+        record_projection_state_tx(
+            &tx,
+            THREAD_META_SEARCH_TITLE_MIGRATION_NAME,
+            THREAD_META_SEARCH_TITLE_MIGRATION_VERSION,
+            source_row_count,
+            None,
+        )?;
+        tx.commit()?;
+
+        Ok(OneShotMigrationSummary {
+            source_row_count: usize::try_from(source_row_count).unwrap_or(usize::MAX),
+            updated_row_count,
+            already_completed: false,
+        })
+    }
+
+    /// Advance the physical thread-summary projection schema without reusing
+    /// the generation-aware v1 backfill marker. Schema initialization can add
+    /// the current search_title fallback before this historical migration
+    /// runs, while databases from the intervening release still carry
+    /// search_text. Select the target shape from the retained search column,
+    /// then rebuild every known retired-column shape without discarding live
+    /// values. Unknown columns still stop the migration.
     pub(crate) fn migrate_thread_meta_schema_v2(&self) -> GaryxDbResult<OneShotMigrationSummary> {
         let mut conn = self.conn()?;
         let tx = conn.transaction()?;
@@ -2153,10 +2472,13 @@ impl GaryxDbService {
             )
             .optional()?;
         let actual_columns = thread_meta_column_names(&tx)?;
-        let expected_columns = THREAD_META_SCHEMA_V2_COLUMNS
-            .iter()
-            .map(|name| (*name).to_owned())
-            .collect::<Vec<_>>();
+        let actual_column_set = actual_columns.iter().cloned().collect::<BTreeSet<_>>();
+        let shape = ThreadMetaSchemaV2Shape::from_columns(&actual_column_set).ok_or_else(|| {
+            GaryxDbError::Configuration(
+                "thread_meta schema v2 requires search_text or search_title".to_owned(),
+            )
+        })?;
+        let expected_columns = shape.expected_columns();
         if actual_columns == expected_columns {
             if let Some(source_row_count) = completed_source_count {
                 tx.commit()?;
@@ -2179,12 +2501,10 @@ impl GaryxDbService {
                 .copied()
                 .cloned()
                 .collect::<Vec<_>>();
-            let has_unknown_extra = extra
-                .iter()
-                .any(|name| !THREAD_META_SCHEMA_V2_RETIRED_COLUMNS.contains(&name.as_str()));
+            let has_unknown_extra = extra.iter().any(|name| !shape.allows_extra(name));
             if !missing.is_empty() || has_unknown_extra {
                 return Err(GaryxDbError::Configuration(format!(
-                    "thread_meta schema v2 found an unsupported legacy shape; missing={missing:?}, extra={extra:?}"
+                    "thread_meta schema v2 found an unsupported {shape:?} shape; missing={missing:?}, extra={extra:?}"
                 )));
             }
         }
@@ -2192,76 +2512,17 @@ impl GaryxDbService {
         let source_row_count: i64 =
             tx.query_row("SELECT COUNT(*) FROM thread_meta", [], |row| row.get(0))?;
         let updated_row_count = if actual_columns == expected_columns {
-            tx.execute(
-                "UPDATE thread_meta
-                    SET projection_version = ?1
-                  WHERE projection_version != ?1",
-                params![CURRENT_THREAD_META_PROJECTION_VERSION],
-            )?
+            match shape {
+                ThreadMetaSchemaV2Shape::LegacySearchText => tx.execute(
+                    "UPDATE thread_meta
+                        SET projection_version = ?1
+                      WHERE projection_version != ?1",
+                    params![THREAD_META_SCHEMA_V2_PROJECTION_VERSION],
+                )?,
+                ThreadMetaSchemaV2Shape::SearchTitle => 0,
+            }
         } else {
-            tx.execute_batch(
-                "DROP TABLE IF EXISTS thread_meta_schema_v2;
-                 CREATE TABLE thread_meta_schema_v2 (
-                    thread_id TEXT PRIMARY KEY,
-                    workspace_dir TEXT,
-                    thread_type TEXT NOT NULL DEFAULT 'chat',
-                    thread_label TEXT,
-                    agent_id TEXT,
-                    provider_type TEXT,
-                    created_at TEXT,
-                    updated_at TEXT,
-                    message_count INTEGER NOT NULL DEFAULT 0,
-                    last_user_message TEXT,
-                    last_assistant_message TEXT,
-                    last_message_preview TEXT,
-                    recent_run_id TEXT,
-                    active_run_id TEXT,
-                    worktree_json TEXT,
-                    last_delivery_context_json TEXT,
-                    last_delivery_updated_at TEXT,
-                    default_list_hidden INTEGER NOT NULL DEFAULT 0,
-                    sort_updated_at_us INTEGER NOT NULL DEFAULT 0,
-                    search_text TEXT NOT NULL DEFAULT '',
-                    provider_key TEXT,
-                    selected_model TEXT,
-                    selected_model_reasoning_effort TEXT,
-                    selected_model_service_tier TEXT,
-                    sdk_session_id TEXT,
-                    projection_version INTEGER NOT NULL DEFAULT 6,
-                    projected_at TEXT NOT NULL,
-                    root_workspace_path TEXT,
-                    workspace_origin TEXT
-                 ) STRICT;",
-            )?;
-            tx.execute(
-                "INSERT INTO thread_meta_schema_v2 (
-                    thread_id, workspace_dir, thread_type, thread_label, agent_id,
-                    provider_type, created_at, updated_at, message_count,
-                    last_user_message, last_assistant_message, last_message_preview,
-                    recent_run_id, active_run_id, worktree_json,
-                    last_delivery_context_json, last_delivery_updated_at,
-                    default_list_hidden, sort_updated_at_us, search_text,
-                    provider_key, selected_model, selected_model_reasoning_effort,
-                    selected_model_service_tier, sdk_session_id, projection_version,
-                    projected_at, root_workspace_path, workspace_origin
-                 )
-                 SELECT thread_id, workspace_dir, thread_type, thread_label, agent_id,
-                        provider_type, created_at, updated_at, message_count,
-                        last_user_message, last_assistant_message, last_message_preview,
-                        recent_run_id, active_run_id, worktree_json,
-                        last_delivery_context_json, last_delivery_updated_at,
-                        default_list_hidden, sort_updated_at_us, search_text,
-                        provider_key, selected_model, selected_model_reasoning_effort,
-                        selected_model_service_tier, sdk_session_id, ?1, projected_at,
-                        root_workspace_path, workspace_origin
-                   FROM thread_meta",
-                params![CURRENT_THREAD_META_PROJECTION_VERSION],
-            )?;
-            tx.execute_batch(
-                "DROP TABLE thread_meta;
-                 ALTER TABLE thread_meta_schema_v2 RENAME TO thread_meta;",
-            )?;
-            ensure_thread_meta_indexes(&tx)?;
+            rebuild_thread_meta_schema_v2_tx(&tx, shape)?;
             usize::try_from(source_row_count).unwrap_or(usize::MAX)
         };
         record_projection_state_tx(

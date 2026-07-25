@@ -1333,6 +1333,42 @@ fn recent_membership_cutover_registration_requires_summary_then_activity() {
 }
 
 #[test]
+fn startup_runner_registers_title_search_cutover_and_leaves_one_search_column() {
+    let db = GaryxDbService::memory().expect("memory db");
+    db.run_thread_data_startup_migrations()
+        .expect("startup migrations");
+
+    assert!(
+        db.projection_state_exists(
+            THREAD_META_SEARCH_TITLE_MIGRATION_NAME,
+            THREAD_META_SEARCH_TITLE_MIGRATION_VERSION,
+        )
+        .expect("title search migration marker")
+    );
+    let columns = thread_meta_column_names(&db.conn().unwrap()).unwrap();
+    assert_eq!(
+        columns
+            .iter()
+            .filter(|name| name.starts_with("search_"))
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        vec!["search_title"]
+    );
+
+    db.run_thread_data_startup_migrations()
+        .expect("idempotent startup migrations");
+    assert_eq!(
+        thread_meta_column_names(&db.conn().unwrap())
+            .unwrap()
+            .iter()
+            .filter(|name| name.starts_with("search_"))
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        vec!["search_title"]
+    );
+}
+
+#[test]
 fn recent_membership_canonical_normalizer_strips_all_exclusion_paths() {
     let mut cases = [
         ("top source", json!({"source": "side_chat"}), true),
@@ -1507,7 +1543,7 @@ fn seed_summary_favorite_tx(
     tx.execute(
         "INSERT INTO thread_meta (
                 thread_id, thread_label, default_list_hidden,
-                sort_updated_at_us, search_text, projected_at
+                sort_updated_at_us, search_title, projected_at
              ) VALUES (?1, ?2, ?3, 0, '', '2026-07-17T00:00:00Z')",
         params![
             thread_id,
@@ -2795,13 +2831,20 @@ async fn run_blocking_round_trips_reads_and_writes() {
 }
 
 #[test]
-fn opening_legacy_thread_meta_db_adds_projection_columns() {
+fn startup_runner_rebuilds_pre_search_thread_meta_shape_with_retired_columns() {
     let dir = tempfile::tempdir().expect("temp dir");
     let path = dir.path().join("garyx-db.sqlite3");
     {
         let conn = Connection::open(&path).expect("legacy db");
         conn.execute_batch(
             r#"
+                CREATE TABLE thread_records (
+                    key TEXT PRIMARY KEY,
+                    body TEXT NOT NULL,
+                    updated_at TEXT,
+                    recorded_at TEXT NOT NULL
+                ) STRICT;
+
                 CREATE TABLE thread_meta (
                     thread_id TEXT PRIMARY KEY,
                     workspace_dir TEXT,
@@ -2814,17 +2857,32 @@ fn opening_legacy_thread_meta_db_adds_projection_columns() {
                     last_delivery_updated_at TEXT,
                     default_list_hidden INTEGER NOT NULL DEFAULT 0,
                     projection_version INTEGER NOT NULL DEFAULT 2,
-                    projected_at TEXT NOT NULL
+                    projected_at TEXT NOT NULL,
+                    legacy_thread_binding_key TEXT,
+                    legacy_channel TEXT,
+                    legacy_account_id TEXT,
+                    legacy_has_account INTEGER NOT NULL DEFAULT 0,
+                    excluded_from_recent INTEGER NOT NULL DEFAULT 0
                 ) STRICT;
+
+                INSERT INTO thread_records (key, body, updated_at, recorded_at)
+                VALUES (
+                    'thread::legacy',
+                    '{"thread_id":"thread::legacy","label":"Legacy Thread","workspace_dir":"/workspace/legacy","agent_id":"test-agent","updated_at":"2026-06-03T00:00:00.000Z"}',
+                    '2026-06-03T00:00:00.000Z',
+                    '2026-06-03T00:00:01.000Z'
+                );
 
                 INSERT INTO thread_meta (
                     thread_id, workspace_dir, thread_type, thread_label, agent_id,
                     provider_type, updated_at, default_list_hidden, projection_version,
-                    projected_at
+                    projected_at, legacy_thread_binding_key, legacy_channel,
+                    legacy_account_id, legacy_has_account, excluded_from_recent
                 ) VALUES (
                     'thread::legacy', '/workspace/legacy', 'chat', 'Legacy Thread',
-                    'claude', 'claude_code', '2026-06-03T00:00:00.000Z',
-                    0, 2, '2026-06-03T00:00:01.000Z'
+                    'test-agent', 'test-provider', '2026-06-03T00:00:00.000Z',
+                    0, 2, '2026-06-03T00:00:01.000Z',
+                    'test-binding', 'test-channel', 'test-account', 1, 1
                 );
                 "#,
         )
@@ -2840,22 +2898,62 @@ fn opening_legacy_thread_meta_db_adds_projection_columns() {
     assert_eq!(rows[0].message_count, 0);
     assert_eq!(rows[0].last_message_preview, None);
     assert_eq!(rows[0].projection_version, 2);
+    assert_eq!(rows[0].search_title, "");
+    let columns = thread_meta_column_names(&db.conn().unwrap()).unwrap();
+    assert!(columns.iter().any(|name| name == "search_title"));
+    assert!(!columns.iter().any(|name| name == "search_text"));
+    for retired in THREAD_META_SCHEMA_V2_RETIRED_COLUMNS {
+        assert!(
+            columns.iter().any(|name| name == retired),
+            "legacy fixture must retain {retired} before startup migrations"
+        );
+    }
 
-    let migration = db
-        .migrate_thread_meta_schema_v2()
-        .expect("canonicalize legacy column order");
-    assert_eq!(migration.updated_row_count, 1);
+    db.run_thread_data_startup_migrations()
+        .expect("full startup migration chain");
+    let columns = thread_meta_column_names(&db.conn().unwrap()).unwrap();
+    let expected_columns = THREAD_META_SCHEMA_V2_COLUMNS
+        .iter()
+        .map(|name| {
+            if *name == "search_text" {
+                "search_title"
+            } else {
+                name
+            }
+        })
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
     assert_eq!(
-        thread_meta_column_names(&db.conn().unwrap()).unwrap(),
-        THREAD_META_SCHEMA_V2_COLUMNS
-            .iter()
-            .map(|name| (*name).to_owned())
-            .collect::<Vec<_>>()
+        columns, expected_columns,
+        "startup migration must leave the canonical search_title schema"
     );
     assert_eq!(
         db.list_thread_meta().unwrap()[0].projection_version,
         CURRENT_THREAD_META_PROJECTION_VERSION
     );
+    assert_eq!(
+        db.list_thread_meta().unwrap()[0].search_title,
+        "legacy thread"
+    );
+    assert!(
+        db.projection_state_exists(
+            THREAD_META_SCHEMA_MIGRATION_NAME,
+            THREAD_META_SCHEMA_MIGRATION_VERSION,
+        )
+        .unwrap()
+    );
+    assert!(
+        db.projection_state_exists(
+            THREAD_META_SEARCH_TITLE_MIGRATION_NAME,
+            THREAD_META_SEARCH_TITLE_MIGRATION_VERSION,
+        )
+        .unwrap()
+    );
+
+    let before_rerun = db.list_thread_meta().unwrap();
+    db.run_thread_data_startup_migrations()
+        .expect("idempotent startup migration chain");
+    assert_eq!(db.list_thread_meta().unwrap(), before_rerun);
 }
 
 #[test]
@@ -4642,6 +4740,20 @@ fn recent_threads_filtered_queries_use_partial_order_indexes() {
     }
 }
 
+fn restore_thread_meta_schema_v2_search_column(service: &GaryxDbService) {
+    let conn = service.conn().expect("legacy schema connection");
+    conn.execute(
+        "ALTER TABLE thread_meta RENAME COLUMN search_title TO search_text",
+        [],
+    )
+    .expect("restore historical search column");
+    conn.execute(
+        "UPDATE thread_meta SET projection_version = ?1",
+        params![THREAD_META_SCHEMA_V2_PROJECTION_VERSION],
+    )
+    .expect("restore historical projection version");
+}
+
 #[test]
 fn thread_summary_keyset_branches_use_scoped_partial_indexes_without_temp_sort() {
     let db = GaryxDbService::memory().expect("db opens");
@@ -4652,40 +4764,45 @@ fn thread_summary_keyset_branches_use_scoped_partial_indexes_without_temp_sort()
         (ThreadSummaryTaskFilter::Only, "task"),
     ] {
         for scoped in [false, true] {
-            for has_cursor in [false, true] {
-                let expected_index = if scoped {
-                    format!("idx_thread_meta_summary_root_workspace_{suffix}")
-                } else {
-                    format!("idx_thread_meta_summary_{suffix}")
-                };
-                let mut bind = Vec::new();
-                if scoped {
-                    bind.push(SqlValue::Text("/workspace/test".to_owned()));
+            for has_query in [false, true] {
+                for has_cursor in [false, true] {
+                    let expected_index = if scoped {
+                        format!("idx_thread_meta_summary_root_workspace_{suffix}")
+                    } else {
+                        format!("idx_thread_meta_summary_{suffix}")
+                    };
+                    let mut bind = Vec::new();
+                    if scoped {
+                        bind.push(SqlValue::Text("/workspace/test".to_owned()));
+                    }
+                    if has_query {
+                        bind.push(SqlValue::Text("title".to_owned()));
+                    }
+                    if has_cursor {
+                        bind.push(SqlValue::Integer(1));
+                        bind.push(SqlValue::Text("thread::cursor".to_owned()));
+                    }
+                    bind.push(SqlValue::Integer(31));
+                    let sql = format!(
+                        "EXPLAIN QUERY PLAN {}",
+                        filter.page_sql(scoped, has_query, has_cursor)
+                    );
+                    let mut stmt = conn.prepare(&sql).expect("prepare query plan");
+                    let details = stmt
+                        .query_map(params_from_iter(bind.iter()), |row| row.get::<_, String>(3))
+                        .expect("query plan")
+                        .collect::<Result<Vec<_>, _>>()
+                        .expect("plan rows")
+                        .join("\n");
+                    assert!(
+                        details.contains("USING INDEX") && details.contains(&expected_index),
+                        "expected {expected_index} for filter={filter:?} scoped={scoped} query={has_query} cursor={has_cursor}:\n{details}"
+                    );
+                    assert!(
+                        !details.contains("USE TEMP B-TREE"),
+                        "keyset branch must be index-ordered:\n{details}"
+                    );
                 }
-                if has_cursor {
-                    bind.push(SqlValue::Integer(1));
-                    bind.push(SqlValue::Text("thread::cursor".to_owned()));
-                }
-                bind.push(SqlValue::Integer(31));
-                let sql = format!(
-                    "EXPLAIN QUERY PLAN {}",
-                    filter.page_sql(scoped, false, has_cursor)
-                );
-                let mut stmt = conn.prepare(&sql).expect("prepare query plan");
-                let details = stmt
-                    .query_map(params_from_iter(bind.iter()), |row| row.get::<_, String>(3))
-                    .expect("query plan")
-                    .collect::<Result<Vec<_>, _>>()
-                    .expect("plan rows")
-                    .join("\n");
-                assert!(
-                    details.contains("USING INDEX") && details.contains(&expected_index),
-                    "expected {expected_index} for filter={filter:?} scoped={scoped} cursor={has_cursor}:\n{details}"
-                );
-                assert!(
-                    !details.contains("USE TEMP B-TREE"),
-                    "keyset branch must be index-ordered:\n{details}"
-                );
             }
         }
     }
@@ -4731,7 +4848,7 @@ fn thread_meta_summary_cutover_backfills_all_columns_once_and_is_idempotent() {
             .expect("seed canonical record");
             conn.execute(
                 "INSERT INTO thread_meta (
-                        thread_id, thread_label, sort_updated_at_us, search_text,
+                        thread_id, thread_label, sort_updated_at_us, search_title,
                         projected_at
                      ) VALUES (?1, 'stale', -1, 'stale', '2026-07-17T00:00:00Z')",
                 params![thread_id],
@@ -4758,10 +4875,8 @@ fn thread_meta_summary_cutover_backfills_all_columns_once_and_is_idempotent() {
             .timestamp_micros()
     );
     assert_eq!(
-        updated.search_text,
-        crate::thread_meta_projection::normalize_for_search(
-            "Straße\n/workspace/Équipe\nΣς\n％＿＼",
-        )
+        updated.search_title,
+        crate::thread_meta_projection::normalize_for_search("Straße")
     );
     let created = rows
         .iter()
@@ -4813,9 +4928,9 @@ fn thread_preview_user_first_cutover_repairs_both_stored_routes_once() {
         conn.execute(
             "INSERT INTO thread_meta (
                     thread_id, thread_label, last_user_message,
-                    last_assistant_message, last_message_preview, search_text, projected_at
+                    last_assistant_message, last_message_preview, search_title, projected_at
                  ) VALUES (?1, 'Preview cutover', 'Latest user sentence',
-                           'Assistant answer', 'Assistant answer', 'assistant answer',
+                           'Assistant answer', 'Assistant answer', 'preview cutover',
                            '2026-07-21T00:00:00Z')",
             params![thread_id],
         )
@@ -4855,8 +4970,7 @@ fn thread_preview_user_first_cutover_repairs_both_stored_routes_once() {
         Some("Latest user sentence")
     );
     assert_eq!(recent.last_message_preview, "Latest user sentence");
-    assert!(meta.search_text.contains("latest user sentence"));
-    assert!(!meta.search_text.contains("assistant answer"));
+    assert_eq!(meta.search_title, "preview cutover");
 
     let second = db
         .migrate_thread_preview_user_first_v1()
@@ -4867,8 +4981,192 @@ fn thread_preview_user_first_cutover_repairs_both_stored_routes_once() {
 }
 
 #[test]
-fn thread_meta_schema_v2_rebuilds_real_legacy_shape_without_reusing_cutover_markers() {
+fn thread_meta_search_title_cutover_backfills_all_rows_once_drops_legacy_column_and_marks() {
     let db = GaryxDbService::memory().expect("db opens");
+    restore_thread_meta_schema_v2_search_column(&db);
+    {
+        let conn = db.conn().expect("writer");
+        for (thread_id, title, legacy_search_text) in [
+            (
+                "thread::search-title-unicode",
+                Some("CAFÉ Straße"),
+                "café strasse\n/workspace/only-path-needle\ntest-agent\nonly-preview-needle",
+            ),
+            (
+                "thread::search-title-empty",
+                None,
+                "\n/workspace/empty-title-needle\ntest-agent\npreview",
+            ),
+            (
+                "thread::search-title-whitespace",
+                Some(" \t "),
+                " \t \n/workspace/whitespace-title-needle\ntest-agent\npreview",
+            ),
+        ] {
+            conn.execute(
+                "INSERT INTO thread_meta (
+                        thread_id, thread_label, workspace_dir, agent_id,
+                        last_message_preview, search_text, projection_version, projected_at
+                     ) VALUES (
+                        ?1, ?2, '/workspace/test', 'test-agent',
+                        'preview', ?3, ?4, '2026-07-26T00:00:00Z'
+                     )",
+                params![
+                    thread_id,
+                    title,
+                    legacy_search_text,
+                    THREAD_META_SCHEMA_V2_PROJECTION_VERSION,
+                ],
+            )
+            .expect("seed legacy search row");
+        }
+    }
+
+    let first = db
+        .migrate_thread_meta_search_title_v1()
+        .expect("title search cutover");
+    assert_eq!(first.source_row_count, 3);
+    assert_eq!(first.updated_row_count, 3);
+    assert!(!first.already_completed);
+
+    let columns = thread_meta_column_names(&db.conn().unwrap()).unwrap();
+    assert_eq!(
+        columns
+            .iter()
+            .filter(|name| name.starts_with("search_"))
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        vec!["search_title"]
+    );
+    assert!(!columns.iter().any(|name| name == "search_text"));
+
+    let rows = db.list_thread_meta().expect("backfilled title rows");
+    let by_id = rows
+        .iter()
+        .map(|row| (row.thread_id.as_str(), row))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    assert_eq!(
+        by_id["thread::search-title-unicode"].search_title,
+        crate::thread_meta_projection::normalize_for_search("Cafe\u{301} STRASSE")
+    );
+    assert_eq!(by_id["thread::search-title-empty"].search_title, "");
+    assert_eq!(
+        by_id["thread::search-title-whitespace"].search_title,
+        " \t "
+    );
+    assert!(
+        rows.iter()
+            .all(|row| row.projection_version == CURRENT_THREAD_META_PROJECTION_VERSION)
+    );
+    assert!(
+        rows.iter()
+            .all(|row| !row.search_title.contains("workspace")
+                && !row.search_title.contains("preview")
+                && !row.search_title.contains("test-agent"))
+    );
+
+    let marker: (i64, i64, Option<i64>) = db
+        .conn()
+        .unwrap()
+        .query_row(
+            "SELECT projection_version, source_row_count, based_on_import_generation
+               FROM projection_states
+              WHERE projection_name = ?1",
+            params![THREAD_META_SEARCH_TITLE_MIGRATION_NAME],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("title search migration marker");
+    assert_eq!(
+        marker,
+        (THREAD_META_SEARCH_TITLE_MIGRATION_VERSION, 3, None)
+    );
+
+    let before_second = db.list_thread_meta().expect("rows before idempotent rerun");
+    let second = db
+        .migrate_thread_meta_search_title_v1()
+        .expect("idempotent title search cutover");
+    assert_eq!(second.source_row_count, 3);
+    assert_eq!(second.updated_row_count, 0);
+    assert!(second.already_completed);
+    assert_eq!(
+        db.list_thread_meta().expect("rows after idempotent rerun"),
+        before_second
+    );
+}
+
+#[test]
+fn thread_meta_search_title_cutover_rolls_back_schema_rows_and_marker_together() {
+    let db = GaryxDbService::memory().expect("db opens");
+    restore_thread_meta_schema_v2_search_column(&db);
+    {
+        let conn = db.conn().expect("writer");
+        conn.execute(
+            "INSERT INTO thread_meta (
+                    thread_id, thread_label, search_text, projection_version, projected_at
+                 ) VALUES (
+                    'thread::search-title-rollback', 'Rollback Title', 'legacy corpus',
+                    ?1, '2026-07-26T00:00:00Z'
+                 )",
+            params![THREAD_META_SCHEMA_V2_PROJECTION_VERSION],
+        )
+        .expect("seed rollback row");
+        conn.execute_batch(
+            "CREATE TRIGGER fail_search_title_backfill
+             BEFORE UPDATE ON thread_meta
+             BEGIN
+                 SELECT RAISE(ABORT, 'injected search title backfill failure');
+             END;",
+        )
+        .expect("install rollback trigger");
+    }
+
+    assert!(db.migrate_thread_meta_search_title_v1().is_err());
+    let columns = thread_meta_column_names(&db.conn().unwrap()).unwrap();
+    assert!(columns.iter().any(|name| name == "search_text"));
+    assert!(!columns.iter().any(|name| name == "search_title"));
+    let marker_count: i64 = db
+        .conn()
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*)
+               FROM projection_states
+              WHERE projection_name = ?1",
+            params![THREAD_META_SEARCH_TITLE_MIGRATION_NAME],
+            |row| row.get(0),
+        )
+        .expect("rollback marker count");
+    assert_eq!(marker_count, 0);
+    let legacy_search_text: String = db
+        .conn()
+        .unwrap()
+        .query_row(
+            "SELECT search_text
+               FROM thread_meta
+              WHERE thread_id = 'thread::search-title-rollback'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("legacy search value after rollback");
+    assert_eq!(legacy_search_text, "legacy corpus");
+
+    db.conn()
+        .unwrap()
+        .execute("DROP TRIGGER fail_search_title_backfill", [])
+        .expect("remove rollback trigger");
+    let retry = db
+        .migrate_thread_meta_search_title_v1()
+        .expect("retry title search cutover");
+    assert_eq!(retry.updated_row_count, 1);
+    assert_eq!(
+        db.list_thread_meta().unwrap()[0].search_title,
+        "rollback title"
+    );
+}
+
+#[test]
+fn thread_meta_schema_v2_rebuilds_search_text_legacy_shape_without_reusing_cutover_markers() {
+    let db = GaryxDbService::memory().expect("db opens");
+    restore_thread_meta_schema_v2_search_column(&db);
     {
         let conn = db.conn().expect("writer");
         conn.execute_batch(
@@ -4924,15 +5222,32 @@ fn thread_meta_schema_v2_rebuilds_real_legacy_shape_without_reusing_cutover_mark
             .map(|name| (*name).to_owned())
             .collect::<Vec<_>>()
     );
-    let row = db.list_thread_meta().unwrap().pop().unwrap();
-    assert_eq!(row.thread_id, "thread::schema-v2");
-    assert_eq!(row.workspace_dir.as_deref(), Some("/workspace/schema-v2"));
-    assert_eq!(row.thread_label.as_deref(), Some("Schema v2"));
-    assert_eq!(row.sort_updated_at_us, 42);
-    assert_eq!(
-        row.projection_version,
-        CURRENT_THREAD_META_PROJECTION_VERSION
-    );
+    let row: (String, Option<String>, Option<String>, i64, String, i64) = db
+        .conn()
+        .unwrap()
+        .query_row(
+            "SELECT thread_id, workspace_dir, thread_label, sort_updated_at_us,
+                    search_text, projection_version
+               FROM thread_meta",
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!(row.0, "thread::schema-v2");
+    assert_eq!(row.1.as_deref(), Some("/workspace/schema-v2"));
+    assert_eq!(row.2.as_deref(), Some("Schema v2"));
+    assert_eq!(row.3, 42);
+    assert_eq!(row.4, "schema v2");
+    assert_eq!(row.5, THREAD_META_SCHEMA_V2_PROJECTION_VERSION);
 
     let conn = db.conn().unwrap();
     let historical = [
@@ -5023,7 +5338,7 @@ fn thread_meta_projection_round_trip_and_remove() {
             last_delivery_updated_at: Some("2026-06-03T08:00:01.000Z".to_owned()),
             default_list_hidden: false,
             sort_updated_at_us: 1_780_473_600_000_000,
-            search_text: "project thread\n/work/project\ncodex\ndone".to_owned(),
+            search_title: "project thread".to_owned(),
         },
         channel_endpoints: vec![KnownChannelEndpoint {
             endpoint_key: "telegram::main::42".to_owned(),

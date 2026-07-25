@@ -2,7 +2,7 @@
 
 use super::*;
 
-pub(super) const CURRENT_THREAD_META_PROJECTION_VERSION: i64 = 6;
+pub(super) const CURRENT_THREAD_META_PROJECTION_VERSION: i64 = 7;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ThreadMetaRecord {
@@ -30,7 +30,7 @@ pub struct ThreadMetaRecord {
     pub last_delivery_updated_at: Option<String>,
     pub default_list_hidden: bool,
     pub sort_updated_at_us: i64,
-    pub search_text: String,
+    pub search_title: String,
     /// Server-owned workspace membership: worktree threads map to their
     /// source workspace, implicit Garyx-managed thread workspaces to None.
     pub root_workspace_path: Option<String>,
@@ -66,7 +66,7 @@ pub struct ThreadMetaDraft {
     pub last_delivery_updated_at: Option<String>,
     pub default_list_hidden: bool,
     pub sort_updated_at_us: i64,
-    pub search_text: String,
+    pub search_title: String,
     pub root_workspace_path: Option<String>,
     pub workspace_origin: Option<String>,
 }
@@ -101,7 +101,7 @@ pub(super) fn thread_meta_record_from_row(
         last_delivery_updated_at: row.get(16)?,
         default_list_hidden: row.get::<_, i64>(17)? != 0,
         sort_updated_at_us: row.get(18)?,
-        search_text: row.get(19)?,
+        search_title: row.get(19)?,
         provider_key: row.get(20)?,
         selected_model: row.get(21)?,
         selected_model_reasoning_effort: row.get(22)?,
@@ -172,7 +172,7 @@ pub(super) fn upsert_thread_meta(
     let last_delivery_updated_at = normalize_optional(meta.last_delivery_updated_at.as_deref());
     let default_list_hidden = if meta.default_list_hidden { 1 } else { 0 };
     let sort_updated_at_us = meta.sort_updated_at_us;
-    let search_text = meta.search_text.clone();
+    let search_title = meta.search_title.clone();
     let provider_key = normalize_optional(meta.provider_key.as_deref());
     let selected_model = normalize_optional(meta.selected_model.as_deref());
     let selected_model_reasoning_effort =
@@ -189,7 +189,7 @@ pub(super) fn upsert_thread_meta(
             created_at, updated_at, message_count, last_user_message, last_assistant_message,
             last_message_preview, recent_run_id, active_run_id, worktree_json,
             last_delivery_context_json, last_delivery_updated_at, default_list_hidden,
-            sort_updated_at_us, search_text,
+            sort_updated_at_us, search_title,
             provider_key, selected_model, selected_model_reasoning_effort,
             selected_model_service_tier, sdk_session_id,
             projection_version, projected_at,
@@ -220,7 +220,7 @@ pub(super) fn upsert_thread_meta(
             last_delivery_updated_at = excluded.last_delivery_updated_at,
             default_list_hidden = excluded.default_list_hidden,
             sort_updated_at_us = excluded.sort_updated_at_us,
-            search_text = excluded.search_text,
+            search_title = excluded.search_title,
             root_workspace_path = excluded.root_workspace_path,
             workspace_origin = excluded.workspace_origin,
             projection_version = excluded.projection_version,
@@ -245,7 +245,7 @@ pub(super) fn upsert_thread_meta(
             last_delivery_updated_at,
             default_list_hidden,
             sort_updated_at_us,
-            search_text,
+            search_title,
             provider_key,
             selected_model,
             selected_model_reasoning_effort,
@@ -330,7 +330,7 @@ impl GaryxDbService {
                           recent_run_id, active_run_id, worktree_json,
                           last_delivery_context_json, last_delivery_updated_at,
                           default_list_hidden, sort_updated_at_us,
-                          search_text, provider_key, selected_model,
+                          search_title, provider_key, selected_model,
                           selected_model_reasoning_effort, selected_model_service_tier,
                           sdk_session_id, projection_version, projected_at,
                           root_workspace_path, workspace_origin
@@ -388,7 +388,7 @@ impl GaryxDbService {
                     recent_run_id, active_run_id, worktree_json,
                     last_delivery_context_json, last_delivery_updated_at,
                     default_list_hidden, sort_updated_at_us,
-                    search_text, provider_key, selected_model,
+                    search_title, provider_key, selected_model,
                     selected_model_reasoning_effort, selected_model_service_tier,
                     sdk_session_id, projection_version, projected_at,
                     root_workspace_path, workspace_origin

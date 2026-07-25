@@ -151,12 +151,12 @@ pub(super) fn thread_summary_include_sql(
             "\n   AND (sort_updated_at_us, thread_id) < (?, ?)"
         ),
         (false, true, false) => {
-            thread_summary_sql!("", "", "\n   AND instr(search_text, ?) > 0", "")
+            thread_summary_sql!("", "", "\n   AND instr(search_title, ?) > 0", "")
         }
         (false, true, true) => thread_summary_sql!(
             "",
             "",
-            "\n   AND instr(search_text, ?) > 0",
+            "\n   AND instr(search_title, ?) > 0",
             "\n   AND (sort_updated_at_us, thread_id) < (?, ?)"
         ),
         (true, false, false) => {
@@ -171,13 +171,13 @@ pub(super) fn thread_summary_include_sql(
         (true, true, false) => thread_summary_sql!(
             "\n   AND root_workspace_path = ?",
             "",
-            "\n   AND instr(search_text, ?) > 0",
+            "\n   AND instr(search_title, ?) > 0",
             ""
         ),
         (true, true, true) => thread_summary_sql!(
             "\n   AND root_workspace_path = ?",
             "",
-            "\n   AND instr(search_text, ?) > 0",
+            "\n   AND instr(search_title, ?) > 0",
             "\n   AND (sort_updated_at_us, thread_id) < (?, ?)"
         ),
     }
@@ -201,13 +201,13 @@ pub(super) fn thread_summary_exclude_sql(
         (false, true, false) => thread_summary_sql!(
             "",
             "\n   AND thread_type <> 'task'",
-            "\n   AND instr(search_text, ?) > 0",
+            "\n   AND instr(search_title, ?) > 0",
             ""
         ),
         (false, true, true) => thread_summary_sql!(
             "",
             "\n   AND thread_type <> 'task'",
-            "\n   AND instr(search_text, ?) > 0",
+            "\n   AND instr(search_title, ?) > 0",
             "\n   AND (sort_updated_at_us, thread_id) < (?, ?)"
         ),
         (true, false, false) => thread_summary_sql!(
@@ -225,13 +225,13 @@ pub(super) fn thread_summary_exclude_sql(
         (true, true, false) => thread_summary_sql!(
             "\n   AND root_workspace_path = ?",
             "\n   AND thread_type <> 'task'",
-            "\n   AND instr(search_text, ?) > 0",
+            "\n   AND instr(search_title, ?) > 0",
             ""
         ),
         (true, true, true) => thread_summary_sql!(
             "\n   AND root_workspace_path = ?",
             "\n   AND thread_type <> 'task'",
-            "\n   AND instr(search_text, ?) > 0",
+            "\n   AND instr(search_title, ?) > 0",
             "\n   AND (sort_updated_at_us, thread_id) < (?, ?)"
         ),
     }
@@ -255,13 +255,13 @@ pub(super) fn thread_summary_only_sql(
         (false, true, false) => thread_summary_sql!(
             "",
             "\n   AND thread_type = 'task'",
-            "\n   AND instr(search_text, ?) > 0",
+            "\n   AND instr(search_title, ?) > 0",
             ""
         ),
         (false, true, true) => thread_summary_sql!(
             "",
             "\n   AND thread_type = 'task'",
-            "\n   AND instr(search_text, ?) > 0",
+            "\n   AND instr(search_title, ?) > 0",
             "\n   AND (sort_updated_at_us, thread_id) < (?, ?)"
         ),
         (true, false, false) => thread_summary_sql!(
@@ -279,13 +279,13 @@ pub(super) fn thread_summary_only_sql(
         (true, true, false) => thread_summary_sql!(
             "\n   AND root_workspace_path = ?",
             "\n   AND thread_type = 'task'",
-            "\n   AND instr(search_text, ?) > 0",
+            "\n   AND instr(search_title, ?) > 0",
             ""
         ),
         (true, true, true) => thread_summary_sql!(
             "\n   AND root_workspace_path = ?",
             "\n   AND thread_type = 'task'",
-            "\n   AND instr(search_text, ?) > 0",
+            "\n   AND instr(search_title, ?) > 0",
             "\n   AND (sort_updated_at_us, thread_id) < (?, ?)"
         ),
     }
