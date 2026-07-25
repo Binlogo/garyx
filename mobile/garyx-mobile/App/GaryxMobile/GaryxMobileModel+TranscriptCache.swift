@@ -38,13 +38,18 @@ extension GaryxMobileModel {
         if let cached = transcriptMirror.snapshot(for: threadId) {
             return cached
         }
-        // Coalesce: the check above happens before the await below, so the stream
-        // request builder and the initial history fetch both pass it on a cold
-        // open. The shared task carries the whole transaction — load, freshness
-        // decision, hydrate — so every entrant observes the same finalized
-        // outcome instead of a raw disk window that may already be invalid.
+        // Every entrant captures its own scope. A coalesced entrant can resume
+        // long after the shared work finished — after a clear queued behind the
+        // hydrate, or after the app left this gateway entirely — so the result is
+        // resolved per entrant rather than frozen once for all of them.
+        let entrantToken = gatewayRequestToken
+        // Coalesce: the mirror check above happens before the await below, so the
+        // stream request builder and the initial history fetch both pass it on a
+        // cold open. The shared task owns load, freshness decision, and hydrate;
+        // it does not own anyone's return value.
         if let inFlight = transcriptDiskHydrationTasks[threadId] {
-            return await inFlight.value
+            await inFlight.value
+            return resolvedTranscriptWindow(for: threadId, entrantToken: entrantToken)
         }
         let store = transcriptCacheStore
         // Freshness is captured before the load and re-checked after it.
@@ -53,27 +58,42 @@ extension GaryxMobileModel {
         // whole mirror and cannot bump the generation of a thread that was absent
         // (`GaryxTranscriptMirrorStore.clearAll` only bumps present threads).
         let capturedGeneration = transcriptMirror.generation(for: threadId)
-        let capturedToken = gatewayRequestToken
-        let hydration = Task<GaryxCachedTranscript?, Never> { @MainActor [weak self] in
+        let hydration = Task<Void, Never> { @MainActor [weak self] in
             let loaded = await GaryxTranscriptCachePersistenceQueue.shared.load(
                 threadId: threadId,
                 store: store
             )
-            guard let self else { return nil }
-            return self.finishTranscriptDiskHydration(
+            self?.finishTranscriptDiskHydration(
                 loaded,
                 for: threadId,
                 capturedGeneration: capturedGeneration,
-                capturedToken: capturedToken
+                capturedToken: entrantToken
             )
         }
         transcriptDiskHydrationTasks[threadId] = hydration
-        let resolved = await hydration.value
+        await hydration.value
         // Identity-checked: never clear an entry a later hydration installed.
         if transcriptDiskHydrationTasks[threadId] == hydration {
             transcriptDiskHydrationTasks[threadId] = nil
         }
-        return resolved
+        return resolvedTranscriptWindow(for: threadId, entrantToken: entrantToken)
+    }
+
+    /// What one entrant may return once the shared hydrate has finished.
+    ///
+    /// The two gates inside `finishTranscriptDiskHydration` only establish that
+    /// the *hydrate* was valid when it ran. Between that point and an entrant
+    /// resuming, the mirror can move again — so read it fresh — and the app can
+    /// leave the entrant's gateway scope. On a scope change the entrant gets
+    /// nothing: thread ids are not unique across gateways, so handing back the
+    /// destination scope's window would feed another backend's `afterCursor`
+    /// into this entrant's stream/history request.
+    private func resolvedTranscriptWindow(
+        for threadId: String,
+        entrantToken: GaryxGatewayRequestToken
+    ) -> GaryxCachedTranscript? {
+        guard entrantToken == gatewayRequestToken else { return nil }
+        return transcriptMirror.snapshot(for: threadId)
     }
 
     /// Decide whether a just-decoded disk window may still be applied, then apply
@@ -93,16 +113,12 @@ extension GaryxMobileModel {
         for threadId: String,
         capturedGeneration: UInt64,
         capturedToken: GaryxGatewayRequestToken
-    ) -> GaryxCachedTranscript? {
-        guard capturedToken == gatewayRequestToken else {
-            return transcriptMirror.snapshot(for: threadId)
-        }
-        guard transcriptMirror.generation(for: threadId) == capturedGeneration else {
-            return transcriptMirror.snapshot(for: threadId)
-        }
-        guard let loaded else { return nil }
+    ) {
+        guard capturedToken == gatewayRequestToken,
+              transcriptMirror.generation(for: threadId) == capturedGeneration,
+              let loaded
+        else { return }
         hydrateTranscriptMirrorFromDisk(loaded, for: threadId)
-        return loaded
     }
 
     /// Seed the mirror from disk **and** make that seed visible.

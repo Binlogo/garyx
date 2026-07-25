@@ -34,12 +34,17 @@
 ## 实现
 
 一处改动:把"磁盘 auto-seed"升级为**可见 hydrate**,并补齐它欠缺的新鲜度与 floor 锚定。
-全部在 `GaryxMobileModel+TranscriptCache.swift::transcriptSnapshotAsync`。
+行为入口集中在 `GaryxMobileModel+TranscriptCache.swift::transcriptSnapshotAsync`
+(另在 `GaryxMobileModel.swift` 新增两处状态:发布用的 revision 和 in-flight 表)。
 
 1. **并发合并**。mirror 检查发生在 await 之前,冷开时 stream 和 history 会同时穿过;
    不合并则各读一次盘、各 seed 一次、各推进一次 generation。
-   共享任务承载**完整事务**(load → 新鲜度判定 → hydrate),所以每个 entrant 拿到的是
-   同一个**已终局**的结果,而不是可能已失效的裸磁盘窗口。
+   共享任务承载 load → 新鲜度判定 → hydrate,但**不冻结任何人的返回值**:
+   entrant 可能在共享工作完成很久之后才恢复(hydrate 之后排队的 clear、或整个
+   gateway scope 已被离开),所以每个 entrant 在 await 前捕获自己的 token,恢复后
+   复检 token 并**重新读一次 mirror**(`resolvedTranscriptWindow`)。
+   token 失配返回 nil —— thread id 在不同 gateway 之间可能重名,把 destination scope
+   的窗口交给 origin entrant 会把另一个后端的 `afterCursor` 喂进它的 stream/history 请求。
    in-flight 表的清理是 identity-checked,不会清掉后来者装入的条目。
 2. **await 后双重新鲜度复检**(`finishTranscriptDiskHydration`,主 actor 上一步完成,
    判定不跨挂起):
@@ -65,8 +70,10 @@
 `selectedTurnRowsWindowRevision`,hydrate 再推进自己的 revision,同一 tick 内。
 "发布一次"仅指专用 revision。
 
-**只有这条磁盘路径发布**,所有直播 mirror 写保持静默(`hydrateTranscriptMirrorFromDisk`
-只有磁盘命中一个调用点;SSE 的 committed/render 写继续走普通 setter)。
+**只有 auto-hydrate 会为一次 mirror seed 额外推进 hydration revision**;直播 mirror 写
+保持静默(`hydrateTranscriptMirrorFromDisk` 只有磁盘命中一个调用点;SSE 的
+committed/render 写继续走普通 setter)。专用 cold restore 本就通过 `setRenderSnapshot`
+发布,不受影响。
 
 ## 为什么不写 `renderSnapshotsByThread`
 
@@ -85,16 +92,22 @@ TTL 24h 封顶,首帧实时快照覆盖自愈。
 
 ## 验证
 
-`Tests/GaryxMobileTests/GaryxTranscriptDiskHydrationPublishTests.swift`,12 例。
+`Tests/GaryxMobileTests/GaryxTranscriptDiskHydrationPublishTests.swift`,14 例。
 竞态用例用真实 happens-before:fake store 在 `load` 内阻塞(跑在主 actor 之外),
 测试在主 actor 完成变更后才放行,不依赖 `Task` 调度顺序。
 
-- 新代码 **12/12 PASS**(连跑 3 次无抖动)。
+- 新代码 **14/14 PASS**(连跑 3 次无抖动)。
 - 摘掉 hydrate 事务的旧行为探针:**6 FAIL**(含发布断言、floor 滑动 `turn:21`→`turn:31`)。
 - 退回单一 `if let current` 新鲜度检查的探针:**5 FAIL**(nil-clear 复活、
   gateway 切换后旧 scope 窗口复活并在后续选择时可见)。
+- 摘掉 per-entrant scope 复检的探针:**1 FAIL** ——
+  `testEntrantFromAnExitedScopeNeverReceivesTheDestinationScopesWindow`,
+  origin entrant 收到了 destination scope 的窗口。
+  ("冻结共享返回值"那条我没做出干净的隔离探针:能想到的构造都会重新进入被 gate 的
+  fake store 从而污染结果。该分支目前只由
+  `testClearLandingAfterTheHydrateIsNotReturnedToTheEntrant` 的构造本身保证。)
 - `swift test`(GaryxMobileCore)1595 passed。
-- `xcodebuild -only-testing:GaryxMobileTests` 217 passed。
+- `xcodebuild -only-testing:GaryxMobileTests` 219 passed。
 - app target `xcodebuild build` SUCCEEDED。
 - 新增测试文件后跑了 `xcodegen generate`(工程按目录收录;已验证引用文件集合只多了
   该文件,其余为 UUID 规范化抖动)。

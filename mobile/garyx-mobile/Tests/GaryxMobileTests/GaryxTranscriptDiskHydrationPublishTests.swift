@@ -184,6 +184,72 @@ final class GaryxTranscriptDiskHydrationPublishTests: XCTestCase {
         XCTAssertNil(resolved, "the cleared window must not escape to the caller")
     }
 
+    /// The two gates only establish that the *hydrate* was valid when it ran. A
+    /// clear that lands after it, but before the entrant resumes, must still win:
+    /// the entrant reads the mirror fresh instead of returning a window frozen by
+    /// the shared task.
+    ///
+    /// The clear is issued from the hydrate's own publish, so it is synchronously
+    /// ordered after the seed and before any entrant resumes.
+    func testClearLandingAfterTheHydrateIsNotReturnedToTheEntrant() async {
+        let model = makeModel()
+        let thread = makeThread(id: "thread::hydrate-late-clear")
+        model.selectedThread = thread
+        model.transcriptCacheStore = FakeTranscriptCacheStore(
+            windows: [thread.id: window(for: thread.id)]
+        )
+
+        var cleared = false
+        let cancellable = model.objectWillChange.sink { [weak model] _ in
+            guard let model, !cleared,
+                  model.transcriptMirror.snapshot(for: thread.id) != nil
+            else { return }
+            cleared = true
+            model.clearTranscriptCache(for: thread.id)
+        }
+        defer { cancellable.cancel() }
+
+        let resolved = await model.transcriptSnapshotAsync(for: thread.id)
+
+        XCTAssertTrue(cleared, "precondition: the clear ran after the seed")
+        XCTAssertNil(model.transcriptMirror.snapshot(for: thread.id))
+        XCTAssertNil(resolved, "a stale window must not be handed to the entrant")
+    }
+
+    /// Thread ids are not unique across gateways. An entrant whose scope was left
+    /// mid-load must get nothing — never the destination scope's window, whose
+    /// `afterCursor` would be fed into this entrant's stream/history request.
+    func testEntrantFromAnExitedScopeNeverReceivesTheDestinationScopesWindow() async {
+        let model = makeModel()
+        let thread = makeThread(id: "thread::hydrate-cross-scope")
+        model.selectedThread = thread
+        let store = FakeTranscriptCacheStore(
+            windows: [thread.id: window(for: thread.id, text: "origin")],
+            gated: true
+        )
+        model.transcriptCacheStore = store
+
+        let handle = Task { await model.transcriptSnapshotAsync(for: thread.id) }
+        await store.waitUntilLoadEntered()
+        model.resetGatewayRuntimeState()
+        model.gatewayRequestToken = GaryxGatewayRequestToken(
+            scope: GaryxGatewayScope(identity: "destination-gateway", epoch: 1),
+            activationSequence: 2
+        )
+        // The destination scope legitimately populates the same thread id.
+        let destination = window(for: thread.id, text: "destination", turns: 50)
+        model.setTranscriptMirror(destination, for: thread.id)
+        store.releaseLoad()
+        let resolved = await handle.value
+
+        XCTAssertNil(resolved, "the exited scope's entrant must receive nothing")
+        XCTAssertEqual(
+            model.transcriptMirror.snapshot(for: thread.id),
+            destination,
+            "the destination scope's own window is untouched"
+        )
+    }
+
     /// A gateway switch drops the whole mirror, but `clearAll` can only bump the
     /// generation of threads that were *present* — a thread being hydrated for the
     /// first time was absent, so the generation alone cannot tell that its decoded
@@ -424,8 +490,15 @@ private final class FakeTranscriptCacheStore: GaryxTranscriptCacheStore, @unchec
     /// it. The persistence queue runs `load` off the main actor, so a test can
     /// mutate model state on the main actor and know that mutation is ordered
     /// before the load returns — a real happens-before instead of a race.
+    ///
+    /// Entry is announced through a continuation rather than a semaphore: waiting
+    /// on `DispatchSemaphore` from an async context is unavailable in Swift 6 and
+    /// would burn a second cooperative worker. The release side stays a semaphore
+    /// because the store protocol's `load` is synchronous, and it is bounded so a
+    /// failing test cannot hang the suite.
     private let gated: Bool
-    private let entered = DispatchSemaphore(value: 0)
+    private var enteredLoad = false
+    private var entryWaiter: CheckedContinuation<Void, Never>?
     private let release = DispatchSemaphore(value: 0)
 
     init(windows: [String: GaryxCachedTranscript], gated: Bool = false) {
@@ -440,7 +513,16 @@ private final class FakeTranscriptCacheStore: GaryxTranscriptCacheStore, @unchec
     }
 
     func waitUntilLoadEntered() async {
-        await Task.detached { [entered] in entered.wait() }.value
+        await withCheckedContinuation { continuation in
+            lock.lock()
+            if enteredLoad {
+                lock.unlock()
+                continuation.resume()
+                return
+            }
+            entryWaiter = continuation
+            lock.unlock()
+        }
     }
 
     func releaseLoad() {
@@ -451,10 +533,16 @@ private final class FakeTranscriptCacheStore: GaryxTranscriptCacheStore, @unchec
         lock.lock()
         loads += 1
         let window = windows[threadId]
+        var waiter: CheckedContinuation<Void, Never>?
+        if gated {
+            enteredLoad = true
+            waiter = entryWaiter
+            entryWaiter = nil
+        }
         lock.unlock()
         if gated {
-            entered.signal()
-            release.wait()
+            waiter?.resume()
+            _ = release.wait(timeout: .now() + 10)
         }
         return window
     }

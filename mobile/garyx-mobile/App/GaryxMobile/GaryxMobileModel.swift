@@ -477,7 +477,12 @@ final class GaryxMobileModel: ObservableObject {
     /// reach it while the mirror is still cold — without this they each read the
     /// file, each `set` the mirror, and each advance the per-thread generation the
     /// cold-open restore policy compares against.
-    var transcriptDiskHydrationTasks: [String: Task<GaryxCachedTranscript?, Never>] = [:]
+    ///
+    /// The task carries no result: it owns the load, the freshness decision, and
+    /// the hydrate, but each entrant resolves its own return value afterwards
+    /// (`resolvedTranscriptWindow`) because the mirror and the entrant's gateway
+    /// scope can both move again before that entrant resumes.
+    var transcriptDiskHydrationTasks: [String: Task<Void, Never>] = [:]
     var transcriptCachePersistenceGenerations: [String: UInt64] = [:]
     /// Monotonic per-thread cold-open generation, bumped in `showSelectedThread`
     /// on a thread-id change; the async restore task captures it at spawn and
