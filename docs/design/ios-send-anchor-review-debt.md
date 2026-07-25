@@ -59,3 +59,48 @@ Same review, NIT N11. The transcript row stack declares
 away. Changing the stack alone would silently shift every spacer by
 (N-1) × delta, and no test would fail. Fix: have the stack consume the same
 constant so the two cannot drift.
+
+## Send-time keyboard dismissal races the optimistic append (unresolved)
+
+Recorded 2026-07-26 after four failed review rounds (#TASK-2721). Not shipped;
+branch `gary/send-flash` abandoned at `1beeaed17`.
+
+Symptom: sending while the keyboard is up and the reader is at the bottom
+intermittently makes the transcript jump backwards and snap back (7/15 on the
+shipped build, up to 260pt of same-row travel).
+
+Cause chain, fully attributed: the send commit freezes the composer read-only,
+`isEditable = false` implicitly resigns first responder (#TASK-2713 LLDB), so
+the keyboard collapse rides along with persistence and its viewport change
+lands in the same frame as the optimistic row's content growth. The bottom
+anchor resolves against the stale viewport, then the viewport settles a frame
+later and the position is pulled back.
+
+Why the four attempts failed — all of them tried to *time* the dismissal
+against an unknown layout completion instead of observing it:
+
+1. `isFocused = false` — the representable only acts on false->true edges, so
+   nothing dismissed at all (15/15 keyboard stayed up; the clean reversal
+   count was a false green).
+2. `Task.yield()` after `sendDraft()` — that awaits the network dispatch, so
+   the dismissal was bound to request latency, and a yield is not a frame.
+3. Empty `CATransaction` completion — fires 0.019-0.077ms later, still ahead
+   of the next display-link tick, so the appended row was not presented
+   (8/15 reversals).
+4. One `CADisplayLink` tick + a liveness-generation guard — SwiftUI row
+   materialization can still land after that tick on a large thread (3/15
+   reversals), and the generation guard cancelled queued freezes during
+   ordinary presentation reconciliation, so only 5/15 dismissals ran.
+
+The correct shape, for whoever picks this up: make the handshake **causal, not
+temporal**. The transcript already measures its content edges after layout;
+have it publish "the appended row is laid out" for the send in flight, and let
+the composer's freeze wait on that signal rather than on any clock. Failing
+that, the alternative is to remove the coupling entirely so ordering cannot
+matter — e.g. the freeze never touches first responder and dismissal is an
+explicit product step with its own settled sequencing.
+
+Acceptance criteria are already defined and measurable: >=15 sends (return key
+and send button), zero reversals, keyboard dismissed 15/15, and a frame
+sequence whose shape matches the idle "focus the field, do nothing, dismiss"
+control.
