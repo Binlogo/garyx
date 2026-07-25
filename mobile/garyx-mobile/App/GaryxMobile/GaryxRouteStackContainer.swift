@@ -399,8 +399,34 @@ final class GaryxRouteStackContainer: UIViewController, UIGestureRecognizerDeleg
         }
         record.controller.view.setNeedsLayout()
         record.wrapper.setNeedsLayout()
-        view.layoutIfNeeded()
+        // Deliberately NOT synchronous. Preparation runs during a stationary
+        // touch, and laying the destination out inline blocks the button action
+        // that the finger lift triggers: measured 102.9ms median for a large
+        // thread versus 29.3ms for a small one, which accounted for ~95% of the
+        // difference a reader feels between opening a large and a small thread
+        // (#TASK-2710). The layout itself is still worth doing — it is what
+        // keeps the first destination frame production-identical and
+        // hitch-free — so it moves one runloop turn out: a press held for even
+        // a single frame still finishes it before release, and a fast tap lets
+        // it land inside the ~419ms navigation transition, which measurement
+        // showed is otherwise idle.
+        scheduleInactiveHostLayout(for: entry)
         return true
+    }
+
+    /// Lay a prepared, still-inactive host out on the next runloop turn.
+    /// Skipped if the entry stopped being the prepared occurrence (pushed,
+    /// replaced, or discarded) before the turn arrived.
+    private func scheduleInactiveHostLayout(for entry: GaryxRouteEntry) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self,
+                  self.transition == nil,
+                  self.canonicalState.path.isEmpty,
+                  self.hosts[GaryxRoutePresentationIdentity(.entry(entry))] != nil else {
+                return
+            }
+            self.view.layoutIfNeeded()
+        }
     }
 
     @discardableResult
