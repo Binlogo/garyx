@@ -152,17 +152,12 @@ pub(super) const THREAD_META_SCHEMA_V2_COLUMNS: &[&str] = &[
     "workspace_origin",
 ];
 
-pub(super) const THREAD_META_SCHEMA_V2_ALLOWED_EXTRA_COLUMNS: &[&str] = &[
+pub(super) const THREAD_META_SCHEMA_V2_RETIRED_COLUMNS: &[&str] = &[
     "excluded_from_recent",
     "legacy_account_id",
     "legacy_channel",
     "legacy_has_account",
     "legacy_thread_binding_key",
-    // Current schema initialization adds this forward column before the
-    // historical v2 rebuild runs. The v2 transaction deliberately discards
-    // that empty fallback; thread_meta_search_title_v1 adds it back, fills it,
-    // and retires search_text in its own durable transaction.
-    "search_title",
 ];
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -259,18 +254,142 @@ fn legacy_thread_meta_search_text(data: &Value, last_message_preview: Option<&st
     ))
 }
 
-fn thread_meta_search_title_schema_columns() -> BTreeSet<String> {
-    THREAD_META_SCHEMA_V2_COLUMNS
-        .iter()
-        .map(|name| {
-            if *name == "search_text" {
-                "search_title"
-            } else {
-                name
-            }
-        })
-        .map(ToOwned::to_owned)
-        .collect()
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ThreadMetaSchemaV2Shape {
+    LegacySearchText,
+    SearchTitle,
+}
+
+impl ThreadMetaSchemaV2Shape {
+    fn from_columns(columns: &BTreeSet<String>) -> Option<Self> {
+        if columns.contains("search_text") {
+            // A historical search column wins when both are present. Schema
+            // initialization may already have added the forward title column,
+            // but the committed v2 protocol must still preserve search_text
+            // until thread_meta_search_title_v1 performs its own cutover.
+            Some(Self::LegacySearchText)
+        } else if columns.contains("search_title") {
+            Some(Self::SearchTitle)
+        } else {
+            None
+        }
+    }
+
+    fn search_column(self) -> &'static str {
+        match self {
+            Self::LegacySearchText => "search_text",
+            Self::SearchTitle => "search_title",
+        }
+    }
+
+    fn expected_columns(self) -> Vec<String> {
+        THREAD_META_SCHEMA_V2_COLUMNS
+            .iter()
+            .map(|name| {
+                if *name == "search_text" {
+                    self.search_column()
+                } else {
+                    name
+                }
+            })
+            .map(ToOwned::to_owned)
+            .collect()
+    }
+
+    fn allows_extra(self, name: &str) -> bool {
+        THREAD_META_SCHEMA_V2_RETIRED_COLUMNS.contains(&name)
+            || (self == Self::LegacySearchText && name == "search_title")
+    }
+
+    fn projection_default(self) -> i64 {
+        match self {
+            Self::LegacySearchText => THREAD_META_SCHEMA_V2_PROJECTION_VERSION,
+            Self::SearchTitle => CURRENT_THREAD_META_PROJECTION_VERSION,
+        }
+    }
+}
+
+fn rebuild_thread_meta_schema_v2_tx(
+    tx: &Transaction<'_>,
+    shape: ThreadMetaSchemaV2Shape,
+) -> GaryxDbResult<()> {
+    let search_column = shape.search_column();
+    let projection_default = shape.projection_default();
+    tx.execute_batch(&format!(
+        "DROP TABLE IF EXISTS thread_meta_schema_v2;
+         CREATE TABLE thread_meta_schema_v2 (
+            thread_id TEXT PRIMARY KEY,
+            workspace_dir TEXT,
+            thread_type TEXT NOT NULL DEFAULT 'chat',
+            thread_label TEXT,
+            agent_id TEXT,
+            provider_type TEXT,
+            created_at TEXT,
+            updated_at TEXT,
+            message_count INTEGER NOT NULL DEFAULT 0,
+            last_user_message TEXT,
+            last_assistant_message TEXT,
+            last_message_preview TEXT,
+            recent_run_id TEXT,
+            active_run_id TEXT,
+            worktree_json TEXT,
+            last_delivery_context_json TEXT,
+            last_delivery_updated_at TEXT,
+            default_list_hidden INTEGER NOT NULL DEFAULT 0,
+            sort_updated_at_us INTEGER NOT NULL DEFAULT 0,
+            {search_column} TEXT NOT NULL DEFAULT '',
+            provider_key TEXT,
+            selected_model TEXT,
+            selected_model_reasoning_effort TEXT,
+            selected_model_service_tier TEXT,
+            sdk_session_id TEXT,
+            projection_version INTEGER NOT NULL DEFAULT {projection_default},
+            projected_at TEXT NOT NULL,
+            root_workspace_path TEXT,
+            workspace_origin TEXT
+         ) STRICT;"
+    ))?;
+    let projection_version = match shape {
+        ThreadMetaSchemaV2Shape::LegacySearchText => "?1",
+        ThreadMetaSchemaV2Shape::SearchTitle => "projection_version",
+    };
+    let copy_sql = format!(
+        "INSERT INTO thread_meta_schema_v2 (
+            thread_id, workspace_dir, thread_type, thread_label, agent_id,
+            provider_type, created_at, updated_at, message_count,
+            last_user_message, last_assistant_message, last_message_preview,
+            recent_run_id, active_run_id, worktree_json,
+            last_delivery_context_json, last_delivery_updated_at,
+            default_list_hidden, sort_updated_at_us, {search_column},
+            provider_key, selected_model, selected_model_reasoning_effort,
+            selected_model_service_tier, sdk_session_id, projection_version,
+            projected_at, root_workspace_path, workspace_origin
+         )
+         SELECT thread_id, workspace_dir, thread_type, thread_label, agent_id,
+                provider_type, created_at, updated_at, message_count,
+                last_user_message, last_assistant_message, last_message_preview,
+                recent_run_id, active_run_id, worktree_json,
+                last_delivery_context_json, last_delivery_updated_at,
+                default_list_hidden, sort_updated_at_us, {search_column},
+                provider_key, selected_model, selected_model_reasoning_effort,
+                selected_model_service_tier, sdk_session_id, {projection_version},
+                projected_at, root_workspace_path, workspace_origin
+           FROM thread_meta"
+    );
+    match shape {
+        ThreadMetaSchemaV2Shape::LegacySearchText => {
+            tx.execute(&copy_sql, params![THREAD_META_SCHEMA_V2_PROJECTION_VERSION])?;
+        }
+        ThreadMetaSchemaV2Shape::SearchTitle => {
+            tx.execute(&copy_sql, [])?;
+        }
+    }
+    tx.execute_batch(
+        "DROP TABLE thread_meta;
+         ALTER TABLE thread_meta_schema_v2 RENAME TO thread_meta;",
+    )?;
+    ensure_thread_meta_indexes(tx)?;
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2330,13 +2449,13 @@ impl GaryxDbService {
         })
     }
 
-    /// Advance the physical thread-summary projection schema without
-    /// reusing the generation-aware v1 backfill marker. Depending on their
-    /// upgrade path, legacy databases have the retained columns in an older
-    /// order and may have one extra column. Rebuilding from the explicit v2
-    /// set canonicalizes every known legacy shape while preserving every live
-    /// value. Unknown columns still stop the migration instead of being
-    /// silently discarded.
+    /// Advance the physical thread-summary projection schema without reusing
+    /// the generation-aware v1 backfill marker. Schema initialization can add
+    /// the current search_title fallback before this historical migration
+    /// runs, while databases from the intervening release still carry
+    /// search_text. Select the target shape from the retained search column,
+    /// then rebuild every known retired-column shape without discarding live
+    /// values. Unknown columns still stop the migration.
     pub(crate) fn migrate_thread_meta_schema_v2(&self) -> GaryxDbResult<OneShotMigrationSummary> {
         let mut conn = self.conn()?;
         let tx = conn.transaction()?;
@@ -2353,51 +2472,13 @@ impl GaryxDbService {
             )
             .optional()?;
         let actual_columns = thread_meta_column_names(&tx)?;
-        let expected_columns = THREAD_META_SCHEMA_V2_COLUMNS
-            .iter()
-            .map(|name| (*name).to_owned())
-            .collect::<Vec<_>>();
         let actual_column_set = actual_columns.iter().cloned().collect::<BTreeSet<_>>();
-        if !actual_column_set.contains("search_text") && actual_column_set.contains("search_title")
-        {
-            let expected_current_columns = thread_meta_search_title_schema_columns();
-            let missing = expected_current_columns
-                .difference(&actual_column_set)
-                .cloned()
-                .collect::<Vec<_>>();
-            let extra = actual_column_set
-                .difference(&expected_current_columns)
-                .cloned()
-                .collect::<Vec<_>>();
-            if !missing.is_empty() || !extra.is_empty() {
-                return Err(GaryxDbError::Configuration(format!(
-                    "thread_meta schema v2 found an unsupported forward shape; missing={missing:?}, extra={extra:?}"
-                )));
-            }
-            if let Some(source_row_count) = completed_source_count {
-                tx.commit()?;
-                return Ok(OneShotMigrationSummary {
-                    source_row_count: usize::try_from(source_row_count).unwrap_or(usize::MAX),
-                    updated_row_count: 0,
-                    already_completed: true,
-                });
-            }
-            let source_row_count: i64 =
-                tx.query_row("SELECT COUNT(*) FROM thread_meta", [], |row| row.get(0))?;
-            record_projection_state_tx(
-                &tx,
-                THREAD_META_SCHEMA_MIGRATION_NAME,
-                THREAD_META_SCHEMA_MIGRATION_VERSION,
-                source_row_count,
-                None,
-            )?;
-            tx.commit()?;
-            return Ok(OneShotMigrationSummary {
-                source_row_count: usize::try_from(source_row_count).unwrap_or(usize::MAX),
-                updated_row_count: 0,
-                already_completed: false,
-            });
-        }
+        let shape = ThreadMetaSchemaV2Shape::from_columns(&actual_column_set).ok_or_else(|| {
+            GaryxDbError::Configuration(
+                "thread_meta schema v2 requires search_text or search_title".to_owned(),
+            )
+        })?;
+        let expected_columns = shape.expected_columns();
         if actual_columns == expected_columns {
             if let Some(source_row_count) = completed_source_count {
                 tx.commit()?;
@@ -2420,12 +2501,10 @@ impl GaryxDbService {
                 .copied()
                 .cloned()
                 .collect::<Vec<_>>();
-            let has_unknown_extra = extra
-                .iter()
-                .any(|name| !THREAD_META_SCHEMA_V2_ALLOWED_EXTRA_COLUMNS.contains(&name.as_str()));
+            let has_unknown_extra = extra.iter().any(|name| !shape.allows_extra(name));
             if !missing.is_empty() || has_unknown_extra {
                 return Err(GaryxDbError::Configuration(format!(
-                    "thread_meta schema v2 found an unsupported legacy shape; missing={missing:?}, extra={extra:?}"
+                    "thread_meta schema v2 found an unsupported {shape:?} shape; missing={missing:?}, extra={extra:?}"
                 )));
             }
         }
@@ -2433,76 +2512,17 @@ impl GaryxDbService {
         let source_row_count: i64 =
             tx.query_row("SELECT COUNT(*) FROM thread_meta", [], |row| row.get(0))?;
         let updated_row_count = if actual_columns == expected_columns {
-            tx.execute(
-                "UPDATE thread_meta
-                    SET projection_version = ?1
-                  WHERE projection_version != ?1",
-                params![THREAD_META_SCHEMA_V2_PROJECTION_VERSION],
-            )?
+            match shape {
+                ThreadMetaSchemaV2Shape::LegacySearchText => tx.execute(
+                    "UPDATE thread_meta
+                        SET projection_version = ?1
+                      WHERE projection_version != ?1",
+                    params![THREAD_META_SCHEMA_V2_PROJECTION_VERSION],
+                )?,
+                ThreadMetaSchemaV2Shape::SearchTitle => 0,
+            }
         } else {
-            tx.execute_batch(
-                "DROP TABLE IF EXISTS thread_meta_schema_v2;
-                 CREATE TABLE thread_meta_schema_v2 (
-                    thread_id TEXT PRIMARY KEY,
-                    workspace_dir TEXT,
-                    thread_type TEXT NOT NULL DEFAULT 'chat',
-                    thread_label TEXT,
-                    agent_id TEXT,
-                    provider_type TEXT,
-                    created_at TEXT,
-                    updated_at TEXT,
-                    message_count INTEGER NOT NULL DEFAULT 0,
-                    last_user_message TEXT,
-                    last_assistant_message TEXT,
-                    last_message_preview TEXT,
-                    recent_run_id TEXT,
-                    active_run_id TEXT,
-                    worktree_json TEXT,
-                    last_delivery_context_json TEXT,
-                    last_delivery_updated_at TEXT,
-                    default_list_hidden INTEGER NOT NULL DEFAULT 0,
-                    sort_updated_at_us INTEGER NOT NULL DEFAULT 0,
-                    search_text TEXT NOT NULL DEFAULT '',
-                    provider_key TEXT,
-                    selected_model TEXT,
-                    selected_model_reasoning_effort TEXT,
-                    selected_model_service_tier TEXT,
-                    sdk_session_id TEXT,
-                    projection_version INTEGER NOT NULL DEFAULT 6,
-                    projected_at TEXT NOT NULL,
-                    root_workspace_path TEXT,
-                    workspace_origin TEXT
-                 ) STRICT;",
-            )?;
-            tx.execute(
-                "INSERT INTO thread_meta_schema_v2 (
-                    thread_id, workspace_dir, thread_type, thread_label, agent_id,
-                    provider_type, created_at, updated_at, message_count,
-                    last_user_message, last_assistant_message, last_message_preview,
-                    recent_run_id, active_run_id, worktree_json,
-                    last_delivery_context_json, last_delivery_updated_at,
-                    default_list_hidden, sort_updated_at_us, search_text,
-                    provider_key, selected_model, selected_model_reasoning_effort,
-                    selected_model_service_tier, sdk_session_id, projection_version,
-                    projected_at, root_workspace_path, workspace_origin
-                 )
-                 SELECT thread_id, workspace_dir, thread_type, thread_label, agent_id,
-                        provider_type, created_at, updated_at, message_count,
-                        last_user_message, last_assistant_message, last_message_preview,
-                        recent_run_id, active_run_id, worktree_json,
-                        last_delivery_context_json, last_delivery_updated_at,
-                        default_list_hidden, sort_updated_at_us, search_text,
-                        provider_key, selected_model, selected_model_reasoning_effort,
-                        selected_model_service_tier, sdk_session_id, ?1, projected_at,
-                        root_workspace_path, workspace_origin
-                   FROM thread_meta",
-                params![THREAD_META_SCHEMA_V2_PROJECTION_VERSION],
-            )?;
-            tx.execute_batch(
-                "DROP TABLE thread_meta;
-                 ALTER TABLE thread_meta_schema_v2 RENAME TO thread_meta;",
-            )?;
-            ensure_thread_meta_indexes(&tx)?;
+            rebuild_thread_meta_schema_v2_tx(&tx, shape)?;
             usize::try_from(source_row_count).unwrap_or(usize::MAX)
         };
         record_projection_state_tx(

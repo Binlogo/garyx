@@ -2831,13 +2831,20 @@ async fn run_blocking_round_trips_reads_and_writes() {
 }
 
 #[test]
-fn opening_legacy_thread_meta_db_adds_projection_columns() {
+fn startup_runner_rebuilds_pre_search_thread_meta_shape_with_retired_columns() {
     let dir = tempfile::tempdir().expect("temp dir");
     let path = dir.path().join("garyx-db.sqlite3");
     {
         let conn = Connection::open(&path).expect("legacy db");
         conn.execute_batch(
             r#"
+                CREATE TABLE thread_records (
+                    key TEXT PRIMARY KEY,
+                    body TEXT NOT NULL,
+                    updated_at TEXT,
+                    recorded_at TEXT NOT NULL
+                ) STRICT;
+
                 CREATE TABLE thread_meta (
                     thread_id TEXT PRIMARY KEY,
                     workspace_dir TEXT,
@@ -2850,17 +2857,32 @@ fn opening_legacy_thread_meta_db_adds_projection_columns() {
                     last_delivery_updated_at TEXT,
                     default_list_hidden INTEGER NOT NULL DEFAULT 0,
                     projection_version INTEGER NOT NULL DEFAULT 2,
-                    projected_at TEXT NOT NULL
+                    projected_at TEXT NOT NULL,
+                    legacy_thread_binding_key TEXT,
+                    legacy_channel TEXT,
+                    legacy_account_id TEXT,
+                    legacy_has_account INTEGER NOT NULL DEFAULT 0,
+                    excluded_from_recent INTEGER NOT NULL DEFAULT 0
                 ) STRICT;
+
+                INSERT INTO thread_records (key, body, updated_at, recorded_at)
+                VALUES (
+                    'thread::legacy',
+                    '{"thread_id":"thread::legacy","label":"Legacy Thread","workspace_dir":"/workspace/legacy","agent_id":"test-agent","updated_at":"2026-06-03T00:00:00.000Z"}',
+                    '2026-06-03T00:00:00.000Z',
+                    '2026-06-03T00:00:01.000Z'
+                );
 
                 INSERT INTO thread_meta (
                     thread_id, workspace_dir, thread_type, thread_label, agent_id,
                     provider_type, updated_at, default_list_hidden, projection_version,
-                    projected_at
+                    projected_at, legacy_thread_binding_key, legacy_channel,
+                    legacy_account_id, legacy_has_account, excluded_from_recent
                 ) VALUES (
                     'thread::legacy', '/workspace/legacy', 'chat', 'Legacy Thread',
-                    'claude', 'claude_code', '2026-06-03T00:00:00.000Z',
-                    0, 2, '2026-06-03T00:00:01.000Z'
+                    'test-agent', 'test-provider', '2026-06-03T00:00:00.000Z',
+                    0, 2, '2026-06-03T00:00:01.000Z',
+                    'test-binding', 'test-channel', 'test-account', 1, 1
                 );
                 "#,
         )
@@ -2880,16 +2902,31 @@ fn opening_legacy_thread_meta_db_adds_projection_columns() {
     let columns = thread_meta_column_names(&db.conn().unwrap()).unwrap();
     assert!(columns.iter().any(|name| name == "search_title"));
     assert!(!columns.iter().any(|name| name == "search_text"));
+    for retired in THREAD_META_SCHEMA_V2_RETIRED_COLUMNS {
+        assert!(
+            columns.iter().any(|name| name == retired),
+            "legacy fixture must retain {retired} before startup migrations"
+        );
+    }
 
-    let historical_schema = db
-        .migrate_thread_meta_schema_v2()
-        .expect("record historical schema prerequisite");
-    assert_eq!(historical_schema.updated_row_count, 0);
-    let migration = db
-        .migrate_thread_meta_search_title_v1()
-        .expect("backfill current title search projection");
-    assert_eq!(migration.source_row_count, 1);
-    assert_eq!(migration.updated_row_count, 1);
+    db.run_thread_data_startup_migrations()
+        .expect("full startup migration chain");
+    let columns = thread_meta_column_names(&db.conn().unwrap()).unwrap();
+    let expected_columns = THREAD_META_SCHEMA_V2_COLUMNS
+        .iter()
+        .map(|name| {
+            if *name == "search_text" {
+                "search_title"
+            } else {
+                name
+            }
+        })
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        columns, expected_columns,
+        "startup migration must leave the canonical search_title schema"
+    );
     assert_eq!(
         db.list_thread_meta().unwrap()[0].projection_version,
         CURRENT_THREAD_META_PROJECTION_VERSION
@@ -2898,6 +2935,25 @@ fn opening_legacy_thread_meta_db_adds_projection_columns() {
         db.list_thread_meta().unwrap()[0].search_title,
         "legacy thread"
     );
+    assert!(
+        db.projection_state_exists(
+            THREAD_META_SCHEMA_MIGRATION_NAME,
+            THREAD_META_SCHEMA_MIGRATION_VERSION,
+        )
+        .unwrap()
+    );
+    assert!(
+        db.projection_state_exists(
+            THREAD_META_SEARCH_TITLE_MIGRATION_NAME,
+            THREAD_META_SEARCH_TITLE_MIGRATION_VERSION,
+        )
+        .unwrap()
+    );
+
+    let before_rerun = db.list_thread_meta().unwrap();
+    db.run_thread_data_startup_migrations()
+        .expect("idempotent startup migration chain");
+    assert_eq!(db.list_thread_meta().unwrap(), before_rerun);
 }
 
 #[test]
@@ -5108,7 +5164,7 @@ fn thread_meta_search_title_cutover_rolls_back_schema_rows_and_marker_together()
 }
 
 #[test]
-fn thread_meta_schema_v2_rebuilds_real_legacy_shape_without_reusing_cutover_markers() {
+fn thread_meta_schema_v2_rebuilds_search_text_legacy_shape_without_reusing_cutover_markers() {
     let db = GaryxDbService::memory().expect("db opens");
     restore_thread_meta_schema_v2_search_column(&db);
     {
