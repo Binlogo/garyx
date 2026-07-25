@@ -35,8 +35,10 @@ final class GaryxTranscriptDiskHydrationPublishTests: XCTestCase {
         _ = await model.transcriptSnapshotAsync(for: thread.id)
 
         // The load itself is the assertion that matters: before this change the
-        // seed was silent and `publishes` stayed 0 here.
-        XCTAssertGreaterThan(publishes, 0, "the disk hydrate must publish")
+        // seed was silent and `publishes` stayed 0 here. Two publishes, not one:
+        // the floor lock bumps `selectedTurnRowsWindowRevision` and the hydrate
+        // bumps its own revision, both in the same tick.
+        XCTAssertEqual(publishes, 2, "the disk hydrate must publish")
         XCTAssertEqual(model.transcriptMirrorHydrationRevision, 1)
 
         XCTAssertNotNil(model.renderSnapshot(for: thread.id), "mirror fallback now renders")
@@ -71,7 +73,12 @@ final class GaryxTranscriptDiskHydrationPublishTests: XCTestCase {
     /// A hydrate that lands before the cold-open restore spawns must leave that
     /// restore able to apply its messages: the restore captures the already
     /// advanced mirror generation, so the generation gate still matches.
-    func testHydrateBeforeColdOpenRestoreSpawnStillAllowsMessageRestore() async {
+    ///
+    /// Scope: this pins the *policy inputs* the production spawn would capture at
+    /// that moment. It does not drive `spawnColdOpenTranscriptRestore` itself
+    /// (which is private and route-callback driven), so it does not assert the
+    /// messages actually land.
+    func testHydrateLeavesColdOpenRestorePolicyStateAbleToApplyMessages() async {
         let model = makeModel()
         let thread = makeThread(id: "thread::hydrate-then-restore")
         model.selectedThread = thread
@@ -122,9 +129,12 @@ final class GaryxTranscriptDiskHydrationPublishTests: XCTestCase {
         XCTAssertEqual(results[0], results[1])
     }
 
-    /// A live committed/render write — or a `clearTranscriptCache` from stream
-    /// control-rewrite recovery — can win the mirror while the load is in flight.
-    /// The older disk window must not overwrite it.
+    /// A live committed/render write can win the mirror while the load is in
+    /// flight. The older disk window must not overwrite it.
+    ///
+    /// The gate is a real happens-before, not a race: the fake store blocks
+    /// inside `load` until the test has finished mutating on the main actor, so
+    /// the mutation is ordered before the hydration decision.
     func testLiveMirrorWriteDuringLoadIsNotOverwrittenByTheDiskWindow() async {
         let model = makeModel()
         let thread = makeThread(id: "thread::hydrate-freshness")
@@ -132,17 +142,81 @@ final class GaryxTranscriptDiskHydrationPublishTests: XCTestCase {
         let live = window(for: thread.id, text: "live", basedOnSeq: 9)
         let store = FakeTranscriptCacheStore(
             windows: [thread.id: window(for: thread.id, text: "stale", basedOnSeq: 2)],
-            onLoad: { [weak model] in
-                // Runs on the persistence actor, mid-flight for the caller.
-                Task { @MainActor in model?.setTranscriptMirror(live, for: thread.id) }
-            }
+            gated: true
         )
         model.transcriptCacheStore = store
 
-        let resolved = await model.transcriptSnapshotAsync(for: thread.id)
+        let handle = Task { await model.transcriptSnapshotAsync(for: thread.id) }
+        await store.waitUntilLoadEntered()
+        model.setTranscriptMirror(live, for: thread.id)
+        store.releaseLoad()
+        let resolved = await handle.value
 
         XCTAssertEqual(model.transcriptMirror.snapshot(for: thread.id), live)
         XCTAssertEqual(resolved, live, "the caller sees the winning window, not the disk one")
+    }
+
+    /// `clearTranscriptCache` is a mirror mutation reachable mid-load from stream
+    /// control-rewrite recovery. It leaves the mirror **absent**, so an
+    /// "is something there?" check cannot see it — only the TASK-1751 P1
+    /// generation can. The cleared window must stay cleared.
+    func testNilClearDuringLoadIsNotResurrectedByTheDiskWindow() async {
+        let model = makeModel()
+        let thread = makeThread(id: "thread::hydrate-clear")
+        model.selectedThread = thread
+        // Seed the mirror first so the clear has something to invalidate, exactly
+        // as recovery would find it.
+        model.setTranscriptMirror(window(for: thread.id, text: "pre-clear"), for: thread.id)
+        let store = FakeTranscriptCacheStore(
+            windows: [thread.id: window(for: thread.id, text: "stale")],
+            gated: true
+        )
+        model.transcriptCacheStore = store
+        model.setTranscriptMirror(nil, for: thread.id)
+
+        let handle = Task { await model.transcriptSnapshotAsync(for: thread.id) }
+        await store.waitUntilLoadEntered()
+        model.clearTranscriptCache(for: thread.id)
+        store.releaseLoad()
+        let resolved = await handle.value
+
+        XCTAssertNil(model.transcriptMirror.snapshot(for: thread.id), "stale window")
+        XCTAssertNil(resolved, "the cleared window must not escape to the caller")
+    }
+
+    /// A gateway switch drops the whole mirror, but `clearAll` can only bump the
+    /// generation of threads that were *present* — a thread being hydrated for the
+    /// first time was absent, so the generation alone cannot tell that its decoded
+    /// window belongs to a scope the app has left. The request token can.
+    func testGatewaySwitchDuringLoadDiscardsTheExitedScopesWindow() async {
+        let model = makeModel()
+        let thread = makeThread(id: "thread::hydrate-scope")
+        model.selectedThread = thread
+        let store = FakeTranscriptCacheStore(
+            windows: [thread.id: window(for: thread.id, text: "old gateway")],
+            gated: true
+        )
+        model.transcriptCacheStore = store
+
+        let handle = Task { await model.transcriptSnapshotAsync(for: thread.id) }
+        await store.waitUntilLoadEntered()
+        model.resetGatewayRuntimeState()
+        model.gatewayRequestToken = GaryxGatewayRequestToken(
+            scope: GaryxGatewayScope(identity: "other-gateway", epoch: 1),
+            activationSequence: 2
+        )
+        store.releaseLoad()
+        let resolved = await handle.value
+
+        XCTAssertNil(
+            model.transcriptMirror.snapshot(for: thread.id),
+            "the exited scope's decoded window must not be re-seeded after reset"
+        )
+        XCTAssertNil(resolved)
+
+        // And it must not surface on a later selection of the same thread id.
+        model.selectedThread = thread
+        XCTAssertNil(model.renderSnapshot(for: thread.id), "old render snapshot")
     }
 
     // MARK: - Window floor
@@ -228,10 +302,16 @@ final class GaryxTranscriptDiskHydrationPublishTests: XCTestCase {
 
     // MARK: - Live writes stay silent
 
-    func testLiveMirrorWritesDoNotBumpTheHydrationRevision() {
+    /// Asserts the actual publish, not just this revision: a `setTranscriptMirror`
+    /// that sent `objectWillChange` directly would still leave the revision at 0.
+    func testLiveMirrorWritesPublishNothing() {
         let model = makeModel()
         let thread = makeThread(id: "thread::hydrate-live-silent")
         model.selectedThread = thread
+
+        var publishes = 0
+        let cancellable = model.objectWillChange.sink { _ in publishes += 1 }
+        defer { cancellable.cancel() }
 
         for seq in 1...5 {
             model.setTranscriptMirror(
@@ -240,11 +320,8 @@ final class GaryxTranscriptDiskHydrationPublishTests: XCTestCase {
             )
         }
 
-        XCTAssertEqual(
-            model.transcriptMirrorHydrationRevision,
-            0,
-            "only the disk hydrate publishes; streaming writes must stay silent"
-        )
+        XCTAssertEqual(publishes, 0, "streaming mirror writes must stay silent")
+        XCTAssertEqual(model.transcriptMirrorHydrationRevision, 0)
     }
 
     // MARK: - Fixtures
@@ -343,14 +420,17 @@ private final class FakeTranscriptCacheStore: GaryxTranscriptCacheStore, @unchec
     private let lock = NSLock()
     private var windows: [String: GaryxCachedTranscript]
     private var loads = 0
-    private let onLoad: (@Sendable () -> Void)?
+    /// When gated, `load` announces entry and then blocks until the test releases
+    /// it. The persistence queue runs `load` off the main actor, so a test can
+    /// mutate model state on the main actor and know that mutation is ordered
+    /// before the load returns — a real happens-before instead of a race.
+    private let gated: Bool
+    private let entered = DispatchSemaphore(value: 0)
+    private let release = DispatchSemaphore(value: 0)
 
-    init(
-        windows: [String: GaryxCachedTranscript],
-        onLoad: (@Sendable () -> Void)? = nil
-    ) {
+    init(windows: [String: GaryxCachedTranscript], gated: Bool = false) {
         self.windows = windows
-        self.onLoad = onLoad
+        self.gated = gated
     }
 
     var loadCount: Int {
@@ -359,12 +439,23 @@ private final class FakeTranscriptCacheStore: GaryxTranscriptCacheStore, @unchec
         return loads
     }
 
+    func waitUntilLoadEntered() async {
+        await Task.detached { [entered] in entered.wait() }.value
+    }
+
+    func releaseLoad() {
+        release.signal()
+    }
+
     func load(threadId: String) -> GaryxCachedTranscript? {
         lock.lock()
         loads += 1
         let window = windows[threadId]
         lock.unlock()
-        onLoad?()
+        if gated {
+            entered.signal()
+            release.wait()
+        }
         return window
     }
 

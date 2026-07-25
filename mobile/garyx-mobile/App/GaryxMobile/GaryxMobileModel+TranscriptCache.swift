@@ -40,30 +40,67 @@ extension GaryxMobileModel {
         }
         // Coalesce: the check above happens before the await below, so the stream
         // request builder and the initial history fetch both pass it on a cold
-        // open. A follower prefers the mirror the leader hydrated, and falls back
-        // to the shared loaded window when it resumes first.
+        // open. The shared task carries the whole transaction — load, freshness
+        // decision, hydrate — so every entrant observes the same finalized
+        // outcome instead of a raw disk window that may already be invalid.
         if let inFlight = transcriptDiskHydrationTasks[threadId] {
-            let shared = await inFlight.value
-            return transcriptMirror.snapshot(for: threadId) ?? shared
+            return await inFlight.value
         }
         let store = transcriptCacheStore
-        let load = Task<GaryxCachedTranscript?, Never> {
-            await GaryxTranscriptCachePersistenceQueue.shared.load(
+        // Freshness is captured before the load and re-checked after it.
+        // `capturedGeneration` covers writes *and* nil clears to a thread already
+        // in the mirror; `capturedToken` covers a gateway switch, which drops the
+        // whole mirror and cannot bump the generation of a thread that was absent
+        // (`GaryxTranscriptMirrorStore.clearAll` only bumps present threads).
+        let capturedGeneration = transcriptMirror.generation(for: threadId)
+        let capturedToken = gatewayRequestToken
+        let hydration = Task<GaryxCachedTranscript?, Never> { @MainActor [weak self] in
+            let loaded = await GaryxTranscriptCachePersistenceQueue.shared.load(
                 threadId: threadId,
                 store: store
             )
+            guard let self else { return nil }
+            return self.finishTranscriptDiskHydration(
+                loaded,
+                for: threadId,
+                capturedGeneration: capturedGeneration,
+                capturedToken: capturedToken
+            )
         }
-        transcriptDiskHydrationTasks[threadId] = load
-        let loaded = await load.value
-        transcriptDiskHydrationTasks[threadId] = nil
+        transcriptDiskHydrationTasks[threadId] = hydration
+        let resolved = await hydration.value
+        // Identity-checked: never clear an entry a later hydration installed.
+        if transcriptDiskHydrationTasks[threadId] == hydration {
+            transcriptDiskHydrationTasks[threadId] = nil
+        }
+        return resolved
+    }
+
+    /// Decide whether a just-decoded disk window may still be applied, then apply
+    /// it. Runs on the main actor as one step, so the decision cannot be split
+    /// across a suspension.
+    ///
+    /// Any mirror mutation during the load wins over the older disk window. That
+    /// includes a `clearTranscriptCache` nil clear (stream control-rewrite
+    /// recovery) — an absent mirror entry cannot be read back as "nothing
+    /// happened", which is exactly what the TASK-1751 P1 generation exists to
+    /// express. A gateway switch is checked separately: it clears the mirror
+    /// wholesale, and a thread that was never present has no generation to bump,
+    /// so only the request token can tell that the decoded window belongs to a
+    /// scope the app has left.
+    private func finishTranscriptDiskHydration(
+        _ loaded: GaryxCachedTranscript?,
+        for threadId: String,
+        capturedGeneration: UInt64,
+        capturedToken: GaryxGatewayRequestToken
+    ) -> GaryxCachedTranscript? {
+        guard capturedToken == gatewayRequestToken else {
+            return transcriptMirror.snapshot(for: threadId)
+        }
+        guard transcriptMirror.generation(for: threadId) == capturedGeneration else {
+            return transcriptMirror.snapshot(for: threadId)
+        }
         guard let loaded else { return nil }
-        // Post-await freshness: a live committed/render write — or a
-        // `clearTranscriptCache` from stream control-rewrite recovery — may have
-        // won the mirror while this load was in flight. Never overwrite it with
-        // the older disk window.
-        if let current = transcriptMirror.snapshot(for: threadId) {
-            return current
-        }
         hydrateTranscriptMirrorFromDisk(loaded, for: threadId)
         return loaded
     }
@@ -80,9 +117,11 @@ extension GaryxMobileModel {
     ///
     /// This is one transaction: seed, anchor the P3 window floor the way the
     /// dedicated cold-open restore does through `setRenderSnapshot`, then publish
-    /// once. Without the floor lock the body would render the newest rows but
-    /// discard the resolved floor, and an active run appending tail rows would
-    /// slide the visible suffix.
+    /// the dedicated hydration revision. Without the floor lock the body would
+    /// render the newest rows but discard the resolved floor, and an active run
+    /// appending tail rows would slide the visible suffix. (The floor lock
+    /// publishes `selectedTurnRowsWindowRevision` in its own right, so a hydrate
+    /// that anchors a floor emits two `objectWillChange` in the same tick.)
     ///
     /// Only this disk-hydrate path publishes; every live mirror write stays
     /// silent.
