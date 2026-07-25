@@ -45,6 +45,7 @@ import {
 import { useInViewport } from '../use-in-viewport';
 import { CapsuleLivePreviewFrame } from './CapsuleLivePreviewFrame';
 import { CapsuleFavoriteStar } from './CapsuleFavoriteStar';
+import { SegmentedControl } from '../../components/SegmentedControl';
 
 type CapsulesPanelProps = {
   agents: DesktopCustomAgent[];
@@ -561,24 +562,17 @@ export function CapsulesPanel({
           </p>
         </div>
         <div className="capsules-header-actions">
-          <div aria-label={t('Capsule view')} className="capsules-segmented">
-            <button
-              aria-pressed={galleryTab === 'all'}
-              className={galleryTab === 'all' ? 'active' : ''}
-              onClick={() => setGalleryTab('all')}
-              type="button"
-            >
-              {t('All')}
-            </button>
-            <button
-              aria-pressed={galleryTab === 'favorites'}
-              className={galleryTab === 'favorites' ? 'active' : ''}
-              onClick={() => setGalleryTab('favorites')}
-              type="button"
-            >
-              {t('Favorites')}
-            </button>
-          </div>
+          <SegmentedControl
+            ariaLabel={t('Capsule view')}
+            className="capsules-segmented"
+            layout="inline"
+            onChange={setGalleryTab}
+            options={[
+              { value: 'all', label: t('All') },
+              { value: 'favorites', label: t('Favorites') },
+            ]}
+            value={galleryTab}
+          />
           <button
             className="tasks-secondary-button capsules-refresh-button"
             disabled={loading}

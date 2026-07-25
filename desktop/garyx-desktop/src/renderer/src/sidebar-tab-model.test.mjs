@@ -7,7 +7,6 @@ import {
   normalizeSidebarTab,
   persistSidebarTab,
   readStoredSidebarTab,
-  sidebarTabForArrowKey,
   sidebarTabLabel,
 } from "./sidebar-tab-model.ts";
 
@@ -56,13 +55,6 @@ test("only exact known ids normalize away from the Threads default", () => {
   ]) {
     assert.equal(normalizeSidebarTab(value), "threads");
   }
-});
-
-test("arrow keys wrap in both directions", () => {
-  assert.equal(sidebarTabForArrowKey("threads", "ArrowRight"), "projects");
-  assert.equal(sidebarTabForArrowKey("projects", "ArrowRight"), "threads");
-  assert.equal(sidebarTabForArrowKey("projects", "ArrowLeft"), "threads");
-  assert.equal(sidebarTabForArrowKey("threads", "ArrowLeft"), "projects");
 });
 
 test("the tab choice round-trips through storage", () => {

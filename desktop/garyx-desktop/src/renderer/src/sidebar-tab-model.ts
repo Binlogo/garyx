@@ -30,16 +30,8 @@ export function normalizeSidebarTab(value: unknown): SidebarTab {
   return value === "projects" ? "projects" : "threads";
 }
 
-export function sidebarTabForArrowKey(
-  current: SidebarTab,
-  key: "ArrowLeft" | "ArrowRight",
-): SidebarTab {
-  const currentIndex = SIDEBAR_TABS.indexOf(current);
-  const delta = key === "ArrowRight" ? 1 : -1;
-  return SIDEBAR_TABS[
-    (currentIndex + delta + SIDEBAR_TABS.length) % SIDEBAR_TABS.length
-  ];
-}
+// Arrow-key traversal lives in the shared SegmentedControl, which walks the
+// options built from SIDEBAR_TABS above.
 
 export function readStoredSidebarTab(
   storage: SidebarTabReadableStorage | null | undefined,

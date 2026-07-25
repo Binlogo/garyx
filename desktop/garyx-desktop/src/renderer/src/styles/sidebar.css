@@ -108,58 +108,6 @@
   display: none;
 }
 
-/* Threads / Projects segmented control. Mirrors the recent-filter recipe but
-   reads as the stronger of the two rows: it switches the sidebar body, while
-   the filter row below only narrows one list. */
-.sidebar-tabs {
-  display: grid;
-  flex: 0 0 auto;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 2px;
-  padding: 2px;
-  border: 1px solid var(--color-token-border-light);
-  border-radius: 9px;
-  background: color-mix(
-    in oklab,
-    var(--color-token-text-primary) 5%,
-    transparent
-  );
-}
-
-.sidebar-tabs button {
-  min-width: 0;
-  height: 27px;
-  padding: 0 10px;
-  border: 0;
-  border-radius: 7px;
-  background: transparent;
-  color: var(--color-token-text-secondary);
-  cursor: pointer;
-  font: inherit;
-  font-size: var(--text-sm);
-  font-weight: var(--font-weight-medium);
-  transition:
-    background-color var(--duration-fast) var(--ease-standard),
-    color var(--duration-fast) var(--ease-standard),
-    box-shadow var(--duration-fast) var(--ease-standard);
-}
-
-.sidebar-tabs button:hover {
-  color: var(--color-token-text-primary);
-}
-
-.sidebar-tabs button.active {
-  background: var(--color-token-bg-primary);
-  box-shadow: 0 1px 2px color-mix(in oklab, black 10%, transparent);
-  color: var(--color-token-text-primary);
-}
-
-.sidebar-tabs button:focus-visible {
-  outline: 2px solid
-    color-mix(in oklab, var(--color-token-text-primary) 45%, transparent);
-  outline-offset: 1px;
-}
-
 /* Threads-tab body. The filter row stays pinned while only the rows scroll,
    so this panel does not scroll itself. */
 .sidebar-tab-panel {

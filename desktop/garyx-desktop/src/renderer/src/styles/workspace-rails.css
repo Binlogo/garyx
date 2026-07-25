@@ -78,53 +78,10 @@
   display: none;
 }
 
+/* Track, pill, and states come from styles/segmented.css; only this instance's
+   placement in the rail header belongs here. */
 .recent-filter-tabs {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  flex-shrink: 0;
-  gap: 2px;
   margin: 0 2px 8px;
-  padding: 2px;
-  border: 1px solid var(--color-token-border-light);
-  border-radius: 9px;
-  background: color-mix(
-    in oklab,
-    var(--color-token-text-primary) 4%,
-    transparent
-  );
-}
-
-.recent-filter-tabs button {
-  min-width: 0;
-  height: 26px;
-  padding: 0 10px;
-  border: 0;
-  border-radius: 7px;
-  background: transparent;
-  color: var(--color-token-text-secondary);
-  cursor: pointer;
-  font: inherit;
-  font-size: var(--text-xs);
-  font-weight: var(--font-weight-medium);
-  transition:
-    background-color var(--duration-fast) var(--ease-standard),
-    color var(--duration-fast) var(--ease-standard),
-    box-shadow var(--duration-fast) var(--ease-standard);
-}
-
-.recent-filter-tabs button:hover {
-  color: var(--color-token-text-primary);
-}
-
-.recent-filter-tabs button.active {
-  background: var(--color-token-bg-primary);
-  box-shadow: 0 1px 2px color-mix(in oklab, black 10%, transparent);
-  color: var(--color-token-text-primary);
-}
-
-.recent-filter-tabs button:focus-visible {
-  outline: 2px solid color-mix(in oklab, var(--color-token-text-primary) 45%, transparent);
-  outline-offset: 1px;
 }
 
 .recent-feed-footer {

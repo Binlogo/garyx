@@ -86,12 +86,6 @@ export function excludePinnedFromRecent<T extends { id: string }>(
   return threads.filter((thread) => !pinnedThreadIds.has(thread.id));
 }
 
-export function recentFilterForArrowKey(
-  current: RecentThreadFilter,
-  key: "ArrowLeft" | "ArrowRight",
-): RecentThreadFilter {
-  const filters: RecentThreadFilter[] = ["nonTask", "all", "favorites"];
-  const currentIndex = filters.indexOf(current);
-  const delta = key === "ArrowRight" ? 1 : -1;
-  return filters[(currentIndex + delta + filters.length) % filters.length];
-}
+// Arrow-key traversal now lives in the shared SegmentedControl, which walks the
+// option array it is given. `RecentFilterTabs` owns that order; a second
+// ordering constant here would be a duplicate source of truth.

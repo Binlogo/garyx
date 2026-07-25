@@ -13,6 +13,12 @@ const filterTabs = readFileSync(
   new URL("./RecentFilterTabs.tsx", import.meta.url),
   "utf8",
 );
+// One segmented control owns the tablist semantics for every surface that has
+// one, so the accessibility contract is pinned there rather than per caller.
+const segmented = readFileSync(
+  new URL("./components/SegmentedControl.tsx", import.meta.url),
+  "utf8",
+);
 const sidebarRecentList = readFileSync(
   new URL("./SidebarRecentThreadList.tsx", import.meta.url),
   "utf8",
@@ -47,13 +53,17 @@ const main = readFileSync(
 );
 
 test("Recent tabs expose the required accessible segmented semantics", () => {
-  assert.match(filterTabs, /aria-label=\{t\("Recent filter"\)\}/);
-  assert.match(filterTabs, /role="tablist"/);
-  assert.match(filterTabs, /role="tab"/);
-  assert.match(filterTabs, /aria-selected=\{selected\}/);
+  // The rail still owns its label and its filter set...
+  assert.match(filterTabs, /ariaLabel=\{t\("Recent filter"\)\}/);
   assert.match(filterTabs, /"favorites"/);
-  assert.match(filterTabs, /event\.key !== "ArrowLeft"/);
-  assert.match(filterTabs, /event\.key !== "ArrowRight"/);
+  assert.match(filterTabs, /<SegmentedControl/);
+  // ...while the semantics come from the one shared control.
+  assert.match(segmented, /role="tablist"/);
+  assert.match(segmented, /role="tab"/);
+  assert.match(segmented, /aria-selected=\{selected\}/);
+  assert.match(segmented, /tabIndex=\{selected \? 0 : -1\}/);
+  assert.match(segmented, /event\.key !== 'ArrowLeft'/);
+  assert.match(segmented, /event\.key !== 'ArrowRight'/);
 });
 
 test("the filter control belongs to the rail, never to the sidebar tab", () => {

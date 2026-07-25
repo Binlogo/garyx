@@ -77,6 +77,7 @@ import {
 } from '../agent-options';
 import { AgentOptionRow } from './AgentOptionAvatar';
 import { AgentsIcon, MoreDotsIcon } from '../icons';
+import { SegmentedControl } from '../../components/SegmentedControl';
 
 type TasksPanelProps = {
   agents: DesktopCustomAgent[];
@@ -823,24 +824,25 @@ export function TasksPanel({
             <RefreshCcw aria-hidden size={14} strokeWidth={1.8} />
             {loading ? t('Refreshing') : t('Refresh')}
           </button>
-          <div aria-label={t('Task view')} className="tasks-segmented">
-            <button
-              className={viewMode === 'board' ? 'active' : ''}
-              onClick={() => setViewMode('board')}
-              type="button"
-            >
-              <Columns3 aria-hidden size={14} strokeWidth={1.8} />
-              {t('Board')}
-            </button>
-            <button
-              className={viewMode === 'list' ? 'active' : ''}
-              onClick={() => setViewMode('list')}
-              type="button"
-            >
-              <List aria-hidden size={14} strokeWidth={1.8} />
-              {t('List')}
-            </button>
-          </div>
+          <SegmentedControl
+            ariaLabel={t('Task view')}
+            className="tasks-segmented"
+            layout="inline"
+            onChange={setViewMode}
+            options={[
+              {
+                value: 'board',
+                label: t('Board'),
+                icon: <Columns3 aria-hidden size={14} strokeWidth={1.8} />,
+              },
+              {
+                value: 'list',
+                label: t('List'),
+                icon: <List aria-hidden size={14} strokeWidth={1.8} />,
+              },
+            ]}
+            value={viewMode}
+          />
           <button
             aria-label={t('New task')}
             className="tasks-primary-button"

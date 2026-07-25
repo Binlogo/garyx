@@ -1,0 +1,99 @@
+/*
+ * The one segmented-control recipe, owned by components/SegmentedControl.tsx.
+ *
+ * Replaces four near-identical hand-rolled blocks (recent-filter-tabs,
+ * sidebar-tabs, tasks-segmented, capsules-segmented). Surface stylesheets may
+ * add spacing around an instance, but must not restate the track, the pill, or
+ * the state transitions.
+ *
+ * The `fill` column count comes from the option count as an inline style, so
+ * adding a segment needs no CSS.
+ */
+
+.gx-segmented {
+  gap: 2px;
+  padding: 2px;
+  border-radius: 9px;
+}
+
+.gx-segmented--fill {
+  display: grid;
+  flex: 0 0 auto;
+  border: 1px solid var(--color-token-border-light);
+  background: color-mix(
+    in oklab,
+    var(--color-token-text-primary) 5%,
+    transparent
+  );
+}
+
+.gx-segmented--inline {
+  display: inline-flex;
+  align-items: center;
+  border: 0.5px solid var(--color-token-border);
+  border-radius: 8px;
+  background: var(--color-token-bg-secondary);
+}
+
+.gx-segmented button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  min-width: 0;
+  height: 26px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--color-token-text-secondary);
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--text-xs);
+  font-weight: var(--font-weight-medium);
+  transition:
+    background-color var(--duration-fast) var(--ease-standard),
+    color var(--duration-fast) var(--ease-standard),
+    box-shadow var(--duration-fast) var(--ease-standard);
+}
+
+.gx-segmented--inline button {
+  padding: 0 9px;
+  border-radius: 6px;
+  font-size: var(--text-sm);
+}
+
+/* The control switches a whole surface, so its labels carry body weight. */
+.gx-segmented--strong button {
+  height: 27px;
+  font-size: var(--text-sm);
+}
+
+.gx-segmented button:hover {
+  color: var(--color-token-text-primary);
+}
+
+/* Toolbar instances preview the pill on hover; rail instances only brighten the
+   label, so a wide filter row does not flicker a slab under the cursor. */
+.gx-segmented--inline button:hover {
+  background: var(--color-token-bg-primary);
+  box-shadow: 0 1px 2px rgba(13, 13, 13, 0.04);
+  color: var(--color-token-text-primary);
+}
+
+.gx-segmented button.active {
+  background: var(--color-token-bg-primary);
+  box-shadow: 0 1px 2px color-mix(in oklab, black 10%, transparent);
+  color: var(--color-token-text-primary);
+}
+
+/* Toolbar instances sit on a tinted track, so their pill shadow stays lighter. */
+.gx-segmented--inline button.active {
+  box-shadow: 0 1px 2px rgba(13, 13, 13, 0.04);
+}
+
+.gx-segmented button:focus-visible {
+  outline: 2px solid
+    color-mix(in oklab, var(--color-token-text-primary) 45%, transparent);
+  outline-offset: 1px;
+}
