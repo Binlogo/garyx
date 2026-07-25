@@ -155,10 +155,12 @@ the L2 bot/workspace drilldown rail, and the new L1 Threads tab. So:
   filter segmented + footer, no rail chrome, for the L1 Threads tab.
 - The filter segmented control and the `recentFeedFooter` renderer are used by
   both `RecentConversationSidebar` and `SidebarRecentThreadList`. Factor them
-  into one shared unit rather than copying the JSX — a duplicated filter
-  tablist would drift, and its a11y contract (`role=tablist` / `role=tab` /
-  `aria-selected` / arrow-key navigation) is pinned by
-  `recent-filter-source-contract.test.mjs`.
+  into one shared unit rather than copying the JSX — a duplicated filter control
+  would drift. (Later superseded: the filter now composes the shared
+  `SegmentedControl`, which owns the accessibility contract for every segmented
+  surface. That contract is `role=radiogroup` / `role=radio` / `aria-checked`
+  plus four-way arrow traversal — not the tabs vocabulary this section
+  originally described; see `desktop-sidebar-tabs-review-debt.md` §5 for why.)
 
 Reuse without modification: `recent-thread-feeds.ts` (reducer),
 `recent-conversation-sidebar-model.ts` (`recentConversationPresentation`),
