@@ -2749,3 +2749,274 @@ async fn transcript_cache_concurrent_threads_do_not_block_or_corrupt() {
         assert_reads_match_oracle(&store, &thread_id, &format!("concurrent thread {thread}")).await;
     }
 }
+
+// ---------------------------------------------------------------------------
+// Newest user-query window served from the cached physical tail
+//
+// `page_before_user_queries` with `before_index: None` is what a client asks
+// for on every thread open, retry, and refresh. Its streaming scan walks the
+// transcript from byte 0 to `end`, and with `end == total` the `index >= end`
+// early exit never fires — so the whole file was re-read and re-parsed every
+// time, measured at ~1s on a 373MB transcript and unaffected by cache warmth.
+//
+// These pin the cached fast path and, crucially, the cases where it must NOT
+// claim a hit. Everything here is physical record indexes: imported
+// transcripts may start at any seq and may contain gaps, so `index == seq - 1`
+// is not available (see `page_messages_by_index`'s KNOWN DEFECT note).
+// ---------------------------------------------------------------------------
+
+/// Build a transcript whose messages start at `first_seq`, stepping seq by
+/// `seq_step` so gaps are exercised. Every `user_every`-th record is a user
+/// query. Returns the raw file body.
+fn user_query_transcript(
+    thread_id: &str,
+    count: usize,
+    first_seq: u64,
+    seq_step: u64,
+    user_every: usize,
+) -> String {
+    let mut lines = vec![transcript_session_line(thread_id, 1)];
+    for i in 0..count {
+        let seq = first_seq + (i as u64) * seq_step;
+        let message = if i % user_every == 0 {
+            json!({"role": "user", "content": format!("ask {i}")})
+        } else {
+            json!({"role": "assistant", "content": format!("reply {i}")})
+        };
+        lines.push(transcript_message_line(
+            thread_id,
+            seq,
+            None,
+            "2026-07-15T00:00:00Z",
+            message,
+        ));
+    }
+    format!("{}\n", lines.join("\n"))
+}
+
+/// The physical-records oracle: what `[start, total)` must contain, derived
+/// from the file itself rather than from any seq arithmetic.
+fn physical_user_query_start(body: &str, target: usize, fallback: usize) -> (usize, usize) {
+    let messages: Vec<Value> = body
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|value| value.get("type").and_then(Value::as_str) == Some("message"))
+        .map(|value| value.get("message").cloned().unwrap_or(Value::Null))
+        .collect();
+    let total = messages.len();
+    let mut hits = Vec::new();
+    for (index, message) in messages.iter().enumerate() {
+        if message.get("role").and_then(Value::as_str) == Some("user") {
+            hits.push(index);
+        }
+    }
+    let start = if hits.is_empty() {
+        total.saturating_sub(fallback.max(1))
+    } else if hits.len() < target.max(1) {
+        0
+    } else {
+        hits[hits.len() - target.max(1)]
+    };
+    (start, total)
+}
+
+async fn write_transcript(dir: &std::path::Path, thread_id: &str, body: &str) {
+    let store = ThreadTranscriptStore::file(dir).await.unwrap();
+    let path = store.transcript_path(thread_id).unwrap();
+    tokio::fs::create_dir_all(path.parent().unwrap())
+        .await
+        .unwrap();
+    tokio::fs::write(&path, body).await.unwrap();
+}
+
+#[tokio::test]
+async fn newest_user_query_window_serves_from_cached_tail_without_the_forward_scan() {
+    let dir = tempdir().unwrap();
+    let thread_id = "thread::uq-cached";
+    let body = user_query_transcript(thread_id, 60, 1, 1, 7);
+    write_transcript(dir.path(), thread_id, &body).await;
+    let store = ThreadTranscriptStore::file(dir.path()).await.unwrap();
+
+    let (expected_start, expected_total) = physical_user_query_start(&body, 3, 50);
+    let (first, total, start) = store
+        .page_before_user_queries(thread_id, None, 3, 50)
+        .await
+        .unwrap();
+    assert_eq!((total, start), (expected_total, expected_start));
+    assert_eq!(first.len(), expected_total - expected_start);
+
+    // Warm: the cache is built, so the window must cost no forward scan at all.
+    let baseline = store
+        .user_query_forward_scans
+        .load(CacheTestOrdering::Relaxed);
+    let reads = store.full_file_reads.load(CacheTestOrdering::Relaxed);
+    let (again, total_again, start_again) = store
+        .page_before_user_queries(thread_id, None, 3, 50)
+        .await
+        .unwrap();
+    assert_eq!((again, total_again, start_again), (first, total, start));
+    assert_eq!(
+        store
+            .user_query_forward_scans
+            .load(CacheTestOrdering::Relaxed),
+        baseline,
+        "a cached newest window must not re-scan the transcript"
+    );
+    assert_eq!(
+        store.full_file_reads.load(CacheTestOrdering::Relaxed),
+        reads,
+        "a cached newest window must not fall back to a full read"
+    );
+}
+
+#[tokio::test]
+async fn newest_user_query_window_matches_the_oracle_for_an_imported_offset_transcript() {
+    let dir = tempdir().unwrap();
+    let thread_id = "thread::uq-offset";
+    // Imported transcripts keep their original seqs: the committed contract
+    // only requires strictly increasing, and fixtures pin starts at 41 and 7.
+    let body = user_query_transcript(thread_id, 40, 41, 3, 5);
+    write_transcript(dir.path(), thread_id, &body).await;
+    let store = ThreadTranscriptStore::file(dir.path()).await.unwrap();
+
+    let (expected_start, expected_total) = physical_user_query_start(&body, 3, 50);
+    let (messages, total, start) = store
+        .page_before_user_queries(thread_id, None, 3, 50)
+        .await
+        .unwrap();
+
+    assert_eq!((total, start), (expected_total, expected_start));
+    assert_eq!(messages.len(), expected_total - expected_start);
+    assert_eq!(
+        messages.first().and_then(|m| m.get("role")),
+        Some(&json!("user")),
+        "the window must begin at the oldest of the newest 3 user queries"
+    );
+}
+
+#[tokio::test]
+async fn newest_user_query_window_misses_when_the_tail_cannot_prove_the_window() {
+    let dir = tempdir().unwrap();
+    let thread_id = "thread::uq-tail-miss";
+    // 80 records with a user query only every 20th, and a tail capped at 8
+    // records: the newest 3 queries provably lie below the cached tail.
+    let body = user_query_transcript(thread_id, 80, 1, 1, 20);
+    write_transcript(dir.path(), thread_id, &body).await;
+    let store = ThreadTranscriptStore::file_for_tests(dir.path(), 64 * 1024, 8, 1024 * 1024)
+        .await
+        .unwrap();
+
+    let baseline = store
+        .user_query_forward_scans
+        .load(CacheTestOrdering::Relaxed);
+    let (expected_start, expected_total) = physical_user_query_start(&body, 3, 50);
+    let (messages, total, start) = store
+        .page_before_user_queries(thread_id, None, 3, 50)
+        .await
+        .unwrap();
+
+    assert_eq!((total, start), (expected_total, expected_start));
+    assert_eq!(messages.len(), expected_total - expected_start);
+    assert!(
+        store
+            .user_query_forward_scans
+            .load(CacheTestOrdering::Relaxed)
+            > baseline,
+        "an unprovable window must fall through to the streaming scan, not guess"
+    );
+}
+
+#[tokio::test]
+async fn newest_user_query_window_with_no_user_queries_uses_the_fallback_limit() {
+    let dir = tempdir().unwrap();
+    let thread_id = "thread::uq-none";
+    let mut lines = vec![transcript_session_line(thread_id, 1)];
+    for i in 0..30u64 {
+        lines.push(transcript_message_line(
+            thread_id,
+            i + 1,
+            None,
+            "2026-07-15T00:00:00Z",
+            json!({"role": "assistant", "content": format!("reply {i}")}),
+        ));
+    }
+    let body = format!("{}\n", lines.join("\n"));
+    write_transcript(dir.path(), thread_id, &body).await;
+    let store = ThreadTranscriptStore::file(dir.path()).await.unwrap();
+
+    let (messages, total, start) = store
+        .page_before_user_queries(thread_id, None, 3, 10)
+        .await
+        .unwrap();
+
+    assert_eq!(total, 30);
+    assert_eq!(start, 20, "no user query -> newest `fallback` messages");
+    assert_eq!(messages.len(), 10);
+}
+
+#[tokio::test]
+async fn newest_user_query_window_below_target_over_whole_file_starts_at_zero() {
+    let dir = tempdir().unwrap();
+    let thread_id = "thread::uq-short";
+    // Two user queries but a target of 3, and the tail covers the whole file:
+    // the window is the entire transcript.
+    let body = user_query_transcript(thread_id, 6, 1, 1, 3);
+    write_transcript(dir.path(), thread_id, &body).await;
+    let store = ThreadTranscriptStore::file(dir.path()).await.unwrap();
+
+    let (messages, total, start) = store
+        .page_before_user_queries(thread_id, None, 3, 50)
+        .await
+        .unwrap();
+
+    assert_eq!((total, start), (6, 0));
+    assert_eq!(messages.len(), 6);
+}
+
+#[tokio::test]
+async fn newest_user_query_window_reflects_records_appended_after_the_first_read() {
+    let dir = tempdir().unwrap();
+    let thread_id = "thread::uq-append";
+    let body = user_query_transcript(thread_id, 20, 1, 1, 5);
+    write_transcript(dir.path(), thread_id, &body).await;
+    let store = ThreadTranscriptStore::file(dir.path()).await.unwrap();
+
+    let (_, total_before, _) = store
+        .page_before_user_queries(thread_id, None, 3, 50)
+        .await
+        .unwrap();
+    assert_eq!(total_before, 20);
+
+    store
+        .append_committed_messages(
+            thread_id,
+            None,
+            &[json!({"role": "user", "content": "brand new ask"})],
+        )
+        .await
+        .unwrap();
+
+    let (messages, total_after, start_after) = store
+        .page_before_user_queries(thread_id, None, 3, 50)
+        .await
+        .unwrap();
+    assert_eq!(total_after, 21, "the append must be visible");
+    assert_eq!(
+        messages.last().and_then(|m| m.get("content")),
+        Some(&json!("brand new ask"))
+    );
+    assert!(start_after > 0);
+}
+
+#[tokio::test]
+async fn newest_user_query_window_is_empty_for_an_absent_transcript() {
+    let dir = tempdir().unwrap();
+    let store = ThreadTranscriptStore::file(dir.path()).await.unwrap();
+    let (messages, total, start) = store
+        .page_before_user_queries("thread::uq-missing", None, 3, 50)
+        .await
+        .unwrap();
+    assert!(messages.is_empty());
+    assert_eq!((total, start), (0, 0));
+}

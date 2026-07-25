@@ -503,6 +503,56 @@ impl ThreadCache {
             has_more_above: start > 0,
         })
     }
+
+    /// Serve the newest user-query window (`before_index: None`) when the
+    /// cached physical tail provably contains all of it; `None` sends the
+    /// caller to the streaming scan.
+    ///
+    /// Physical record indexes only, never `seq`: the import path requires only
+    /// that seq is strictly increasing, so a transcript may start at any seq and
+    /// may contain gaps, and `index == seq - 1` does not hold.
+    fn user_query_page(
+        &self,
+        user_query_limit: usize,
+        fallback_message_limit: usize,
+    ) -> Option<(Vec<Value>, usize, usize)> {
+        let total = self.total_records;
+        if total == 0 {
+            return Some((Vec::new(), 0, 0));
+        }
+        let tail_global_start = total - self.tail.len();
+        let target_user_queries = user_query_limit.max(1);
+        let mut cursor = total;
+        let mut user_queries = 0usize;
+        while cursor > tail_global_start && user_queries < target_user_queries {
+            cursor -= 1;
+            if is_user_query_message(&self.tail[cursor - tail_global_start].record.message) {
+                user_queries += 1;
+            }
+        }
+        if user_queries < target_user_queries && !self.covers_whole_file() {
+            // The scan would have to continue below the cached tail. Nothing
+            // about the tail's record count, byte size, or query density can
+            // stand in for actually finding the queries.
+            return None;
+        }
+        // Same three outcomes the streaming path produces, with `end == total`.
+        let start = if user_queries == 0 {
+            total.saturating_sub(fallback_message_limit.max(1))
+        } else if user_queries < target_user_queries {
+            0
+        } else {
+            cursor
+        };
+        if start < tail_global_start {
+            return None;
+        }
+        let messages = self.tail[start - tail_global_start..]
+            .iter()
+            .map(|cached| cached.record.message.clone())
+            .collect();
+        Some((messages, total, start))
+    }
 }
 
 #[derive(Debug)]
@@ -805,6 +855,11 @@ pub struct ThreadTranscriptStore {
     /// actually hit the cache instead of silently falling back.
     #[cfg(test)]
     pub(super) full_file_reads: AtomicUsize,
+    /// Counts entries into the head-to-`end` streaming scan in
+    /// `page_before_user_queries`. The cached newest-window path exists to skip
+    /// it, so tests assert on this rather than on wall time.
+    #[cfg(test)]
+    pub(super) user_query_forward_scans: AtomicUsize,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -864,6 +919,8 @@ impl ThreadTranscriptStore {
             },
             #[cfg(test)]
             full_file_reads: AtomicUsize::new(0),
+            #[cfg(test)]
+            user_query_forward_scans: AtomicUsize::new(0),
         })
     }
 
@@ -905,6 +962,8 @@ impl ThreadTranscriptStore {
             },
             #[cfg(test)]
             full_file_reads: AtomicUsize::new(0),
+            #[cfg(test)]
+            user_query_forward_scans: AtomicUsize::new(0),
         }
     }
 
@@ -2216,6 +2275,21 @@ impl ThreadTranscriptStore {
                 .collect();
             return Ok((messages, total, start));
         }
+        // The newest window (`before_index: None`) is the hot path — the client
+        // asks for it on every thread open, retry, and refresh. When the cached
+        // physical tail provably holds the whole window, serve it there and skip
+        // the forward scan below, which otherwise re-reads and re-parses the
+        // entire transcript on every one of those requests (its `index >= end`
+        // early exit never fires while `end == total`).
+        if before_index.is_none()
+            && let Some(page) = self
+                .with_built_cache(thread_id, |entry| {
+                    entry.user_query_page(user_query_limit, fallback_message_limit)
+                })
+                .await
+        {
+            return Ok(page);
+        }
         let total = self.message_count(thread_id).await?;
         let end = before_index.unwrap_or(total).min(total);
         let target_user_queries = user_query_limit.max(1);
@@ -2228,6 +2302,8 @@ impl ThreadTranscriptStore {
         };
         let mut recent_queries: std::collections::VecDeque<usize> =
             std::collections::VecDeque::with_capacity(target_user_queries);
+        #[cfg(test)]
+        self.user_query_forward_scans.fetch_add(1, Ordering::Relaxed);
         let mut index = 0usize;
         self.for_each_transcript_record(thread_id, &path, |cached| {
             if index >= end {
@@ -2257,9 +2333,17 @@ impl ThreadTranscriptStore {
     }
 
     /// Page `[start, end)` by record index against a File-mode transcript.
-    /// Seqs are gapless from 1 (see the `ThreadCache` invariants), so index
-    /// `i` holds seq `i + 1`: serve from the cached tail when it covers the
-    /// range, else stream just the range from disk.
+    ///
+    /// KNOWN DEFECT: this converts a physical record index to a seq with
+    /// `seq = index + 1`, which assumes every transcript starts at seq 1 with no
+    /// gaps. That is not a contract. The import path requires only that seq is
+    /// strictly increasing, and committed tests pin imported transcripts that
+    /// start at seq 41 and seq 7, so this returns the wrong slice for them. The
+    /// defect predates the cached newest-window path in `user_query_page`, which
+    /// deliberately does not route through here; fixing it means auditing every
+    /// index-based pager together (`page_before_index`, `page_after_index`, and
+    /// `page_before_user_queries` with `before_index: Some`) and is tracked
+    /// separately. Do not treat the `index == seq - 1` mapping as sound.
     async fn page_messages_by_index(
         &self,
         thread_id: &str,
