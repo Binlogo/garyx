@@ -185,21 +185,71 @@ struct GaryxMessageListSignature: Equatable, Sendable {
         return combineTextSignature(value, into: &hasher)
     }
 
+    /// Fold one text field into the list fingerprint in CONSTANT time.
+    ///
+    /// The sampling contract is unchanged: short fields hash whole, long
+    /// fields hash their length plus a head/middle/tail sample and report
+    /// `sampled`. Only the mechanics changed — the previous implementation
+    /// worked on `String`'s grapheme view, where `count`, `index(offsetBy:)`
+    /// and `distance(from:to:)` are each O(n) Unicode walks. With multi-100 KiB
+    /// tool results resident, every `setMessages` delta re-walked every long
+    /// field several times: 50.7 ms per delta and 44% of main-thread work
+    /// during streaming, with `GaryxMessageListSignature.make` holding
+    /// 444 of 1652 main-thread stack samples (#TASK-2703 measurement).
+    ///
+    /// Sampling the UTF-8 view through its contiguous buffer makes the length
+    /// and all three sample windows plain byte offsets, so cost no longer
+    /// scales with field size. Byte windows are also a strictly finer
+    /// fingerprint than grapheme windows of the same nominal width.
     @discardableResult
     private static func combineTextSignature(_ value: String, into hasher: inout Hasher) -> Bool {
-        hasher.combine(value.count)
-        if value.count <= 1_024 {
+        let byteCount = value.utf8.count
+        hasher.combine(byteCount)
+        guard byteCount > Self.wholeTextSignatureByteLimit else {
             hasher.combine(value)
             return false
         }
-        hasher.combine(value.prefix(256))
-        let middleOffset = max(0, (value.count / 2) - 128)
-        let middleStart = value.index(value.startIndex, offsetBy: middleOffset)
-        let middleEnd = value.index(middleStart, offsetBy: min(256, value.distance(from: middleStart, to: value.endIndex)))
-        hasher.combine(value[middleStart..<middleEnd])
-        hasher.combine(value.suffix(256))
+        let sampled = value.utf8.withContiguousStorageIfAvailable { buffer -> Bool in
+            combineSampleWindows(of: buffer, into: &hasher)
+            return true
+        }
+        if sampled == true {
+            return true
+        }
+        // Non-contiguous (bridged) storage: materialize once, then sample the
+        // same byte windows. Still bounded by one linear copy instead of
+        // several Unicode walks.
+        var bytes = Array(value.utf8)
+        bytes.withUnsafeBufferPointer { buffer in
+            combineSampleWindows(of: buffer, into: &hasher)
+        }
         return true
     }
+
+    /// Head, middle, and tail byte windows at fixed offsets.
+    private static func combineSampleWindows(
+        of buffer: UnsafeBufferPointer<UInt8>,
+        into hasher: inout Hasher
+    ) {
+        let window = Self.textSignatureSampleByteWindow
+        let count = buffer.count
+        guard let base = buffer.baseAddress else { return }
+        func combineWindow(from start: Int, to end: Int) {
+            guard start < end else { return }
+            hasher.combine(
+                bytes: UnsafeRawBufferPointer(start: base + start, count: end - start)
+            )
+        }
+        combineWindow(from: 0, to: min(window, count))
+        let middleStart = max(0, (count / 2) - (window / 2))
+        combineWindow(from: middleStart, to: min(count, middleStart + window))
+        combineWindow(from: max(0, count - window), to: count)
+    }
+
+    /// Fields at or below this byte length are hashed whole.
+    static let wholeTextSignatureByteLimit = 1_024
+    /// Byte width of each head/middle/tail sample window for longer fields.
+    static let textSignatureSampleByteWindow = 256
 
     private static func roleSignature(_ role: GaryxMobileMessage.Role) -> String {
         switch role {
