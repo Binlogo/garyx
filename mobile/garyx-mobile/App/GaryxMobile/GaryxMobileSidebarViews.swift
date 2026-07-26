@@ -938,10 +938,10 @@ struct GaryxHomeHeaderView: View {
         let isSearchPresented = threadSearchStore.chromeState.isPresented
         GaryxAdaptiveGlassContainer(spacing: 10) {
             HStack(alignment: .center, spacing: 12) {
-                GaryxSidebarMenuButton(action: onOpenDrawer)
-                    .opacity(isSearchPresented ? 0 : 1)
-                    .allowsHitTesting(!isSearchPresented)
-                    .accessibilityHidden(isSearchPresented)
+                GaryxSidebarMenuButton(
+                    isHidden: isSearchPresented,
+                    action: onOpenDrawer
+                )
 
                 Text("Garyx")
                     .font(GaryxFont.title(weight: .semibold))
@@ -963,11 +963,9 @@ struct GaryxHomeHeaderView: View {
 
                 GaryxRecentThreadFilterMenu(
                     selection: selectedRecentFilter,
+                    isHidden: isSearchPresented,
                     onSelect: onSelectRecentFilter
                 )
-                .opacity(isSearchPresented ? 0 : 1)
-                .allowsHitTesting(!isSearchPresented)
-                .accessibilityHidden(isSearchPresented)
             }
         }
         .padding(.horizontal, 16)

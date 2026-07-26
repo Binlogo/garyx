@@ -45,11 +45,20 @@ final class HomeChromeInteractionTests: XCTestCase {
 
     func testThreadSearchMorphsInPlaceFocusesAndCancels() throws {
         let app = launchHome()
+        let menu = app.buttons["Open menu"]
         let search = app.buttons["home-thread-search-button"]
+        let filter = app.buttons["Recent filter"]
+        XCTAssertTrue(menu.waitForExistence(timeout: 10), "Home menu button")
         XCTAssertTrue(search.waitForExistence(timeout: 10), "Home thread-search button")
+        XCTAssertTrue(filter.waitForExistence(timeout: 10), "Home recent-filter button")
         XCTAssertEqual(search.frame.width, 44, accuracy: 1)
         XCTAssertEqual(search.frame.height, 44, accuracy: 1)
         let collapsedFrame = search.frame
+        let collapsedGlyphProbes = [
+            HeaderGlyphProbe(name: "menu", frame: menu.frame),
+            HeaderGlyphProbe(name: "search", frame: search.frame),
+            HeaderGlyphProbe(name: "filter", frame: filter.frame),
+        ]
         let collapsedScreenshot = app.screenshot()
 
         search.tap()
@@ -82,10 +91,12 @@ final class HomeChromeInteractionTests: XCTestCase {
         // check follows the exact SF Symbol geometry rendered on this runtime.
         Thread.sleep(forTimeInterval: 1.5)
         let expandedScreenshot = app.screenshot()
-        try assertNoCollapsedSearchGlyphResidue(
+        try assertNoCollapsedHeaderGlyphResidue(
             collapsedScreenshot: collapsedScreenshot,
             expandedScreenshot: expandedScreenshot,
-            collapsedFrame: collapsedFrame,
+            probes: collapsedGlyphProbes,
+            blankReferenceTrailingX: collapsedFrame.minX,
+            blankReferenceCenterY: collapsedFrame.midY,
             appFrame: app.frame
         )
 
@@ -293,10 +304,17 @@ final class HomeChromeInteractionTests: XCTestCase {
         element.coordinate(withNormalizedOffset: CGVector(dx: 0.88, dy: 0.5)).tap()
     }
 
-    private func assertNoCollapsedSearchGlyphResidue(
+    private struct HeaderGlyphProbe {
+        let name: String
+        let frame: CGRect
+    }
+
+    private func assertNoCollapsedHeaderGlyphResidue(
         collapsedScreenshot: XCUIScreenshot,
         expandedScreenshot: XCUIScreenshot,
-        collapsedFrame: CGRect,
+        probes: [HeaderGlyphProbe],
+        blankReferenceTrailingX: CGFloat,
+        blankReferenceCenterY: CGFloat,
         appFrame: CGRect
     ) throws {
         let collapsedImage = try XCTUnwrap(collapsedScreenshot.image.cgImage)
@@ -311,91 +329,143 @@ final class HomeChromeInteractionTests: XCTestCase {
         let collapsedBytesPerPixel = collapsedImage.bitsPerPixel / 8
         let expandedBytesPerPixel = expandedImage.bitsPerPixel / 8
         guard collapsedBytesPerPixel >= 3, expandedBytesPerPixel >= 3 else {
-            XCTFail("search screenshot pixel format has fewer than three color bytes")
+            XCTFail("header screenshot pixel format has fewer than three color bytes")
             return
         }
 
         let scaleX = CGFloat(collapsedImage.width) / appFrame.width
         let scaleY = CGFloat(collapsedImage.height) / appFrame.height
-        let minX = max(
-            0,
-            Int(floor((collapsedFrame.minX - appFrame.minX) * scaleX))
-        )
-        let maxX = min(
-            collapsedImage.width - 1,
-            Int(ceil((collapsedFrame.maxX - appFrame.minX) * scaleX)) - 1
-        )
-        let minY = max(
-            0,
-            Int(floor((collapsedFrame.minY - appFrame.minY) * scaleY))
-        )
-        let maxY = min(
-            collapsedImage.height - 1,
-            Int(ceil((collapsedFrame.maxY - appFrame.minY) * scaleY)) - 1
-        )
-        let referenceOffset = Int((collapsedFrame.width * scaleX).rounded())
+        for probe in probes {
+            let minX = max(
+                0,
+                Int(floor((probe.frame.minX - appFrame.minX) * scaleX))
+            )
+            let maxX = min(
+                collapsedImage.width - 1,
+                Int(ceil((probe.frame.maxX - appFrame.minX) * scaleX)) - 1
+            )
+            let minY = max(
+                0,
+                Int(floor((probe.frame.minY - appFrame.minY) * scaleY))
+            )
+            let maxY = min(
+                collapsedImage.height - 1,
+                Int(ceil((probe.frame.maxY - appFrame.minY) * scaleY)) - 1
+            )
+            let blankReferenceOriginX = blankReferenceTrailingX - probe.frame.width
+            let blankReferenceOriginY = blankReferenceCenterY - probe.frame.height / 2
+            let referenceOffsetX = Int(
+                ((blankReferenceOriginX - probe.frame.minX) * scaleX).rounded()
+            )
+            let referenceOffsetY = Int(
+                ((blankReferenceOriginY - probe.frame.minY) * scaleY).rounded()
+            )
 
-        var sourceBrightness: CGFloat = 0
-        var referenceBrightness: CGFloat = 0
-        var maskPixelCount = 0
+            var sourceBrightness: CGFloat = 0
+            var referenceBrightness: CGFloat = 0
+            var maskPixelCount = 0
+            var sampledPixelCount = 0
+            var sourceForegroundPixelCount = 0
+            var referenceForegroundPixelCount = 0
 
-        for y in minY...maxY {
-            for x in minX...maxX {
-                let collapsedIndex = y * collapsedImage.bytesPerRow
-                    + x * collapsedBytesPerPixel
-                let maskBrightness = (
-                    CGFloat(collapsedBytes[collapsedIndex])
-                        + CGFloat(collapsedBytes[collapsedIndex + 1])
-                        + CGFloat(collapsedBytes[collapsedIndex + 2])
-                ) / 3
-                guard maskBrightness < 128 else { continue }
+            for y in minY...maxY {
+                for x in minX...maxX {
+                    let collapsedIndex = y * collapsedImage.bytesPerRow
+                        + x * collapsedBytesPerPixel
+                    let maskBrightness = (
+                        CGFloat(collapsedBytes[collapsedIndex])
+                            + CGFloat(collapsedBytes[collapsedIndex + 1])
+                            + CGFloat(collapsedBytes[collapsedIndex + 2])
+                    ) / 3
+                    guard maskBrightness < 128 else { continue }
+                    maskPixelCount += 1
 
-                let referenceX = x - referenceOffset
-                guard referenceX >= 0 else {
-                    XCTFail("search residue reference sample falls outside the screenshot")
-                    return
+                    let referenceX = x + referenceOffsetX
+                    let referenceY = y + referenceOffsetY
+                    guard
+                        referenceX >= 0,
+                        referenceX < expandedImage.width,
+                        referenceY >= 0,
+                        referenceY < expandedImage.height
+                    else {
+                        XCTFail("\(probe.name) residue reference sample falls outside the screenshot")
+                        return
+                    }
+                    let sourceIndex = y * expandedImage.bytesPerRow
+                        + x * expandedBytesPerPixel
+                    let referenceIndex = referenceY * expandedImage.bytesPerRow
+                        + referenceX * expandedBytesPerPixel
+                    let sourcePixelBrightness = (
+                        CGFloat(expandedBytes[sourceIndex])
+                            + CGFloat(expandedBytes[sourceIndex + 1])
+                            + CGFloat(expandedBytes[sourceIndex + 2])
+                    ) / 3
+                    let referencePixelBrightness = (
+                        CGFloat(expandedBytes[referenceIndex])
+                            + CGFloat(expandedBytes[referenceIndex + 1])
+                            + CGFloat(expandedBytes[referenceIndex + 2])
+                    ) / 3
+
+                    // The expanded field's real leading magnifier and Cancel
+                    // label overlap the collapsed menu/filter rects. Exclude
+                    // those foreground pixels while retaining the pale shared-
+                    // pass residue. The paired reference samples must stay
+                    // foreground-free so this exclusion cannot make the guard
+                    // silently pass after a layout change.
+                    guard referencePixelBrightness >= 240 else {
+                        referenceForegroundPixelCount += 1
+                        continue
+                    }
+                    guard sourcePixelBrightness >= 240 else {
+                        sourceForegroundPixelCount += 1
+                        continue
+                    }
+
+                    sourceBrightness += sourcePixelBrightness
+                    referenceBrightness += referencePixelBrightness
+                    sampledPixelCount += 1
                 }
-                let sourceIndex = y * expandedImage.bytesPerRow
-                    + x * expandedBytesPerPixel
-                let referenceIndex = y * expandedImage.bytesPerRow
-                    + referenceX * expandedBytesPerPixel
-                sourceBrightness += (
-                    CGFloat(expandedBytes[sourceIndex])
-                        + CGFloat(expandedBytes[sourceIndex + 1])
-                        + CGFloat(expandedBytes[sourceIndex + 2])
-                ) / 3
-                referenceBrightness += (
-                    CGFloat(expandedBytes[referenceIndex])
-                        + CGFloat(expandedBytes[referenceIndex + 1])
-                        + CGFloat(expandedBytes[referenceIndex + 2])
-                ) / 3
-                maskPixelCount += 1
             }
-        }
 
-        guard maskPixelCount > 100 else {
-            XCTFail("collapsed search glyph mask contained only \(maskPixelCount) pixels")
-            return
-        }
-        let sourceMean = sourceBrightness / CGFloat(maskPixelCount)
-        let referenceMean = referenceBrightness / CGFloat(maskPixelCount)
-        let luminanceDip = referenceMean - sourceMean
-        let report = String(
-            format: "mask=%d source=%.3f reference=%.3f dip=%.3f",
-            maskPixelCount,
-            sourceMean,
-            referenceMean,
-            luminanceDip
-        )
-        let metricsAttachment = XCTAttachment(string: report)
-        metricsAttachment.name = "Home search residue luminance"
-        metricsAttachment.lifetime = .keepAlways
-        add(metricsAttachment)
+            XCTAssertGreaterThan(
+                maskPixelCount,
+                100,
+                "collapsed \(probe.name) glyph mask contained only \(maskPixelCount) pixels"
+            )
+            XCTAssertEqual(
+                referenceForegroundPixelCount,
+                0,
+                "\(probe.name) residue reference samples are no longer blank"
+            )
+            guard sampledPixelCount > 100 else {
+                XCTFail(
+                    "collapsed \(probe.name) glyph left only \(sampledPixelCount) comparable pixels"
+                )
+                continue
+            }
 
-        XCTAssertLessThan(
-            luminanceDip,
-            1,
-            "the expanded search chrome must not redraw the collapsed magnifying-glass node (\(report))"
-        )
+            let sourceMean = sourceBrightness / CGFloat(sampledPixelCount)
+            let referenceMean = referenceBrightness / CGFloat(sampledPixelCount)
+            let luminanceDip = referenceMean - sourceMean
+            let report = String(
+                format: "mask=%d sampled=%d excluded=%d source=%.3f reference=%.3f dip=%.3f",
+                maskPixelCount,
+                sampledPixelCount,
+                sourceForegroundPixelCount,
+                sourceMean,
+                referenceMean,
+                luminanceDip
+            )
+            let metricsAttachment = XCTAttachment(string: report)
+            metricsAttachment.name = "Home \(probe.name) residue luminance"
+            metricsAttachment.lifetime = .keepAlways
+            add(metricsAttachment)
+
+            XCTAssertLessThan(
+                luminanceDip,
+                1,
+                "expanded search chrome must not redraw the collapsed \(probe.name) node (\(report))"
+            )
+        }
     }
 }

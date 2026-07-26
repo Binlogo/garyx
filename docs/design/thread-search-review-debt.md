@@ -77,7 +77,7 @@ next touched.
 
 ### I-4 — Home list divider still reads deprecated `UIScreen.main`
 
-`mobile/garyx-mobile/App/GaryxMobile/GaryxMobileSidebarViews.swift:1222`.
+`mobile/garyx-mobile/App/GaryxMobile/GaryxMobileSidebarViews.swift:1220`.
 
 The existing divider computes one physical pixel with `UIScreen.main.scale`,
 which is deprecated on iOS 26 in favor of the screen or trait collection from
@@ -107,6 +107,20 @@ Changing or omitting `isEnabled` for a morph source can therefore alter the
 accessibility fallback even when the glass-path intent is only to control
 shared-pass participation. Split the contracts in a dedicated design-system
 task rather than broadening the Home search fix.
+
+### I-7 — Home UI-test fixtures inherit simulator container state
+
+- `mobile/garyx-mobile/UITests/GaryxMobileUITests/HomeChromeInteractionTests.swift:291-300`
+- `mobile/garyx-mobile/App/GaryxMobile/GaryxMobileModel.swift:662-697`
+
+`GARYX_MOBILE_DEBUG_SNAPSHOT` supplies deterministic presentation data, but the
+app still opens its persisted gateway-scoped state before applying that
+snapshot, and a fresh app container can present the system notification prompt.
+Both dirty and newly reset simulator containers can therefore block an
+otherwise deterministic Home interaction test before its first assertion.
+Give UI tests an isolated launch contract that resets scoped state and settles
+first-launch permissions in a dedicated harness task; do not add one-off
+dismissals to the thread-search test.
 
 ## Desktop
 
