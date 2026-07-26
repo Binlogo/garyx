@@ -4,7 +4,6 @@ import { readFileSync } from 'node:fs';
 
 import {
   resolveComposerModelControlState,
-  supportsComposerReasoningControl,
 } from './composer-model-control.ts';
 import { ProviderModelCatalog } from './provider-model-catalog.ts';
 
@@ -67,6 +66,28 @@ test('failed refresh keeps the previous snapshot and exposes no error state', as
   assert.equal('error' in store.getSnapshot(), false);
 });
 
+test('foreground refresh retries a known provider after a cold-start failure', async () => {
+  let attempts = 0;
+  const store = new ProviderModelCatalog(async () => {
+    attempts += 1;
+    if (attempts === 1) {
+      throw new Error('cold-start catalog failure');
+    }
+    return healthyCatalog;
+  });
+  store.setGatewayScope('gateway-a');
+
+  assert.equal(await store.refresh('claude_code'), false);
+  assert.equal(store.getSnapshot().catalogs.claude_code, undefined);
+  await store.refreshKnown();
+
+  assert.equal(attempts, 2);
+  assert.strictEqual(
+    store.getSnapshot().catalogs.claude_code,
+    healthyCatalog,
+  );
+});
+
 test('successful refresh replaces a degraded snapshot without restarting', async () => {
   let nextCatalog = degradedCatalog;
   const store = new ProviderModelCatalog(async () => nextCatalog);
@@ -88,10 +109,7 @@ test('successful refresh replaces a degraded snapshot without restarting', async
     false,
   );
   assert.equal(degradedState.triggerLabel, 'claude-opus-5 · max');
-  assert.equal(
-    supportsComposerReasoningControl(degradedState.reasoningEfforts),
-    true,
-  );
+  assert.equal(degradedState.showsReasoningControl, true);
 
   nextCatalog = healthyCatalog;
   assert.equal(await store.refresh('claude_code'), true);
@@ -116,10 +134,7 @@ test('successful refresh replaces a degraded snapshot without restarting', async
     ['low', 'high', 'max'],
   );
   assert.equal(healthyState.triggerLabel, 'Claude Opus 5 · Max');
-  assert.equal(
-    supportsComposerReasoningControl(healthyState.reasoningEfforts),
-    true,
-  );
+  assert.equal(healthyState.showsReasoningControl, true);
 });
 
 test('concurrent triggers for one provider share one in-flight request', async () => {
@@ -171,7 +186,9 @@ test('refresh-state subscribers reenter the same single-flight request', async (
 test('gateway switch clears the cache and rejects a late old-scope response', async () => {
   const late = deferred();
   let first = true;
+  let calls = 0;
   const store = new ProviderModelCatalog(async () => {
+    calls += 1;
     if (first) {
       first = false;
       return degradedCatalog;
@@ -188,4 +205,6 @@ test('gateway switch clears the cache and rejects a late old-scope response', as
 
   assert.equal(await stale, false);
   assert.deepEqual(store.getSnapshot(), { catalogs: {}, refreshing: {} });
+  await store.refreshKnown();
+  assert.equal(calls, 2);
 });

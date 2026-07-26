@@ -56,3 +56,19 @@ The thread runtime snapshot already contains the effective model, thinking
 level, and service tier. A separate cross-platform design should decide how the
 desktop composer renders and unpins those values before the first catalog
 success, without inventing selectable catalog rows.
+
+## 4. iOS thread detail refresh ignores the server label fallback
+
+Source:
+
+- `mobile/garyx-mobile/Sources/GaryxMobileCore/GaryxGatewayThreadModels.swift`
+
+After a thread runtime write, iOS refreshes the selected thread through the
+thread-detail response. That decoder currently reads only `title` and falls
+back to `New Thread` when `title` is null, even though the response can carry
+the user-visible thread name in `label`. The runtime picker change did not
+touch this decoder, but end-to-end verification exposed the existing title
+regression.
+
+This needs its own thread-summary decoding contract and parity tests. It must
+not be coupled to catalog refresh or runtime-picker presentation.

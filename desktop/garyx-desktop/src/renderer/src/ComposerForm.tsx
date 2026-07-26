@@ -62,8 +62,6 @@ import { AgentsIcon } from './app-shell/icons';
 import {
   resolveComposerModelControlState,
   shouldClearServiceTierForModelSelection,
-  supportsComposerReasoningControl,
-  supportsComposerServiceTierControl,
 } from './composer-model-control';
 
 export type { ComposerAgentOption };
@@ -353,9 +351,11 @@ function renderComposerModelControl({
     effectiveReasoningEffortId,
     defaultReasoningEffortId,
     defaultEffortLabel,
+    showsReasoningControl,
     serviceTiers,
     effectiveServiceTierId,
     defaultServiceTierLabel,
+    showsServiceTierControl,
   } = resolveComposerModelControlState({
     providerModels,
     agentConfiguredModel,
@@ -369,16 +369,10 @@ function renderComposerModelControl({
     thinkingLevelFallbackLabel: t("Thinking level"),
     standardServiceTierLabel: t("Standard"),
   });
-  const supportsReasoning = supportsComposerReasoningControl(
-    reasoningEfforts,
-  );
-  const supportsServiceTier = supportsComposerServiceTierControl(
-    serviceTiers,
-  );
 
-  // Selecting a model also clears a service tier the target model does not
-  // support, so the thread never runs with an unsupported speed tier (mirrors
-  // the iOS `selectModel` sanitize).
+  // Selecting a model clears a service tier only when the capability-bearing
+  // target catalog proves it unsupported (mirrors the iOS `selectModel`
+  // sanitize). Capability-poor catalogs are non-authoritative.
   const selectModelSanitizingTier = (modelId: string | null) => {
     onSelectModel(modelId);
     if (!onSelectServiceTier || !effectiveServiceTierId) {
@@ -429,7 +423,7 @@ function renderComposerModelControl({
               </FloatingActionMenuItem>
             ))}
         </DropdownMenuGroup>
-        {supportsReasoning && onSelectReasoningEffort ? (
+        {showsReasoningControl && onSelectReasoningEffort ? (
           <>
             <DropdownMenuSeparator />
             <DropdownMenuSub>
@@ -466,7 +460,7 @@ function renderComposerModelControl({
             </DropdownMenuSub>
           </>
         ) : null}
-        {supportsServiceTier && onSelectServiceTier ? (
+        {showsServiceTierControl && onSelectServiceTier ? (
           <>
             <DropdownMenuSeparator />
             <DropdownMenuSub>

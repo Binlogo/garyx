@@ -5,8 +5,6 @@ import { readFileSync } from 'node:fs';
 import {
   resolveComposerModelControlState,
   shouldClearServiceTierForModelSelection,
-  supportsComposerReasoningControl,
-  supportsComposerServiceTierControl,
 } from './composer-model-control.ts';
 
 const degradedProviderModels = JSON.parse(
@@ -57,6 +55,28 @@ const providerModels = {
   serviceTiers: [],
   defaultModel: null,
   source: 'claude_code_builtin',
+};
+
+const capabilityPoorServiceTierCatalog = {
+  ...providerModels,
+  providerType: 'codex_app_server',
+  models: [
+    {
+      id: 'codex-capable',
+      label: 'Codex Capable',
+      recommended: true,
+      supportedReasoningEfforts: [],
+      serviceTiers: [
+        { id: 'priority', label: 'Fast', recommended: true },
+      ],
+    },
+  ],
+  supportsReasoningEffortSelection: false,
+  reasoningEfforts: [],
+  supportsServiceTierSelection: false,
+  serviceTiers: [],
+  defaultModel: 'codex-capable',
+  source: 'codex_app_server',
 };
 
 function resolve(overrides = {}) {
@@ -378,12 +398,7 @@ test('degraded catalog keeps the effective thinking-level control visible', () =
     state.reasoningEfforts.map((option) => option.id),
     ['max'],
   );
-  assert.equal(
-    supportsComposerReasoningControl(
-      state.reasoningEfforts,
-    ),
-    true,
-  );
+  assert.equal(state.showsReasoningControl, true);
 });
 
 test('provider with no thinking levels and no effective value keeps the control hidden', () => {
@@ -393,17 +408,41 @@ test('provider with no thinking levels and no effective value keeps the control 
   });
 
   assert.deepEqual(state.reasoningEfforts, []);
-  assert.equal(
-    supportsComposerReasoningControl(
-      state.reasoningEfforts,
-    ),
-    false,
-  );
+  assert.equal(state.showsReasoningControl, false);
   assert.deepEqual(state.serviceTiers, []);
+  assert.equal(state.showsServiceTierControl, false);
+});
+
+test('capability-poor catalog does not expose per-model service tiers as choices', () => {
+  const state = resolve({
+    providerModels: capabilityPoorServiceTierCatalog,
+    effectiveModel: 'codex-capable',
+  });
+
+  assert.deepEqual(state.serviceTiers, []);
+  assert.equal(state.showsServiceTierControl, false);
+});
+
+test('capability-poor per-model tiers cannot clear or widen an effective tier row', () => {
+  const state = resolve({
+    providerModels: capabilityPoorServiceTierCatalog,
+    effectiveModel: 'codex-capable',
+    effectiveServiceTier: 'standard',
+  });
+
+  assert.deepEqual(
+    state.serviceTiers.map((tier) => tier.id),
+    ['standard'],
+  );
+  assert.equal(state.showsServiceTierControl, true);
   assert.equal(
-    supportsComposerServiceTierControl(
-      state.serviceTiers,
-    ),
+    shouldClearServiceTierForModelSelection({
+      providerModels: capabilityPoorServiceTierCatalog,
+      models: state.models,
+      defaultModelOption: state.defaultModelOption,
+      modelId: 'codex-capable',
+      effectiveServiceTierId: state.effectiveServiceTierId,
+    }),
     false,
   );
 });
@@ -419,12 +458,7 @@ test('degraded catalog preserves an effective service tier across model selectio
     state.serviceTiers.map((option) => option.id),
     ['priority'],
   );
-  assert.equal(
-    supportsComposerServiceTierControl(
-      state.serviceTiers,
-    ),
-    true,
-  );
+  assert.equal(state.showsServiceTierControl, true);
   assert.equal(
     shouldClearServiceTierForModelSelection({
       providerModels: degradedProviderModels,
@@ -493,7 +527,7 @@ test('healthy service tiers keep their options, labels, selection, and ordering'
     ],
   );
   assert.equal(state.effectiveServiceTierId, 'priority');
-  assert.equal(supportsComposerServiceTierControl(state.serviceTiers), true);
+  assert.equal(state.showsServiceTierControl, true);
   assert.equal(
     shouldClearServiceTierForModelSelection({
       providerModels: serviceTierCatalog,

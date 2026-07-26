@@ -35,6 +35,7 @@ export class ProviderModelCatalog {
   private readonly load: ProviderModelCatalogLoader;
   private readonly listeners = new Set<() => void>();
   private readonly inFlight = new Map<DesktopApiProviderType, InFlightRequest>();
+  private readonly knownProviders = new Set<DesktopApiProviderType>();
   private gatewayScope: string | null = null;
   private epoch = 0;
   private nextRequestId = 1;
@@ -60,6 +61,7 @@ export class ProviderModelCatalog {
     this.gatewayScope = gatewayScope;
     this.epoch += 1;
     this.inFlight.clear();
+    this.knownProviders.clear();
     this.snapshot = {
       catalogs: {},
       refreshing: {},
@@ -68,6 +70,7 @@ export class ProviderModelCatalog {
   }
 
   refresh(providerType: DesktopApiProviderType): Promise<boolean> {
+    this.knownProviders.add(providerType);
     const existing = this.inFlight.get(providerType);
     if (existing?.epoch === this.epoch) {
       return existing.promise;
@@ -88,9 +91,7 @@ export class ProviderModelCatalog {
   }
 
   async refreshKnown(): Promise<void> {
-    const providers = Object.keys(
-      this.snapshot.catalogs,
-    ) as DesktopApiProviderType[];
+    const providers = Array.from(this.knownProviders);
     await Promise.all(providers.map((providerType) => this.refresh(providerType)));
   }
 

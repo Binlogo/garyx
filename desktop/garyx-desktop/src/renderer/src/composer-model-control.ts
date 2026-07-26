@@ -14,21 +14,23 @@ export type ComposerModelControlState = {
   effectiveReasoningEffortId: string;
   defaultReasoningEffortId: string;
   defaultEffortLabel: string;
+  showsReasoningControl: boolean;
   serviceTiers: DesktopProviderModelOption[];
   effectiveServiceTierId: string;
   defaultServiceTierLabel: string;
+  showsServiceTierControl: boolean;
 };
 
-export function supportsComposerReasoningControl(
-  reasoningEfforts: DesktopProviderModelOption[],
-): boolean {
-  return reasoningEfforts.length > 0;
-}
-
-export function supportsComposerServiceTierControl(
-  serviceTiers: DesktopProviderModelOption[],
-): boolean {
-  return serviceTiers.length > 0;
+function catalogServiceTiersForModel(
+  providerModels: DesktopProviderModels,
+  modelOption?: DesktopProviderModelOption,
+): DesktopProviderModelOption[] {
+  if (!providerModels.supportsServiceTierSelection) {
+    return [];
+  }
+  return modelOption?.serviceTiers?.length
+    ? modelOption.serviceTiers
+    : providerModels.serviceTiers || [];
 }
 
 export function shouldClearServiceTierForModelSelection({
@@ -50,9 +52,10 @@ export function shouldClearServiceTierForModelSelection({
   const targetOption = modelId
     ? models.find((option) => option.id === modelId)
     : defaultModelOption;
-  const targetTiers = targetOption?.serviceTiers?.length
-    ? targetOption.serviceTiers
-    : providerModels.serviceTiers || [];
+  const targetTiers = catalogServiceTiersForModel(
+    providerModels,
+    targetOption,
+  );
   return targetTiers.length > 0
     && !targetTiers.some((tier) => tier.id === effectiveServiceTierId);
 }
@@ -152,10 +155,10 @@ export function resolveComposerModelControlState({
     : undefined;
   const defaultEffortLabel =
     defaultEffortOption?.label || defaultReasoningEffortId || thinkingLevelFallbackLabel;
-  const catalogServiceTiers =
-    effortFilterModelOption?.serviceTiers?.length
-      ? effortFilterModelOption.serviceTiers
-      : providerModels.serviceTiers || [];
+  const catalogServiceTiers = catalogServiceTiersForModel(
+    providerModels,
+    effortFilterModelOption,
+  );
   const effectiveServiceTierId =
     selectedServiceTier?.trim() || effectiveServiceTier?.trim() || '';
   const serviceTiers =
@@ -185,8 +188,10 @@ export function resolveComposerModelControlState({
     effectiveReasoningEffortId,
     defaultReasoningEffortId,
     defaultEffortLabel,
+    showsReasoningControl: reasoningEfforts.length > 0,
     serviceTiers,
     effectiveServiceTierId,
     defaultServiceTierLabel: standardServiceTierLabel,
+    showsServiceTierControl: serviceTiers.length > 0,
   };
 }

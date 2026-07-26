@@ -38,11 +38,6 @@ public final class GaryxProviderModelCatalogStore: ObservableObject {
 
     public init() {}
 
-    public func isRefreshing(providerType: String) -> Bool {
-        let provider = Self.normalizedProviderType(providerType)
-        return provider.map { inFlightByProvider[$0] != nil } ?? false
-    }
-
     @discardableResult
     public func refresh(
         providerType: String,

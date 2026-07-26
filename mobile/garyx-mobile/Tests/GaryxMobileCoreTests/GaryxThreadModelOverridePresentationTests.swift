@@ -578,6 +578,36 @@ final class GaryxThreadModelOverridePresentationTests: XCTestCase {
         )
     }
 
+    func testCapabilityFlagGatesPerModelServiceTiersButKeepsEffectiveValue() throws {
+        let providerModels = try decodeProviderModels(capabilityPoorServiceTierProviderJSON)
+
+        XCTAssertTrue(
+            GaryxThreadModelOverridePresentation.serviceTierPickerOptions(
+                providerModels: providerModels,
+                model: "codex-capable",
+                effectiveServiceTier: nil,
+                defaultRowLabel: "Standard"
+            ).isEmpty
+        )
+        XCTAssertEqual(
+            GaryxThreadModelOverridePresentation.serviceTierPickerOptions(
+                providerModels: providerModels,
+                model: "codex-capable",
+                effectiveServiceTier: "standard",
+                defaultRowLabel: "Standard"
+            ).map(\.id),
+            ["", "standard"]
+        )
+        XCTAssertEqual(
+            GaryxThreadModelOverridePresentation.sanitizedServiceTier(
+                providerModels: providerModels,
+                model: "codex-capable",
+                serviceTier: "standard"
+            ),
+            "standard"
+        )
+    }
+
     func testHealthyServiceTierPickerKeepsOrderingLabelsAndSelection() throws {
         let providerModels = try decodeProviderModels(serviceTierProviderJSON)
         let options = GaryxThreadModelOverridePresentation.serviceTierPickerOptions(
@@ -864,6 +894,29 @@ final class GaryxThreadModelOverridePresentationTests: XCTestCase {
             { "id": "priority", "label": "Fast", "recommended": false }
         ],
         "default_model": "codex-test",
+        "source": "codex_app_server"
+    }
+    """
+
+    private let capabilityPoorServiceTierProviderJSON = """
+    {
+        "provider_type": "codex_app_server",
+        "supports_model_selection": true,
+        "models": [
+            {
+                "id": "codex-capable",
+                "label": "Codex Capable",
+                "recommended": true,
+                "service_tiers": [
+                    { "id": "priority", "label": "Fast", "recommended": true }
+                ]
+            }
+        ],
+        "supports_reasoning_effort_selection": false,
+        "reasoning_efforts": [],
+        "supports_service_tier_selection": false,
+        "service_tiers": [],
+        "default_model": "codex-capable",
         "source": "codex_app_server"
     }
     """
