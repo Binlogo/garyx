@@ -1728,12 +1728,34 @@ final class GaryxComposerPayloadCoordinator: ObservableObject {
     func activate(scope: GaryxGatewayScope, key: GaryxComposerKey) async {
         activationTicket &+= 1
         let ticket = activationTicket
+        settleAbandonedRouteActivation()
         guard routeActivation == nil, finalizationTask == nil else {
             pendingActivation = (scope, key, ticket)
             snapshot.isReadOnly = true
             return
         }
         await performActivation(scope: scope, key: key, ticket: ticket)
+    }
+
+    /// A route transition settles its composer activation through the
+    /// renderer's terminal callback. That callback is a cross-object timing
+    /// contract, not a structural guarantee: a renderer torn down or
+    /// interrupted between commit release and terminal would otherwise leave
+    /// `routeActivation` waiting forever, which holds the coordinator
+    /// read-only and blocks every later activation behind
+    /// `pendingActivation` — the composer permanently stops accepting input.
+    ///
+    /// Every entry into a NEW interaction cycle (an activation request, the
+    /// next route commit, scene reactivation) is authoritative evidence that
+    /// a still-unterminated tracked transition was abandoned: terminals
+    /// always precede the next cycle. Settle it as superseded so the
+    /// existing close/advance machinery finishes and ownership can never be
+    /// retained by a callback that will not arrive.
+    private func settleAbandonedRouteActivation() {
+        guard routeActivation != nil, routeActivation?.terminal == nil else { return }
+        routeReachedTerminal(
+            GaryxPresentationTerminalState(outcome: .committed, visibility: .superseded)
+        )
     }
 
     private func performActivation(
@@ -1901,6 +1923,7 @@ final class GaryxComposerPayloadCoordinator: ObservableObject {
         destinationOccurrenceID: GaryxRouteInstanceID?,
         destinationKey: GaryxComposerKey?
     ) {
+        settleAbandonedRouteActivation()
         var activation = GaryxComposerHostActivation(
             sourceKey: sourceKey,
             destinationKey: destinationKey
@@ -2011,6 +2034,7 @@ final class GaryxComposerPayloadCoordinator: ObservableObject {
 
     func sceneDidBecomeActive() {
         sceneIsActive = true
+        settleAbandonedRouteActivation()
         if let deferred = deferredRouteActivation {
             deferredRouteActivation = nil
             liveOccurrenceID = deferred.occurrenceID
@@ -2880,6 +2904,8 @@ final class GaryxComposerPayloadCoordinator: ObservableObject {
             durableContext = nil
             inputState = nil
             snapshot = .unavailable
+            finishDeferredScopeExitIfNeeded()
+            resumePendingActivationIfNeeded()
             return
         }
         liveOccurrenceID = destinationOccurrenceID
