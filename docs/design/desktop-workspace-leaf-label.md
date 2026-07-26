@@ -84,7 +84,17 @@ Behavior, unified to the most permissive of the current implementations:
 - trim the input; strip trailing `/` and `\` runs
 - split on both `/` and `\` (Windows-style paths keep working where they
   already did, and start working where they did not)
-- return the last non-empty segment, else `''`
+- return the last non-empty segment
+- if there is no named segment but the trimmed input is non-empty, return the
+  trimmed input itself
+- return `''` **only** when the trimmed input is empty
+
+That second-to-last rule is load-bearing, not a nicety. `''` means *there is no
+workspace to name*, and callers translate it into "No workspace". A path of `/`
+is a real workspace that simply has no named segment — collapsing it to `''`
+makes the row read "No workspace" while its own tooltip reads "/", which is a
+surface contradicting itself. Every current implementation already has this
+fallback (`|| trimmed`, `|| normalized`, `|| path`); preserve it.
 
 Callers then read:
 
@@ -133,19 +143,27 @@ Behavior parity is the whole point, so the gate is per-caller copy:
 1. A focused unit test for `workspaceLeafSegment` covering: normal absolute
    path, trailing separator (single and repeated), backslash path, mixed
    separators, root `/`, single segment, empty string, whitespace-only, `null`,
-   `undefined`.
-2. For every caller in the table, assert the rendered label for both a real path
+   `undefined`. Root `/` and an all-separator input must return that input, not
+   `''` — assert this explicitly, and assert that no caller can produce a row
+   whose visible copy says "no workspace" while its tooltip shows a path.
+2. **An existing assertion that contradicts the new implementation is a
+   question, not a chore.** `thread-search-model.test.mjs` already pins
+   `workspacePath: "/"` → `"Gary · /"`. If a change makes that fail, decide
+   which behavior is correct before touching either side; do not edit the
+   assertion to match new output. Say so in the handoff if you conclude the old
+   assertion was wrong.
+3. For every caller in the table, assert the rendered label for both a real path
    and an empty path. The three fixed fallbacks must now come from `t()` — test
    under a zh locale and assert the Chinese string, which is the regression that
    proves the bug is gone.
-3. Guard verification in both directions: revert `workspaceLeafSegment` to
+4. Guard verification in both directions: revert `workspaceLeafSegment` to
    returning the full path and confirm the caller tests fail; revert a fallback
    to its hard-coded English and confirm the locale test fails.
-4. `npx tsc --noEmit`, then the full `npm run test:unit` — and check the **total
+5. `npx tsc --noEmit`, then the full `npm run test:unit` — and check the **total
    test count went up**, not just that failures are zero: a value import missing
    its `.ts` extension makes the whole test file exit 1 under the native runner
    while `tsx --test` on that one file still passes.
-5. `npm run build:ui` and `npm run dist:dir`, then verify in the packaged app
+6. `npm run build:ui` and `npm run dist:dir`, then verify in the packaged app
    that each touched surface still shows the same label it showed before —
    thread search rows, new-thread empty state, workspace picker, automation
    list, composer chip.
