@@ -60,10 +60,27 @@ away. Changing the stack alone would silently shift every spacer by
 (N-1) × delta, and no test would fail. Fix: have the stack consume the same
 constant so the two cannot drift.
 
-## Send-time keyboard dismissal races the optimistic append (unresolved)
+## Send-time keyboard dismissal races the optimistic append (resolved)
 
 Recorded 2026-07-26 after four failed review rounds (#TASK-2721). Not shipped;
 branch `gary/send-flash` abandoned at `1beeaed17`.
+
+Disposition: RESOLVED (2026-07-26) by the sixth attempt, `77520d2d7`. The
+conversation send action now dismisses the keyboard explicitly at
+user-event time through the shared idle-dismissal path before the send
+pipeline can freeze the composer, so the read-only freeze finds no first
+responder left to resign. The framing every earlier attempt shared —
+ordering the append against the dismissal — was wrong: concurrency was
+never the problem (streaming content already grows smoothly through an
+idle dismissal). The defect was that the implicit in-transaction resign
+delivered the keyboard change as a single-frame, unanimated +345pt
+viewport cliff (pre-fix build: 15/15 sends, one-frame `611 -> 956`,
+235.333pt same-row reversal each time), while an event-time resign
+delivers the same change as the ordinary ~24-frame animated transition
+(fixed build: 0/15 reversals, 15/15 dismissals, viewport curve matching
+the idle focus-then-dismiss control; #TASK-2754 frame measurements, both
+send entries). The Chinese-IME variant (260.667pt reversal per send with
+marked text committed by the resign) resolved with it.
 
 Symptom: sending while the keyboard is up and the reader is at the bottom
 intermittently makes the transcript jump backwards and snap back (7/15 on the
@@ -146,4 +163,30 @@ explicit product step with its own settled sequencing.
 Acceptance criteria are already defined and measurable: >=15 sends (return key
 and send button), zero reversals, keyboard dismissed 15/15, and a frame
 sequence whose shape matches the idle "focus the field, do nothing, dismiss"
-control.
+control. Met by `77520d2d7` (#TASK-2754): 0/15 reversals, 15/15 dismissals,
+24-frame animated viewport transitions matching the idle control on every
+send.
+
+## Draft first-send resigns the keyboard before route terminal (pre-existing)
+
+Recorded 2026-07-26 from the #TASK-2754 measurement round. Route promotion
+is designed to retain composer first-responder ownership until the route
+reaches its static endpoint
+(`finalizeInput(preservingFocusUntilRouteTerminal:)`), but the measured
+behavior is that a new-thread draft first send collapses the keyboard
+before promotion completes: 0/3 retained, `resignFirstResponder`
+~520-580ms after the send marker, `UIKeyboardWillHide` ~543-618ms, call
+chain `takeReadyPayload -> grantCurrentConfigurationToLiveAdapter ->
+grantLive -> UITextView.setEditable` — the same
+implicit-resign-as-state-side-effect class of defect the conversation-send
+fix removed, still present on the draft surface.
+
+Behavior is identical on pre-fix main (`6fb69721c`) and on the
+conversation fix (`77520d2d7`): the fix's `.thread` guard deliberately
+leaves the draft path untouched, so this is adjacent pre-existing
+behavior, not a regression of that change. Fix direction, to be scheduled
+as its own item: the draft-send freeze must transfer first-responder
+ownership through the finalize/preserve-focus critical section instead of
+the plain read-only `grantLive` flip. The structural principle is the same
+one the conversation fix established: first-responder ownership must never
+change as a side effect of `isEditable`.

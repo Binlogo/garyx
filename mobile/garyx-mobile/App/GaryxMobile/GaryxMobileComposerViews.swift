@@ -792,9 +792,15 @@ struct GaryxComposer: View {
     /// bottom-anchored following exactly like streaming text already does
     /// during an idle dismissal.
     ///
-    /// Draft sends never dismiss: route promotion deliberately retains
-    /// first-responder ownership until the route reaches its static
-    /// endpoint (`finalizeInput(preservingFocusUntilRouteTerminal:)`).
+    /// Draft sends are excluded on purpose: route promotion owns its own
+    /// focus lifecycle — `finalizeInput(preservingFocusUntilRouteTerminal:)`
+    /// is designed to retain first-responder ownership until the route
+    /// reaches its static endpoint — so the conversation-send dismissal must
+    /// not preempt it. That lifecycle currently has a pre-existing defect of
+    /// its own (the read-only freeze still resigns implicitly before the
+    /// preserve-focus path runs; recorded in
+    /// `docs/design/ios-send-anchor-review-debt.md`), which this guard
+    /// neither causes nor changes.
     private func dismissKeyboardForConversationSend() {
         guard case .thread = routeContext.composerKey else { return }
         isFocused.wrappedValue = false
