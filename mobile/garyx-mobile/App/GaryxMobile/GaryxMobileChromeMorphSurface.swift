@@ -9,6 +9,7 @@ struct GaryxChromeMorphSurface<Content: View>: View {
     let containerSize: CGSize
     let metrics: GaryxChromeMorphSurfaceMetrics
     let onClose: () -> Void
+    let isAccessibilityModal: Bool
     private let content: Content
 
     init(
@@ -17,6 +18,7 @@ struct GaryxChromeMorphSurface<Content: View>: View {
         containerSize: CGSize,
         metrics: GaryxChromeMorphSurfaceMetrics,
         onClose: @escaping () -> Void,
+        isAccessibilityModal: Bool = true,
         @ViewBuilder content: () -> Content
     ) {
         self.isExpanded = isExpanded
@@ -24,6 +26,7 @@ struct GaryxChromeMorphSurface<Content: View>: View {
         self.containerSize = containerSize
         self.metrics = metrics
         self.onClose = onClose
+        self.isAccessibilityModal = isAccessibilityModal
         self.content = content()
     }
 
@@ -75,7 +78,7 @@ struct GaryxChromeMorphSurface<Content: View>: View {
                 y: 10
             )
             .offset(x: layout.outerX, y: layout.outerY)
-            .accessibilityAddTraits(.isModal)
+            .accessibilityAddTraits(isAccessibilityModal ? .isModal : [])
             .accessibilityAction(.escape, onClose)
     }
 }

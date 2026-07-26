@@ -21,6 +21,7 @@ extension GaryxMobileModel {
             return
         }
         runStateByThread[threadId] = state
+        refreshHomeThreadSearchRowsStore()
         if previous.busy != state.busy {
             refreshResidentThreadListStores()
         }

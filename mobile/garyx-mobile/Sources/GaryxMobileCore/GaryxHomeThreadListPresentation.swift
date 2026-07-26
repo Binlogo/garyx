@@ -765,11 +765,12 @@ enum GaryxHomeThreadSectionsBuilder {
         })
     }
 
-    private static func row(
+    static func row(
         thread: GaryxThreadSummary,
         isSelected: Bool,
         isPinned: Bool,
         isFavorite: Bool,
+        isRunning: Bool = false,
         showsDivider: Bool,
         agentsById: [String: GaryxAgentSummary],
         automationThreadIds: Set<String>
@@ -779,19 +780,20 @@ enum GaryxHomeThreadSectionsBuilder {
             for: thread,
             context: GaryxThreadRowCapabilityContext(
                 automationTargetThreadIds: automationThreadIds,
-                hasActiveRun: false
+                hasActiveRun: isRunning
             )
         )
         return GaryxHomeThreadRow(
             id: thread.id,
             thread: thread,
             presentation: GaryxSidebarThreadRowPresentation(
-                thread: thread,
+                title: thread.title.isEmpty ? "Untitled" : thread.title,
+                subtitle: GaryxThreadSubtitlePresentation.subtitle(for: thread),
+                trailingTimestamp: nil,
                 isSelected: isSelected,
                 isPinned: isPinned,
                 isFavorite: isFavorite,
-                trailingTimestamp: nil,
-                showsRunningState: false
+                isRunning: isRunning
             ),
             avatar: GaryxSidebarThreadRowAvatar(
                 agentId: identity.id ?? "",

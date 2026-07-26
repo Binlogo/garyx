@@ -466,25 +466,56 @@ struct GaryxGlassSearchField: View {
     @ScaledMetric(relativeTo: .subheadline) private var verticalPadding: CGFloat = 9
     let placeholder: String
     @Binding var text: String
+    var focus: FocusState<Bool>.Binding?
+    var accessibilityIdentifier: String?
+    var drawsGlassSurface: Bool
 
-    init(_ placeholder: String = "Search", text: Binding<String>) {
+    init(
+        _ placeholder: String = "Search",
+        text: Binding<String>,
+        focus: FocusState<Bool>.Binding? = nil,
+        accessibilityIdentifier: String? = nil,
+        drawsGlassSurface: Bool = true
+    ) {
         self.placeholder = placeholder
         self._text = text
+        self.focus = focus
+        self.accessibilityIdentifier = accessibilityIdentifier
+        self.drawsGlassSurface = drawsGlassSurface
     }
 
+    @ViewBuilder
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: 22, style: .continuous)
 
+        if drawsGlassSurface {
+            content
+                .garyxAdaptiveGlass(
+                    .regular,
+                    isInteractive: true,
+                    tint: Color(.systemBackground).opacity(0.92),
+                    in: shape
+                )
+                .overlay {
+                    shape
+                        .stroke(Color.white.opacity(0.34), lineWidth: 0.7)
+                }
+                .overlay {
+                    shape
+                        .stroke(Color.primary.opacity(0.055), lineWidth: 1)
+                }
+        } else {
+            content
+        }
+    }
+
+    private var content: some View {
         HStack(spacing: 10) {
             Image(systemName: "magnifyingglass")
                 .font(GaryxFont.fixedSystem(size: 15, weight: .medium))
                 .foregroundStyle(.secondary)
 
-            TextField(placeholder, text: $text)
-                .font(GaryxFont.subheadline())
-                .foregroundStyle(.primary)
-                .textInputAutocapitalization(.never)
-                .disableAutocorrection(true)
+            searchTextField
 
             if !text.isEmpty {
                 Button {
@@ -501,19 +532,36 @@ struct GaryxGlassSearchField: View {
         .padding(.horizontal, 14)
         .padding(.vertical, verticalPadding)
         .frame(minHeight: 38)
-        .garyxAdaptiveGlass(
-            .regular,
-            isInteractive: true,
-            tint: Color(.systemBackground).opacity(0.92),
-            in: shape
-        )
-        .overlay {
-            shape
-                .stroke(Color.white.opacity(0.34), lineWidth: 0.7)
+    }
+
+    @ViewBuilder
+    private var searchTextField: some View {
+        if let focus {
+            identifiedTextField(
+                TextField(placeholder, text: $text)
+                    .font(GaryxFont.subheadline())
+                    .foregroundStyle(.primary)
+                    .textInputAutocapitalization(.never)
+                    .disableAutocorrection(true)
+                    .focused(focus)
+            )
+        } else {
+            identifiedTextField(
+                TextField(placeholder, text: $text)
+                    .font(GaryxFont.subheadline())
+                    .foregroundStyle(.primary)
+                    .textInputAutocapitalization(.never)
+                    .disableAutocorrection(true)
+            )
         }
-        .overlay {
-            shape
-                .stroke(Color.primary.opacity(0.055), lineWidth: 1)
+    }
+
+    @ViewBuilder
+    private func identifiedTextField<Content: View>(_ content: Content) -> some View {
+        if let accessibilityIdentifier {
+            content.accessibilityIdentifier(accessibilityIdentifier)
+        } else {
+            content
         }
     }
 }
