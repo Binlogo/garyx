@@ -8,6 +8,8 @@ import type {
   ThreadWorktreeInfo,
 } from '@shared/contracts';
 
+import { workspaceLeafSegment } from './app-shell/workspace-helpers.ts';
+
 export interface WorkspaceThreadGroup {
   workspace: DesktopWorkspace;
   threads: DesktopThreadSummary[];
@@ -175,29 +177,25 @@ export function workspaceForThread(
   return selectedWorkspace(state, thread.workspacePath || null);
 }
 
-function workspaceNameFromPath(path: string): string {
-  const trimmed = path.trim().replace(/[\\/]+$/, '');
-  if (!trimmed) {
-    return 'Workspace';
-  }
-  const segments = trimmed.split(/[\\/]/).filter(Boolean);
-  return segments[segments.length - 1] || trimmed;
-}
-
 export function workspaceSuggestionFromPath(
-  path?: string | null,
+  path: string | null | undefined,
+  fallbackName: string,
   timestamps?: { createdAt?: string | null; updatedAt?: string | null },
 ): DesktopWorkspace | null {
   const workspacePath = path?.trim() || '';
   if (!workspacePath) {
     return null;
   }
+  const workspaceName = workspaceLeafSegment(workspacePath);
+  // Label surfaces preserve separator-only roots such as "/"; this name field
+  // keeps its translated fallback because those paths have no named segment.
+  const hasNamedSegment = /[^\\/]/.test(workspaceName);
   const createdAt =
     timestamps?.createdAt?.trim() ||
     timestamps?.updatedAt?.trim() ||
     '1970-01-01T00:00:00.000Z';
   return {
-    name: workspaceNameFromPath(workspacePath),
+    name: hasNamedSegment ? workspaceName : fallbackName,
     path: workspacePath,
     kind: 'local',
     createdAt,

@@ -2,13 +2,18 @@ import type { DesktopWorkspace, DesktopWorkspaceFileEntry } from '@shared/contra
 
 import type { WorkspaceDirectoryState } from './types';
 
-export function compactPathLabel(path?: string | null): string {
+/**
+ * The workspace's last path segment, or the trimmed input when it has no named
+ * segment. Returns '' only for empty input and never returns user-facing copy —
+ * callers own their own fallback string so it can go through t().
+ */
+export function workspaceLeafSegment(path?: string | null): string {
   const trimmed = path?.trim() || '';
   if (!trimmed) {
-    return 'Workspace unavailable';
+    return '';
   }
-
-  const segments = trimmed.split(/[\\/]/).filter(Boolean);
+  const normalized = trimmed.replace(/[\\/]+$/, '');
+  const segments = normalized.split(/[\\/]/).filter(Boolean);
   return segments[segments.length - 1] || trimmed;
 }
 

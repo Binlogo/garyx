@@ -14,6 +14,7 @@ import type {
   DesktopState,
 } from '@shared/contracts';
 
+import { workspaceLeafSegment } from '../app-shell/workspace-helpers.ts';
 import { useI18n, type Translate } from '@/i18n';
 import { selectedWorkspace } from '@/thread-model';
 
@@ -33,21 +34,14 @@ function formatTimestamp(value?: string | null): string {
   ).format(date);
 }
 
-function compactPathLabel(path?: string | null): string {
-  const trimmed = path?.trim() || '';
-  if (!trimmed) return '';
-  const segments = trimmed.split(/[\\/]/).filter(Boolean);
-  return segments[segments.length - 1] || trimmed;
-}
-
-function getWorkspaceLabel(
+export function getWorkspaceLabel(
   state: DesktopState | null,
   automation: DesktopAutomationSummary,
   t: Translate,
 ): string {
   return (
     selectedWorkspace(state, automation.workspacePath)?.name
-    || compactPathLabel(automation.workspacePath)
+    || workspaceLeafSegment(automation.workspacePath)
     || t('Workspace not set')
   );
 }
