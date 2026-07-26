@@ -100,6 +100,10 @@
   `GaryxMobileRenderStateMapper` as a dumb mapper from snapshot refs to local
   message bodies; do not re-add Swift user-turn grouping, tool pairing, or
   tail-thinking derivation.
+- Provider account selection rows exist for Claude Code and Codex; both reuse
+  the same current-account row, account sheet, and detail-page structure. The
+  Codex login sheet is a device-code display (URL + one-time code + status
+  polling) with no paste-back step.
 - Mobile chat, transcript, automation, widget, and workspace/bot visual details
   live in the `garyx-product-ui` skill. Use that skill for non-trivial mobile UI
   implementation or review.

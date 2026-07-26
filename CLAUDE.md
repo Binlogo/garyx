@@ -152,7 +152,7 @@ Detailed data and runtime contracts: @docs/agents/repository-contracts.md and
 - Mobile route state, presentation mapping, formatting, and business-rule
   transformations should live in `GaryxMobileCore` with SwiftPM tests.
 - Mobile Provider overviews use one expanded identity, quota, and defaults
-  composition for every built-in provider. Claude Code alone inserts the
+  composition for every built-in provider. Claude Code and Codex insert the
   account-selection row; providers without metered usage keep the shared quota
   row and show `No quota data` instead of falling back to a compressed style.
 - Mobile conversation pushes must present complete, production-identical
@@ -215,6 +215,17 @@ Detailed UI rules: @docs/agents/mobile-ui.md and @docs/agents/desktop-ui.md.
 - Claude Code account selection is provider-owned runtime state. Do not persist
   `CLAUDE_CONFIG_DIR` in thread or agent metadata; snapshot the provider's
   selected environment only when a new top-level run starts.
+- Codex account selection follows the same provider-owned contract with
+  `CODEX_HOME`: never persisted in thread or agent metadata, applied to idle
+  app-server slots only (a busy slot keeps its startup env). Managed Codex
+  homes are real `CODEX_HOME` directories whose credentials are written only
+  by the Codex CLI — Garyx never writes, copies, or refreshes Codex
+  credentials — while `config.toml`, `skills`, `sessions`, and peers are
+  symlinks into the user's system Codex home so every account shares one
+  configuration and one rollout store. A managed selection strips the
+  `OPENAI_API_KEY`/`CODEX_API_KEY`/`CODEX_ACCESS_TOKEN` overrides from the
+  Codex process env; System default leaves them untouched. See
+  `docs/design/codex-multi-account-profiles.md`.
 - Claude Code managed accounts share native session continuity through the
   local SessionStore rooted at `~/.claude/projects`. A resumed run must load
   and reconcile main/subagent copies before spawning: parsed-equal copies are
