@@ -41,6 +41,12 @@
   --menu-trigger-radius: var(--radius-md);
   --menu-trigger-color: var(--color-token-description-foreground);
   --menu-trigger-hover-bg: var(--color-token-row-hover);
+  --palette-surface-radius: 20px;
+  --palette-surface-shadow: 0 16px 32px -8px rgba(0, 0, 0, 0.19);
+  --palette-surface-padding: 4px;
+  --palette-row-font-size: var(--text-md);
+  --palette-row-line-height: 21px;
+  --palette-row-idle-opacity: 0.75;
 }
 
 @layer components {

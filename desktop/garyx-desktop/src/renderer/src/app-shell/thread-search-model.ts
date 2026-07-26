@@ -124,25 +124,40 @@ export type ThreadSearchResultsFooterKind = Extract<
 >;
 
 export type ThreadSearchPresentation =
-  | { kind: "prompt"; query: ""; footerKind: "hidden"; canLoadMore: false }
+  | {
+      kind: "prompt";
+      query: "";
+      footerKind: "hidden";
+      canLoadMore: false;
+      renderBody: false;
+    }
   | {
       kind: "loading";
       query: string;
       footerKind: "initialLoading";
       canLoadMore: false;
+      renderBody: true;
     }
   | {
       kind: "results";
       query: string;
       footerKind: ThreadSearchResultsFooterKind;
       canLoadMore: boolean;
+      renderBody: true;
     }
-  | { kind: "empty"; query: string; footerKind: "hidden"; canLoadMore: false }
+  | {
+      kind: "empty";
+      query: string;
+      footerKind: "hidden";
+      canLoadMore: false;
+      renderBody: true;
+    }
   | {
       kind: "failed";
       query: string;
       footerKind: "initialFailure";
       canLoadMore: false;
+      renderBody: true;
     };
 
 export interface ThreadSearchModelDependencies {
@@ -530,6 +545,7 @@ export function createThreadSearchModel(
         query: "",
         footerKind: "hidden",
         canLoadMore: false,
+        renderBody: false,
       };
     }
     if (
@@ -542,6 +558,7 @@ export function createThreadSearchModel(
         query: state.query,
         footerKind: "initialLoading",
         canLoadMore: false,
+        renderBody: true,
       };
     }
     if (state.headStatus === "failed") {
@@ -550,6 +567,7 @@ export function createThreadSearchModel(
         query: state.query,
         footerKind: "initialFailure",
         canLoadMore: false,
+        renderBody: true,
       };
     }
     if (state.rows.length === 0) {
@@ -558,6 +576,7 @@ export function createThreadSearchModel(
         query: state.query,
         footerKind: "hidden",
         canLoadMore: false,
+        renderBody: true,
       };
     }
     const footerKind: ThreadSearchResultsFooterKind = state.isLoadingMore
@@ -575,6 +594,7 @@ export function createThreadSearchModel(
         state.nextCursor !== null &&
         !state.isLoadingMore &&
         state.loadMoreFailure === null,
+      renderBody: true,
     };
   }
 

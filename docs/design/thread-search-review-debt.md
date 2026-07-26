@@ -166,6 +166,43 @@ dismissals to the thread-search test.
   wrapping the shared dialog primitive (`onEscapeKeyDown` + composition state),
   which is an app-wide change and outside thread search.
 
+### M-4 — `⌘1…⌘9` quick-pick shortcuts on the first nine rows
+
+- Source: `docs/design/desktop-thread-search-command-palette.md:352-354`, which
+  routes the item here rather than into the palette change; commit `bdba15b0a`
+  implemented the palette but did not add this record, so review adds it.
+- Codex's global command menu labels the first nine rows with `⌘1…⌘9` and opens
+  them on that chord. Garyx's palette has the trailing cluster space for the
+  label but no shortcut column and no handler. Adding it is new behaviour, not
+  visual parity, so it stays out of the palette task and needs its own.
+
+### M-5 — Result meta truncates away the workspace tail
+
+- Source: `desktop/garyx-desktop/src/renderer/src/styles/dialogs.css:750-760`
+  (`.thread-search-result-meta { max-width: 180px; text-overflow: ellipsis }`)
+  and `app-shell/components/ThreadSearchDialog.tsx:121-126`.
+- This is what the palette design specifies, so it is not an implementation
+  deviation — it is a limitation of the design worth its own decision. Measured
+  in the packaged app at `1480×940`, all 30 rows of a `TASK` query clipped to
+  the shape `Codex · /Users/test/r…`: the agent name survives and the workspace
+  segment, which is the reason the path is shown at all, never becomes legible.
+- Candidate fixes for the follow-up: elide from the head (`…/repos/garyx`),
+  strip the `$HOME` prefix, or show only the workspace basename.
+
+### M-6 — Palette style contract scans only `styles/*.css`
+
+- Source:
+  `desktop/garyx-desktop/src/renderer/src/thread-search-palette-design.test.mjs:48`
+  and `:115` (`readdirSync(stylesDir)`).
+- The guard enumerates `src/renderer/src/styles/*.css` only, so a `--palette-*`
+  redeclaration or a `.thread-search-*` rule added to `src/renderer/src/styles.css`
+  or `src/renderer/src/storybook/storybook.css` would not trip the ownership or
+  recipe assertions. Both files are clean today (verified during review), and
+  the guard has teeth for everything it does cover (five mutations — token value
+  drift, duplicate owner, dropped declaration, forbidden property, escaped
+  selector — each failed exactly one test). Widening the scan to every renderer
+  stylesheet is a small follow-up.
+
 ## Explicitly still out of scope (do not re-open)
 
 Per §7 and D4 of the design, and confirmed unchanged by review:
