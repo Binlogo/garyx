@@ -29,11 +29,14 @@ struct GaryxHomeThreadSearchButton: View {
                 .font(GaryxFont.fixedSystem(size: 16, weight: .semibold))
                 .foregroundStyle(.primary)
                 .frame(width: 44, height: 44)
+                // Keep the source's glass recipe stable while the mounted
+                // button publishes the morph anchor. Switching this node to
+                // `.identity` still contributes its Circle to the enclosing
+                // GlassEffectContainer's shared pass on iOS 26.5.
                 .garyxAdaptiveGlass(
                     .regular,
                     isInteractive: true,
-                    in: Circle(),
-                    isEnabled: !isHidden
+                    in: Circle()
                 )
                 .contentShape(Circle())
         }

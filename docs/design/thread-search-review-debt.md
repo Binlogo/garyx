@@ -58,16 +58,14 @@ Both reach the same result, so this is not a behaviour bug. It is two ways to
 express one rule, and every new thread-list surface has to pick one. Worth
 collapsing to a single overlay helper.
 
-### I-2 — `GaryxGlassSearchField` has no automated coverage
+### I-2 — Resolved: `GaryxGlassSearchField` automated coverage
 
 `mobile/garyx-mobile/App/GaryxMobile/GaryxMobileStatusComponents.swift:465`.
 
-The component now carries two rendering modes (`drawsGlassSurface`) and two
-focus modes (optional `FocusState` binding). Its other consumer, the automation
-thread picker (`GaryxMobileAutomationViews.swift`), is covered only by manual QA,
-so a future change to the shared field can regress the picker silently. Either
-add a focused UITest for the picker's search field or give the component a
-snapshot/behaviour test.
+Resolved in the iOS empty-search glass follow-up: the Home chrome UITest covers
+the embedded, externally focused rendering mode, and the automation thread
+picker UITest now covers the component's own glass surface through the empty,
+non-empty, and cleared query states.
 
 ### I-3 — `prefetchTriggerRowId(recentIds:)` no longer only serves recency
 

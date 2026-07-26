@@ -70,6 +70,10 @@ final class HomeChromeInteractionTests: XCTestCase {
             app.staticTexts["Search threads by name"].waitForExistence(timeout: 5),
             "an empty query must show the prompt state"
         )
+        XCTAssertFalse(
+            app.buttons["Clear search"].exists,
+            "an empty search field must not expose a clear control"
+        )
 
         let attachment = XCTAttachment(screenshot: app.screenshot())
         attachment.name = "Home thread search expanded"

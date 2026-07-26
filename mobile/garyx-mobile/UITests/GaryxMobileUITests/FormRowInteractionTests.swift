@@ -114,27 +114,8 @@ final class FormRowInteractionTests: XCTestCase {
     /// the row focused after a long press but renders none of these actions.
     func testThreadPickerLongPressPresentsActionsAndScrimDismissesMenu() throws {
         let app = launchCreateAutomationForm()
+        openThreadPicker(in: app)
 
-        let existingThread = app.buttons["Existing Thread"]
-        XCTAssertTrue(
-            existingThread.waitForExistence(timeout: 10),
-            "Existing Thread target segment"
-        )
-        existingThread.tap()
-
-        let threadSelection = app.buttons
-            .matching(NSPredicate(format: "value == %@", "Thread History"))
-            .firstMatch
-        XCTAssertTrue(
-            threadSelection.waitForExistence(timeout: 10),
-            "Existing-thread mode should expose the selected thread row"
-        )
-        threadSelection.tap()
-
-        XCTAssertTrue(
-            app.staticTexts["Choose thread"].waitForExistence(timeout: 10),
-            "Thread picker sheet should present"
-        )
         let matchingRows = app.staticTexts.matching(identifier: "Thread History")
         let threadRow = matchingRows.allElementsBoundByIndex.first(where: \.isHittable)
             ?? matchingRows.firstMatch
@@ -156,6 +137,69 @@ final class FormRowInteractionTests: XCTestCase {
             "Scrim dismissal should keep the picker open"
         )
         XCTAssertTrue(threadRow.exists, "Scrim dismissal should clear focus without removing the row")
+    }
+
+    func testThreadPickerSearchClearActionTracksText() throws {
+        let app = launchCreateAutomationForm()
+        openThreadPicker(in: app)
+
+        let searchField = app.textFields["Search threads"]
+        XCTAssertTrue(searchField.waitForExistence(timeout: 10), "Thread picker search field")
+        let clearSearch = app.buttons["Clear search"]
+        XCTAssertFalse(
+            clearSearch.exists,
+            "the picker must not draw or expose a clear control while its query is empty"
+        )
+
+        let emptyAttachment = XCTAttachment(screenshot: app.screenshot())
+        emptyAttachment.name = "Automation thread picker empty search"
+        emptyAttachment.lifetime = .keepAlways
+        add(emptyAttachment)
+
+        searchField.tap()
+        searchField.typeText("Thread")
+        XCTAssertTrue(
+            clearSearch.waitForExistence(timeout: 5),
+            "the shared search field must expose its clear action for non-empty text"
+        )
+        clearSearch.tap()
+        XCTAssertTrue(
+            clearSearch.waitForNonExistence(timeout: 5),
+            "clearing the picker query must remove the clear action again"
+        )
+    }
+
+    private func openThreadPicker(
+        in app: XCUIApplication,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        let existingThread = app.buttons["Existing Thread"]
+        XCTAssertTrue(
+            existingThread.waitForExistence(timeout: 10),
+            "Existing Thread target segment",
+            file: file,
+            line: line
+        )
+        existingThread.tap()
+
+        let threadSelection = app.buttons
+            .matching(NSPredicate(format: "value == %@", "Thread History"))
+            .firstMatch
+        XCTAssertTrue(
+            threadSelection.waitForExistence(timeout: 10),
+            "Existing-thread mode should expose the selected thread row",
+            file: file,
+            line: line
+        )
+        threadSelection.tap()
+
+        XCTAssertTrue(
+            app.staticTexts["Choose thread"].waitForExistence(timeout: 10),
+            "Thread picker sheet should present",
+            file: file,
+            line: line
+        )
     }
 
     // MARK: - Helpers
