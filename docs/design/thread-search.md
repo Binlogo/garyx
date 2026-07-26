@@ -150,50 +150,78 @@ each platform (see §6), not inline in view code.
 
 ## 4. Mac app
 
-**Placement:** a persistent search field pinned at the very top of the global
-left sidebar (`AppLeftRail.tsx`), above the primary nav group, below the update
-slot. The sidebar is the app's thread list; search belongs at its head. It is
-always visible — no hidden hotkey-only affordance.
+> Revised 2026-07-26 after the first implementation was rejected. The original
+> design put a persistent field at the top of the sidebar and swapped the
+> sidebar body in place for results, reusing `ThreadRailList`. That is not the
+> intended interaction and is superseded entirely by this section. Nothing
+> about search should live in the sidebar body, and search results must not
+> reuse the sidebar list.
+
+**Shape:** a centered modal search palette over the whole app window —
+Spotlight / command-palette form. Opening it dims the app behind it; the panel
+owns both the input and its results.
+
+**Entry points:**
+
+- A search affordance in the left rail's primary nav group (same row vocabulary
+  as `New Thread` / `Automation` / `Tasks`), which opens the palette. The rail
+  keeps no input field and no search mode of its own.
+- `⌘K` opens the palette from anywhere in the app. Nothing global claims `⌘K`
+  today. `Esc` closes it.
+
+**Palette layout (top to bottom, inside one centered panel):**
+
+- A single large search input at the top of the panel, focused on open, with the
+  placeholder naming what is searched (thread names).
+- Directly below it, the panel's **own** result list — a result-row component
+  built for this panel. Do **not** reuse `ThreadRailList`, `ThreadRailRow`, or
+  `threadRailRowsFrom`; the sidebar's row is a rail row with rail affordances
+  (inline archive, active-row rail highlight) that do not belong in a search
+  result. A result row shows the thread name as the primary line plus enough
+  secondary context to disambiguate two similarly named threads (agent/provider
+  identity via the shared avatar component, workspace, last activity time).
+- The panel is sized for reading a list — a comfortable fixed max width, a
+  height that holds roughly eight to ten rows before the list scrolls internally,
+  and it never resizes as results arrive (no layout jump between states).
 
 **Behavior:**
 
-- Typing enters search mode: everything below the field (pinned region, the
-  Threads/Projects segmented control, and both tab panels) is replaced in-flow by
-  the results list. It is a mode of the sidebar, not an overlay or popover.
-- Rows are rendered by the existing `ThreadRailList` via the existing
-  `threadRailRowsFrom` mapper, so avatars, active-row highlight, busy state,
-  timestamps, and the inline archive affordance are identical to the normal list.
-  Result rows keep their row actions.
-- `⌘F` focuses the field (new hotkey; nothing global exists today, and `⌘F`/`⌘K`
-  are unclaimed). `Esc` inside the field clears the query and exits search mode.
-  Clearing the field by any means exits search mode.
-- Footer states reuse the existing `recent-feed-footer` vocabulary (skeleton /
-  loading more / failed + retry).
+- Empty input: prompt state inside the panel. No request.
+- Typing: 250 ms debounce, then server search; the list area shows loading,
+  results, empty, or failed per D5. The panel's frame does not move between
+  those states.
+- `↑` / `↓` move the highlighted row, `Enter` opens the highlighted thread,
+  `Esc` closes. The highlighted row must scroll itself into view
+  (`scrollIntoView({ block: 'nearest' })`), matching the existing slash-command
+  list behavior in `ComposerForm.tsx:825-830`.
+- Clicking a row opens that thread and closes the palette.
+- Scrolling near the end of the result list pages with the returned cursor.
+- Closing the palette discards the query; reopening starts clean.
 - Empty result copy: `No threads named "{query}"`.
 
 **Constraints:**
 
-- Sidebar minimum width is 245px — the field must be usable there.
-- All user-visible strings go through `t(...)` with `zhCN` entries; the repo's
-  i18n literal scanner will fail the build otherwise. Reuse existing keys where
-  they fit (`Search...`, `No matches`).
+- All user-visible strings go through `t(...)` with `zhCN` entries.
 - Do not add a focus ring — `*:focus { outline: none }` is a deliberate project
   decision.
-- Reuse existing search-field styling tokens (`.workspace-picker-search` menu
-  style or `.agents-hub-search` pill style); do not introduce new colors.
-- `recent-filter-source-contract.test.mjs` asserts that
-  `SidebarRecentThreadList.tsx` does not mention `favorites` / `selectedFilter` /
-  `onSelectFilter` / `RecentFilterTabs` / `role="tablist"`. Keep the search
-  component out of that file.
+- Build the panel from existing UI primitives (`components/ui/dialog`,
+  `components/ui/input`) and existing design tokens; do not introduce new colors
+  or a bespoke modal implementation.
+- The palette is a modal layer over the app. It must not alter sidebar layout,
+  sidebar state, or the responsive collapse behavior in any way.
+- Revert the sidebar-side changes from the first implementation:
+  `SidebarThreadSearch.tsx` and the search mode wired into `AppLeftRail.tsx` are
+  removed, and `recent-filter-source-contract.test.mjs` goes back to asserting
+  three `threadRailRowsFrom(` call sites.
 
-**Plumbing:** renderer never speaks HTTP. Add
+**Plumbing (already built, keep it):** renderer never speaks HTTP. The
 `garyx:list-thread-summaries` IPC → preload bridge → main
-`fetchThreadSummaries(settings, input)` in `src/main/garyx-client/threads.ts`,
-built exactly like `fetchRecentThreads` (`URLSearchParams`, `requestJson(...,
-"readRetryable", { signal: AbortSignal.timeout(REMOTE_STATE_FETCH_TIMEOUT_MS) })`,
-strict `requireContract*` field validation), including the same
-`assertRecentThreadGatewayScope`-style gateway-scope guard so a gateway switch
-cannot deliver results into the wrong scope.
+`fetchThreadSummaries(settings, input)` chain in
+`src/main/garyx-client/threads.ts` is correct and stays as-is, including its
+gateway-scope guard. The pure state machine in
+`app-shell/thread-search-model.ts` also stays; only its presentation host
+changes from a sidebar mode to the palette.
+
 
 ## 5. iOS app
 
