@@ -567,26 +567,44 @@ struct GaryxGlassSearchField: View {
 }
 
 struct GaryxSidebarMenuButton: View {
+    let isHidden: Bool
     let action: () -> Void
+
+    init(isHidden: Bool = false, action: @escaping () -> Void) {
+        self.isHidden = isHidden
+        self.action = action
+    }
 
     var body: some View {
         Button(action: action) {
-            GaryxHeaderMenuIcon()
+            GaryxHeaderMenuIcon(isHidden: isHidden)
                 .frame(width: 48, height: 48)
                 .contentShape(Rectangle())
         }
         .buttonStyle(GaryxPressableRowStyle(prepares: .drawerVisibilityCommitted))
+        .allowsHitTesting(!isHidden)
         .accessibilityLabel("Open menu")
+        .accessibilityHidden(isHidden)
     }
 }
 
 struct GaryxHeaderMenuIcon: View {
+    let isHidden: Bool
+
     var body: some View {
         Image(systemName: "line.3.horizontal")
             .font(GaryxFont.fixedSystem(size: 17, weight: .semibold))
             .foregroundStyle(.primary)
             .frame(width: 44, height: 44)
-            .garyxAdaptiveGlass(.regular, isInteractive: true, in: Circle())
+            // Resolve visibility before GlassEffectContainer captures this
+            // node into its shared pass.
+            .opacity(isHidden ? 0 : 1)
+            .garyxAdaptiveGlass(
+                .regular,
+                isInteractive: true,
+                in: Circle(),
+                isEnabled: !isHidden
+            )
             .contentShape(Rectangle())
     }
 }

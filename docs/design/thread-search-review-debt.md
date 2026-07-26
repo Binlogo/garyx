@@ -58,16 +58,14 @@ Both reach the same result, so this is not a behaviour bug. It is two ways to
 express one rule, and every new thread-list surface has to pick one. Worth
 collapsing to a single overlay helper.
 
-### I-2 — `GaryxGlassSearchField` has no automated coverage
+### I-2 — Resolved: `GaryxGlassSearchField` automated coverage
 
 `mobile/garyx-mobile/App/GaryxMobile/GaryxMobileStatusComponents.swift:465`.
 
-The component now carries two rendering modes (`drawsGlassSurface`) and two
-focus modes (optional `FocusState` binding). Its other consumer, the automation
-thread picker (`GaryxMobileAutomationViews.swift`), is covered only by manual QA,
-so a future change to the shared field can regress the picker silently. Either
-add a focused UITest for the picker's search field or give the component a
-snapshot/behaviour test.
+Resolved in the iOS empty-search glass follow-up: the Home chrome UITest covers
+the embedded, externally focused rendering mode, and the automation thread
+picker UITest now covers the component's own glass surface through the empty,
+non-empty, and cleared query states.
 
 ### I-3 — `prefetchTriggerRowId(recentIds:)` no longer only serves recency
 
@@ -79,12 +77,50 @@ next touched.
 
 ### I-4 — Home list divider still reads deprecated `UIScreen.main`
 
-`mobile/garyx-mobile/App/GaryxMobile/GaryxMobileSidebarViews.swift:1222`.
+`mobile/garyx-mobile/App/GaryxMobile/GaryxMobileSidebarViews.swift:1220`.
 
 The existing divider computes one physical pixel with `UIScreen.main.scale`,
 which is deprecated on iOS 26 in favor of the screen or trait collection from
 the active view context. The focused thread-search build reproduces this
 warning, but changing the shared Home row rendering is outside this feature.
+
+### I-5 — Other mounted morph sources may leak through the shared glass pass
+
+- `mobile/garyx-mobile/App/GaryxMobile/GaryxCapsuleChromePanel.swift:53-70`
+- `mobile/garyx-mobile/App/GaryxMobile/GaryxMobileConversationViews.swift:1560-1584`
+
+Both pre-existing morph sources keep their compact button mounted, switch its
+glass to `.identity` with `isEnabled: !isHidden`, and then hide the Button with
+an ancestor opacity. The Home search residue proved that an enclosing
+`GlassEffectContainer` can render a glass node outside that ancestor opacity on
+iOS 26.5. These two surfaces need their own visual reproduction and pixel
+coverage before changing them; they are outside the Home search fix.
+
+### I-6 — `garyxAdaptiveGlass(isEnabled:)` combines two visibility contracts
+
+`mobile/garyx-mobile/App/GaryxMobile/GaryxMobileDesignSystem.swift:330-369`.
+
+On the Liquid Glass path, disabling the modifier selects `Glass.identity`; on
+the Reduce Transparency path, it also removes the opaque
+`secondarySystemBackground` fallback entirely. Those are separate concerns.
+Changing or omitting `isEnabled` for a morph source can therefore alter the
+accessibility fallback even when the glass-path intent is only to control
+shared-pass participation. Split the contracts in a dedicated design-system
+task rather than broadening the Home search fix.
+
+### I-7 — Home UI-test fixtures inherit simulator container state
+
+- `mobile/garyx-mobile/UITests/GaryxMobileUITests/HomeChromeInteractionTests.swift:291-300`
+- `mobile/garyx-mobile/App/GaryxMobile/GaryxMobileModel.swift:662-697`
+
+`GARYX_MOBILE_DEBUG_SNAPSHOT` supplies deterministic presentation data, but the
+app still opens its persisted gateway-scoped state before applying that
+snapshot, and a fresh app container can present the system notification prompt.
+Both dirty and newly reset simulator containers can therefore block an
+otherwise deterministic Home interaction test before its first assertion.
+Give UI tests an isolated launch contract that resets scoped state and settles
+first-launch permissions in a dedicated harness task; do not add one-off
+dismissals to the thread-search test.
 
 ## Desktop
 

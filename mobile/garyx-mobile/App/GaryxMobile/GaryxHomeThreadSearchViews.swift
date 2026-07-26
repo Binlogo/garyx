@@ -29,6 +29,11 @@ struct GaryxHomeThreadSearchButton: View {
                 .font(GaryxFont.fixedSystem(size: 16, weight: .semibold))
                 .foregroundStyle(.primary)
                 .frame(width: 44, height: 44)
+                // GlassEffectContainer renders this node in its shared pass,
+                // so content visibility must be resolved before capture.
+                // `isEnabled` separately suppresses the opaque fallback when
+                // Reduce Transparency removes the glass container.
+                .opacity(isHidden ? 0 : 1)
                 .garyxAdaptiveGlass(
                     .regular,
                     isInteractive: true,
@@ -38,7 +43,6 @@ struct GaryxHomeThreadSearchButton: View {
                 .contentShape(Circle())
         }
         .buttonStyle(GaryxPressableRowStyle())
-        .opacity(isHidden ? 0 : 1)
         .allowsHitTesting(!isHidden)
         .accessibilityLabel("Search threads")
         .accessibilityIdentifier("home-thread-search-button")
