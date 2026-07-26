@@ -130,14 +130,13 @@ test("one feed serves both recent surfaces and either consumer keeps it alive", 
   const hookOwner = appShell.indexOf("const recentThreadFeeds = useRecentThreadFeeds");
   const rowMapper = appShell.indexOf("function threadRailRowsFrom(");
   assert.ok(rowMapper > hookOwner);
-  // One hook and one row mapper behind both recent surfaces. Thread search
-  // also reuses that mapper without becoming a second recent feed.
+  // One hook, one row mapper, one presentation model behind both surfaces.
   assert.equal(
     appShell.match(/useRecentThreadFeeds\(\{/g)?.length,
     1,
     "a second feed hook would give the surfaces divergent data",
   );
-  assert.equal(appShell.match(/threadRailRowsFrom\(/g)?.length, 4);
+  assert.equal(appShell.match(/threadRailRowsFrom\(/g)?.length, 3);
   assert.match(sidebarRecentList, /recentConversationPresentation/);
   // Collapse must not gate the feed: expanding L1 shows data immediately.
   assert.doesNotMatch(appShell, /enabled:[^\n]*sidebarCollapsed/);

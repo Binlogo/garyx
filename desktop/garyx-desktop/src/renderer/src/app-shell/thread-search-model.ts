@@ -7,6 +7,48 @@ import type { RecentFeedFooterKind } from "../recent-conversation-sidebar-model"
 export const THREAD_SEARCH_DEBOUNCE_MS = 250;
 export const THREAD_SEARCH_PAGE_LIMIT = 30;
 
+export type ThreadSearchHighlightDirection = "next" | "previous";
+
+export function threadSearchHighlightForRows(
+  current: number,
+  rowCount: number,
+): number {
+  const count = Math.max(0, Math.trunc(rowCount));
+  if (count === 0) {
+    return -1;
+  }
+  return current >= 0 && current < count ? current : 0;
+}
+
+export function moveThreadSearchHighlight(
+  current: number,
+  rowCount: number,
+  direction: ThreadSearchHighlightDirection,
+): number {
+  const count = Math.max(0, Math.trunc(rowCount));
+  if (count === 0) {
+    return -1;
+  }
+  if (direction === "previous") {
+    return current <= 0 || current >= count ? count - 1 : current - 1;
+  }
+  return current < 0 || current >= count - 1 ? 0 : current + 1;
+}
+
+export function threadSearchHighlightedItem<T>(
+  rows: readonly T[],
+  highlightedIndex: number,
+): T | null {
+  if (
+    !Number.isInteger(highlightedIndex) ||
+    highlightedIndex < 0 ||
+    highlightedIndex >= rows.length
+  ) {
+    return null;
+  }
+  return rows[highlightedIndex] ?? null;
+}
+
 export type ThreadSearchHeadStatus =
   | "idle"
   | "debouncing"
@@ -102,13 +144,6 @@ export type ThreadSearchPresentation =
       footerKind: "initialFailure";
       canLoadMore: false;
     };
-
-export interface ThreadSearchRemovalRollback {
-  gatewayScope: string;
-  generation: number;
-  index: number;
-  row: DesktopThreadSummary | null;
-}
 
 export interface ThreadSearchModelDependencies {
   normalizeQuery: (value: string) => string;
@@ -219,12 +254,6 @@ export function createThreadSearchModel(
 
   function engage(state: ThreadSearchState): ThreadSearchState {
     return state.engaged ? state : { ...state, engaged: true };
-  }
-
-  function disengageEmpty(state: ThreadSearchState): ThreadSearchState {
-    return state.rawQuery.length === 0 && state.engaged
-      ? { ...state, engaged: false }
-      : state;
   }
 
   function setQuery(
@@ -549,53 +578,11 @@ export function createThreadSearchModel(
     };
   }
 
-  function removeThread(
-    state: ThreadSearchState,
-    threadId: string,
-  ): { state: ThreadSearchState; rollback: ThreadSearchRemovalRollback } {
-    const index = state.rows.findIndex((row) => row.id === threadId);
-    const row = index >= 0 ? state.rows[index] : null;
-    return {
-      state:
-        index >= 0
-          ? {
-              ...state,
-              rows: state.rows.filter((_, rowIndex) => rowIndex !== index),
-            }
-          : state,
-      rollback: {
-        gatewayScope: state.gatewayScope,
-        generation: state.generation,
-        index,
-        row,
-      },
-    };
-  }
-
-  function rollbackRemoval(
-    state: ThreadSearchState,
-    rollback: ThreadSearchRemovalRollback,
-  ): ThreadSearchState {
-    if (
-      !rollback.row ||
-      rollback.index < 0 ||
-      rollback.gatewayScope !== state.gatewayScope ||
-      rollback.generation !== state.generation ||
-      state.rows.some((row) => row.id === rollback.row?.id)
-    ) {
-      return state;
-    }
-    const rows = [...state.rows];
-    rows.splice(Math.min(rollback.index, rows.length), 0, rollback.row);
-    return { ...state, rows };
-  }
-
   return {
     debounceMs: dependencies.debounceMs,
     pageLimit: dependencies.pageLimit,
     createState,
     engage,
-    disengageEmpty,
     setQuery,
     clear,
     resetScope,
@@ -606,8 +593,6 @@ export function createThreadSearchModel(
     completeRequest,
     presentation,
     mergeRows,
-    removeThread,
-    rollbackRemoval,
   };
 }
 

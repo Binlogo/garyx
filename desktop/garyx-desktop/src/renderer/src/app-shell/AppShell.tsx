@@ -73,10 +73,6 @@ import {
 import { BotConversationSidebar } from "../BotConversationSidebar";
 import { RecentConversationSidebar } from "../RecentConversationSidebar";
 import { SidebarRecentThreadList } from "../SidebarRecentThreadList";
-import {
-  SidebarThreadSearchField,
-  SidebarThreadSearchResults,
-} from "../SidebarThreadSearch";
 import type { ThreadRailRow } from "../ThreadRailList";
 import {
   excludePinnedFromRecent,
@@ -146,6 +142,7 @@ import type {
   UiTranscriptMessage,
 } from "./types";
 import { AppLeftRail } from "./components/AppLeftRail";
+import { ThreadSearchDialog } from "./components/ThreadSearchDialog";
 import { ThreadPage } from "./components/ThreadPage";
 import { useAutomationController } from "./useAutomationController";
 import {
@@ -833,7 +830,6 @@ export function AppShell() {
   const [sidebarTab, setSidebarTabState] = useState<SidebarTab>(() =>
     readStoredSidebarTab(window.localStorage),
   );
-  const threadSearchInputRef = useRef<HTMLInputElement | null>(null);
   const selectSidebarTab = useCallback((tab: SidebarTab) => {
     setSidebarTabState(tab);
     persistSidebarTab(window.localStorage, tab);
@@ -2004,32 +2000,19 @@ export function AppShell() {
         event.ctrlKey ||
         event.altKey ||
         event.shiftKey ||
-        event.key.toLowerCase() !== "f"
+        event.key.toLowerCase() !== "k"
       ) {
         return;
       }
       event.preventDefault();
-      const focusSearch = () => {
-        threadSearch.engage();
-        threadSearchInputRef.current?.focus();
-      };
-      if (sidebarCollapsed) {
-        toggleSidebarCollapsed();
-        // The expanded rail and its native-window frame settle on consecutive
-        // animation frames. Focus the mounted field after both are published.
-        window.requestAnimationFrame(() => {
-          window.requestAnimationFrame(focusSearch);
-        });
-      } else {
-        focusSearch();
-      }
+      threadSearch.open();
     }
 
     window.addEventListener("keydown", handleThreadSearchShortcut);
     return () => {
       window.removeEventListener("keydown", handleThreadSearchShortcut);
     };
-  }, [sidebarCollapsed, threadSearch.engage, toggleSidebarCollapsed]);
+  }, [threadSearch.open]);
   const lifecycleStoreIncarnation = resolveLifecycleStoreIncarnation([
     threadFavorites.state.storeIncarnationId,
     recentThreadFeeds.state.feeds.all.storeIncarnationId,
@@ -2140,17 +2123,6 @@ export function AppShell() {
       visibleThreadEntrySelectionSource,
     ],
   );
-  const threadSearchRows = useMemo(
-    () =>
-      threadSearch.rows.map((thread) => ({
-        thread,
-        // Search replaces every other thread-entry surface, so the selected
-        // thread stays highlighted regardless of where it was opened.
-        isActive: visibleSelectedThreadId === thread.id,
-        isBusy: threadRunStateIsRunning(thread),
-      })),
-    [threadSearch.rows, visibleSelectedThreadId],
-  );
   const pinnedThreadRows = useMemo(
     () =>
       pinnedThreadIds
@@ -2223,9 +2195,6 @@ export function AppShell() {
   }
   function sidebarChatRailRows(): ThreadRailRow[] {
     return threadRailRowsFrom(sidebarChatRows, false);
-  }
-  function sidebarThreadSearchRailRows(): ThreadRailRow[] {
-    return threadRailRowsFrom(threadSearchRows, false);
   }
 
   async function setThreadPinned(threadId: string, pinned: boolean) {
@@ -4207,7 +4176,6 @@ export function AppShell() {
     setDeletingThreadId(targetThreadId);
     setError(null);
     const recentRollback = recentThreadFeeds.removeThread(targetThreadId);
-    const searchRollback = threadSearch.removeThread(targetThreadId);
     setDesktopState((current) =>
       current ? desktopStateWithoutThread(current, targetThreadId) : current,
     );
@@ -4253,7 +4221,6 @@ export function AppShell() {
       if (archivedResult.kind !== "applied") {
         if (settlement.rollbackOptimistic) {
           recentThreadFeeds.rollbackRemoval(recentRollback);
-          threadSearch.rollbackRemoval(searchRollback);
         }
         if (archivedResult.kind === "cancelled") {
           return;
@@ -4282,7 +4249,6 @@ export function AppShell() {
       }
     } catch (archiveError) {
       recentThreadFeeds.rollbackRemoval(recentRollback);
-      threadSearch.rollbackRemoval(searchRollback);
       setError(
         archiveError instanceof Error
           ? archiveError.message
@@ -5024,6 +4990,22 @@ export function AppShell() {
       ref={layoutRootRef}
     >
       <ToastViewportHost />
+      <ThreadSearchDialog
+        formatThreadTimestamp={formatThreadTimestamp}
+        onClose={threadSearch.close}
+        onLoadMore={threadSearch.loadMore}
+        onOpenThread={(threadId) => {
+          threadSearch.close();
+          void openExistingThread(threadId);
+        }}
+        onQueryChange={threadSearch.setQuery}
+        onRetry={threadSearch.retry}
+        open={threadSearch.isOpen}
+        presentation={threadSearch.presentation}
+        query={threadSearch.state.rawQuery}
+        rows={threadSearch.rows}
+        threadAvatarCatalog={threadAvatarCatalog}
+      />
       <button
         aria-label={t("Toggle Sidebar")}
         aria-pressed={sidebarCollapsed}
@@ -5055,26 +5037,6 @@ export function AppShell() {
                 { requireGatewayConnection: true },
               );
             }}
-          />
-        }
-        threadSearchActive={threadSearch.state.engaged}
-        threadSearchFieldSlot={
-          <SidebarThreadSearchField
-            inputRef={threadSearchInputRef}
-            onBlur={threadSearch.disengageEmpty}
-            onChange={threadSearch.setQuery}
-            onClear={threadSearch.clear}
-            onFocus={threadSearch.engage}
-            query={threadSearch.state.rawQuery}
-          />
-        }
-        threadSearchResultsSlot={
-          <SidebarThreadSearchResults
-            formatThreadTimestamp={formatThreadTimestamp}
-            onLoadMore={threadSearch.loadMore}
-            onRetry={threadSearch.retry}
-            presentation={threadSearch.presentation}
-            rows={sidebarThreadSearchRailRows()}
           />
         }
         recentThreadsSlot={
@@ -5111,6 +5073,7 @@ export function AppShell() {
         onNewThread={() => {
           void handleNewThread();
         }}
+        onOpenThreadSearch={threadSearch.open}
         onOpenRecent={() => {
           commitLegacyLayoutIntent("user-route", (current) => ({
             ...current,

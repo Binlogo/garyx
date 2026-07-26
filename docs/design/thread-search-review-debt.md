@@ -100,6 +100,36 @@ warning, but changing the shared Home row rendering is outside this feature.
 - This fixture/scanner contract is outside the thread-search implementation
   path. Resolve it in a separate task; it is not a thread-search FAIL/BLOCKER.
 
+### M-2 — `Retry` is inert when no Gateway scope is configured
+
+- Source: `desktop/garyx-desktop/src/renderer/src/app-shell/thread-search-model.ts`
+  — `setQuery` (empty `gatewayScope` resolves `headStatus` to `failed`) and
+  `requestFirstPage` (first guard rejects an empty `gatewayScope`).
+- With no configured Gateway, typing a query moves the surface to the `failed`
+  state, which renders `Thread search unavailable` plus a `Retry` control.
+  `retry()` routes to `beginFirstPage()`, whose ticket request is refused by the
+  same empty-scope guard, so the button can never make progress. The copy is
+  accurate and no request is wrongly issued; only the affordance is dead.
+- Predates the palette: this logic landed with the first implementation
+  (`#TASK-2730`) and commit `3d5d6d73b` did not touch it. The palette only makes
+  the state more visible. Either suppress the retry affordance for the
+  no-scope case or give the model a distinct `unavailable` state.
+
+### M-3 — `Esc` during IME composition dismisses dialogs
+
+- Source: `node_modules/@radix-ui/react-use-escape-keydown/dist/index.mjs` as
+  consumed by `components/ui/dialog.tsx`.
+- Radix registers its Escape handler in the capture phase and does not check
+  `event.isComposing`, so pressing `Esc` to dismiss an IME candidate window
+  closes the surrounding dialog instead. This affects every app dialog that
+  contains a text field, not just thread search, and it is most visible for the
+  zhCN locale.
+- Noted because `ThreadSearchDialog`'s own key handler *does* guard
+  `nativeEvent.isComposing` for `ArrowUp`/`ArrowDown`/`Enter`, so the palette is
+  internally inconsistent through no fault of its own code. Fixing it means
+  wrapping the shared dialog primitive (`onEscapeKeyDown` + composition state),
+  which is an app-wide change and outside thread search.
+
 ## Explicitly still out of scope (do not re-open)
 
 Per §7 and D4 of the design, and confirmed unchanged by review:

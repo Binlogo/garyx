@@ -3,8 +3,11 @@ import test from "node:test";
 
 import {
   createThreadSearchModel,
+  moveThreadSearchHighlight,
   THREAD_SEARCH_DEBOUNCE_MS,
   THREAD_SEARCH_PAGE_LIMIT,
+  threadSearchHighlightedItem,
+  threadSearchHighlightForRows,
   threadSearchModel,
 } from "./thread-search-model.ts";
 
@@ -362,4 +365,34 @@ test("an A to B to A gateway switch still rejects the first A generation", () =>
   assert.equal(completion.action, "dropped");
   assert.deepEqual(completion.state.rows, []);
   assert.ok(completion.state.generation > firstA.ticket.generation);
+});
+
+test("palette highlight movement wraps in both directions and follows row changes", () => {
+  assert.equal(threadSearchHighlightForRows(-1, 3), 0);
+  assert.equal(threadSearchHighlightForRows(2, 3), 2);
+  assert.equal(threadSearchHighlightForRows(3, 3), 0);
+  assert.equal(threadSearchHighlightForRows(0, 0), -1);
+
+  assert.equal(moveThreadSearchHighlight(-1, 3, "next"), 0);
+  assert.equal(moveThreadSearchHighlight(0, 3, "next"), 1);
+  assert.equal(moveThreadSearchHighlight(2, 3, "next"), 0);
+  assert.equal(moveThreadSearchHighlight(0, 3, "previous"), 2);
+  assert.equal(moveThreadSearchHighlight(2, 3, "previous"), 1);
+  assert.equal(moveThreadSearchHighlight(9, 3, "previous"), 2);
+  assert.equal(moveThreadSearchHighlight(0, 0, "next"), -1);
+});
+
+test("palette Enter selection resolves only the highlighted result", () => {
+  const rows = [
+    summary("thread::one", "One"),
+    summary("thread::two", "Two"),
+  ];
+
+  assert.equal(
+    threadSearchHighlightedItem(rows, 1)?.id,
+    "thread::two",
+  );
+  assert.equal(threadSearchHighlightedItem(rows, -1), null);
+  assert.equal(threadSearchHighlightedItem(rows, rows.length), null);
+  assert.equal(threadSearchHighlightedItem(rows, 0.5), null);
 });
