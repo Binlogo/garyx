@@ -10,6 +10,7 @@ struct GaryxSettingsProviderContent: View {
     @EnvironmentObject private var model: GaryxMobileModel
     @State private var selectedProvider: GaryxModelProviderDefault?
     @State private var showsClaudeAccounts = false
+    @State private var showsCodexAccounts = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -29,12 +30,18 @@ struct GaryxSettingsProviderContent: View {
                             claudeAccounts: model.claudeCodeAccounts,
                             claudeAccountsLoading: model.isLoadingClaudeCodeAccounts,
                             claudeAccountsError: model.claudeCodeAccountsError,
+                            codexAccounts: model.codexAccounts,
+                            codexAccountsLoading: model.isLoadingCodexAccounts,
+                            codexAccountsError: model.codexAccountsError,
                             onEdit: {
                                 selectedProvider = provider
                                 Task { await model.loadProviderModels(providerType: provider.providerType) }
                             },
                             onManageClaudeAccounts: {
                                 showsClaudeAccounts = true
+                            },
+                            onManageCodexAccounts: {
+                                showsCodexAccounts = true
                             }
                         )
 
@@ -48,7 +55,8 @@ struct GaryxSettingsProviderContent: View {
         .task {
             async let usageRefresh: Void = model.refreshCodingUsageWidget()
             async let accountsRefresh: Void = model.loadClaudeCodeAccounts()
-            _ = await (usageRefresh, accountsRefresh)
+            async let codexAccountsRefresh: Void = model.loadCodexAccounts()
+            _ = await (usageRefresh, accountsRefresh, codexAccountsRefresh)
             for provider in GaryxModelProviderDefaults.providers
             where model.providerModelsByType[provider.providerType] == nil {
                 await model.loadProviderModels(providerType: provider.providerType)
@@ -60,12 +68,15 @@ struct GaryxSettingsProviderContent: View {
         .garyxSheet(isPresented: $showsClaudeAccounts) {
             GaryxClaudeCodeAccountsSheet()
         }
+        .garyxSheet(isPresented: $showsCodexAccounts) {
+            GaryxCodexAccountsSheet()
+        }
     }
 }
 
 /// The mobile Provider card shared by every built-in model provider. Identity,
-/// quota and defaults keep one visual hierarchy; Claude Code alone inserts the
-/// managed-account row because the other providers do not support account
+/// quota and defaults keep one visual hierarchy; Claude Code and Codex insert
+/// the managed-account row because the other providers do not support account
 /// selection.
 private struct GaryxModelProviderOverview: View {
     let provider: GaryxModelProviderDefault
@@ -76,8 +87,12 @@ private struct GaryxModelProviderOverview: View {
     let claudeAccounts: GaryxClaudeCodeAccounts?
     let claudeAccountsLoading: Bool
     let claudeAccountsError: String?
+    let codexAccounts: GaryxCodexAccounts?
+    let codexAccountsLoading: Bool
+    let codexAccountsError: String?
     let onEdit: () -> Void
     let onManageClaudeAccounts: () -> Void
+    let onManageCodexAccounts: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -127,7 +142,7 @@ private struct GaryxModelProviderOverview: View {
     }
 
     private var currentAccountRow: some View {
-        Button(action: onManageClaudeAccounts) {
+        Button(action: authSection == .codex ? onManageCodexAccounts : onManageClaudeAccounts) {
             HStack(spacing: 12) {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Current account")
@@ -139,7 +154,7 @@ private struct GaryxModelProviderOverview: View {
                         .fixedSize(horizontal: false, vertical: true)
                     Text(accountDetail)
                         .font(GaryxFont.caption())
-                        .foregroundStyle(claudeAccountsError == nil ? Color.secondary : GaryxTheme.danger)
+                        .foregroundStyle(accountsError == nil ? Color.secondary : GaryxTheme.danger)
                         .fixedSize(horizontal: false, vertical: true)
                 }
 
@@ -159,7 +174,11 @@ private struct GaryxModelProviderOverview: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(GaryxPressableRowStyle())
-        .accessibilityIdentifier("provider.claude.current-account")
+        .accessibilityIdentifier(
+            authSection == .codex
+                ? "provider.codex.current-account"
+                : "provider.claude.current-account"
+        )
     }
 
     @ViewBuilder
@@ -195,7 +214,7 @@ private struct GaryxModelProviderOverview: View {
                 quotaUnavailable(usageDisplay.summaryText)
             }
         } else {
-            quotaUnavailable(supportsAccountSelection && claudeAccountsLoading ? "Loading quota…" : "No quota data")
+            quotaUnavailable(supportsAccountSelection && accountsLoading ? "Loading quota…" : "No quota data")
         }
     }
 
@@ -221,7 +240,7 @@ private struct GaryxModelProviderOverview: View {
                 .font(GaryxFont.caption(weight: .medium))
                 .foregroundStyle(.secondary)
             Spacer(minLength: 8)
-            if supportsAccountSelection && claudeAccountsLoading {
+            if supportsAccountSelection && accountsLoading {
                 ProgressView().controlSize(.small)
             }
             Text(text)
@@ -232,8 +251,8 @@ private struct GaryxModelProviderOverview: View {
         .padding(.vertical, 12)
     }
 
-    private var selectedAccount: GaryxClaudeCodeAccountPresentation? {
-        guard supportsAccountSelection,
+    private var selectedClaudeAccount: GaryxClaudeCodeAccountPresentation? {
+        guard authSection == .claudeCode,
               let claudeAccounts,
               let account = claudeAccounts.selectedAccount else { return nil }
         return GaryxClaudeCodeAccountPresentation.make(
@@ -242,27 +261,60 @@ private struct GaryxModelProviderOverview: View {
         )
     }
 
+    private var selectedCodexAccount: GaryxCodexAccountPresentation? {
+        guard authSection == .codex,
+              let codexAccounts,
+              let account = codexAccounts.selectedAccount else { return nil }
+        return GaryxCodexAccountPresentation.make(
+            account: account,
+            refreshedAt: codexAccounts.refreshedAt
+        )
+    }
+
+    private var accountsLoading: Bool {
+        authSection == .codex ? codexAccountsLoading : claudeAccountsLoading
+    }
+
+    private var accountsError: String? {
+        authSection == .codex ? codexAccountsError : claudeAccountsError
+    }
+
+    private var selectedAccountTitle: String? {
+        selectedClaudeAccount?.title ?? selectedCodexAccount?.title
+    }
+
+    private var selectedAccountDetail: String? {
+        selectedClaudeAccount?.detailText ?? selectedCodexAccount?.detailText
+    }
+
     private var accountTitle: String {
-        guard let selectedAccount else {
-            if claudeAccountsLoading { return "Loading…" }
-            if claudeAccountsError != nil { return "Account unavailable" }
+        guard let selectedAccountTitle else {
+            if accountsLoading { return "Loading…" }
+            if accountsError != nil { return "Account unavailable" }
             return "System default"
         }
-        return selectedAccount.title
+        return selectedAccountTitle
     }
 
     private var accountDetail: String {
-        if let selectedAccount {
-            return selectedAccount.detailText
+        if let selectedAccountDetail {
+            return selectedAccountDetail
         }
-        return claudeAccountsError ?? "Uses this Mac's default Claude Code login"
+        if let accountsError {
+            return accountsError
+        }
+        return authSection == .codex
+            ? "Uses this Mac's default Codex login"
+            : "Uses this Mac's default Claude Code login"
     }
 
     private var usageDisplay: GaryxProviderUsageDisplayModel? {
-        selectedAccount?.usage ?? GaryxProviderUsageDisplayModel.make(
-            from: usage,
-            refreshedAt: usageRefreshedAt
-        )
+        selectedClaudeAccount?.usage
+            ?? selectedCodexAccount?.usage
+            ?? GaryxProviderUsageDisplayModel.make(
+                from: usage,
+                refreshedAt: usageRefreshedAt
+            )
     }
 
     private var providerPresentation: GaryxProviderPresentation {
@@ -284,18 +336,25 @@ private struct GaryxModelProviderOverview: View {
         return parts.joined(separator: " · ")
     }
 
+    private var authSection: GaryxProviderSettingsPresentation.AuthSection {
+        GaryxProviderSettingsPresentation.authSection(for: provider)
+    }
+
     private var supportsAccountSelection: Bool {
-        GaryxProviderSettingsPresentation.authSection(for: provider) == .claudeCode
+        authSection == .claudeCode || authSection == .codex
     }
 
     private var accessibilityIdentifier: String {
-        supportsAccountSelection
-            ? "provider.claude.overview"
-            : "provider.\(provider.providerType).overview"
+        switch authSection {
+        case .claudeCode:
+            return "provider.claude.overview"
+        case .codex, .managedOAuth, .managedCLI:
+            return "provider.\(provider.providerType).overview"
+        }
     }
 }
 
-private struct GaryxProviderQuotaConsoleRow: View {
+struct GaryxProviderQuotaConsoleRow: View {
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     let label: String
     let remainingPercent: Double
@@ -1082,6 +1141,7 @@ struct GaryxModelProviderDefaultsSheet: View {
     @State private var reasoningEffort = ""
     @State private var serviceTier = ""
     @State private var showsClaudeAccountsSheet = false
+    @State private var showsCodexAccountsSheet = false
     @State private var isHydrated = false
     @State private var hydrationFailed = false
     @State private var isSaving = false
@@ -1159,9 +1219,15 @@ struct GaryxModelProviderDefaultsSheet: View {
         .garyxSheet(isPresented: $showsClaudeAccountsSheet) {
             GaryxClaudeCodeAccountsSheet()
         }
+        .garyxSheet(isPresented: $showsCodexAccountsSheet) {
+            GaryxCodexAccountsSheet()
+        }
         .onDisappear {
             if authSection == .claudeCode {
                 model.resetClaudeCodeAuthFlow()
+            }
+            if authSection == .codex {
+                model.resetCodexAuthFlow()
             }
         }
         .onChange(of: modelName) { _, _ in
@@ -1207,6 +1273,36 @@ struct GaryxModelProviderDefaultsSheet: View {
                     .textCase(nil)
             } footer: {
                 Text("Manage Claude Code logins and choose the account used by future runs.")
+            }
+        case .codex:
+            Section {
+                Button {
+                    showsCodexAccountsSheet = true
+                } label: {
+                    HStack(spacing: 12) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(codexSelectedAccountTitle)
+                                .font(GaryxFont.body(weight: .medium))
+                                .foregroundStyle(.primary)
+                                .fixedSize(horizontal: false, vertical: true)
+                            Text(codexSelectedAccountDetail)
+                                .font(GaryxFont.caption())
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        Spacer(minLength: 8)
+                        Image(systemName: "chevron.right")
+                            .font(GaryxFont.fixedSystem(size: 11, weight: .semibold))
+                            .foregroundStyle(.tertiary)
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(GaryxPressableRowStyle())
+            } header: {
+                Text("Account")
+                    .textCase(nil)
+            } footer: {
+                Text("Manage Codex logins and choose the account used by future runs.")
             }
         case .managedOAuth:
             GaryxFormGroupedSection(title: "Authentication") {
@@ -1299,6 +1395,25 @@ struct GaryxModelProviderDefaultsSheet: View {
         claudeSelectedAccount?.detailText ?? "Uses this Mac's default Claude Code login"
     }
 
+    private var codexSelectedAccount: GaryxCodexAccountPresentation? {
+        guard let accounts = model.codexAccounts,
+              let account = accounts.selectedAccount else { return nil }
+        return GaryxCodexAccountPresentation.make(
+            account: account,
+            refreshedAt: accounts.refreshedAt
+        )
+    }
+
+    private var codexSelectedAccountTitle: String {
+        guard let account = codexSelectedAccount else { return "System default" }
+        guard let plan = account.planText else { return account.title }
+        return "\(account.title) · \(plan)"
+    }
+
+    private var codexSelectedAccountDetail: String {
+        codexSelectedAccount?.detailText ?? "Uses this Mac's default Codex login"
+    }
+
     private var defaultModelLabel: String {
         GaryxProviderSettingsPresentation.defaultModelLabel(provider: provider, catalog: catalog)
     }
@@ -1310,6 +1425,9 @@ struct GaryxModelProviderDefaultsSheet: View {
         async let catalogLoad: Void = model.loadProviderModels(providerType: provider.providerType)
         if provider.providerType == "claude_code" {
             await model.loadClaudeCodeAccounts()
+        }
+        if provider.providerType == "codex_app_server" {
+            await model.loadCodexAccounts()
         }
         let fetched = await model.refreshAuthoritativeGatewaySettings()
         _ = await catalogLoad
@@ -1358,6 +1476,9 @@ struct GaryxModelProviderDefaultsSheet: View {
     private func closeSheet() {
         if authSection == .claudeCode {
             model.resetClaudeCodeAuthFlow()
+        }
+        if authSection == .codex {
+            model.resetCodexAuthFlow()
         }
         dismiss()
     }
