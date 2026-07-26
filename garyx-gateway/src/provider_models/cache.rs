@@ -1,6 +1,9 @@
 use super::*;
 
 pub(super) const PROVIDER_MODEL_DISCOVERY_SUCCESS_TTL: Duration = Duration::from_secs(10 * 60);
+pub(super) const CODEX_APP_SERVER_CACHE_KEY: &str = "codex_app_server";
+pub(super) const TRAEX_CACHE_KEY: &str = "traex";
+pub(super) const GROK_ACP_CACHE_KEY: &str = "grok_acp";
 
 #[derive(Debug, Clone)]
 pub(super) struct ProviderModelDiscoveryCacheEntry {

@@ -197,9 +197,9 @@ pub(crate) async fn list_provider_models(
                 configured_default_reasoning_effort(config, provider_type.clone(), aliases);
             let bin = app_server_model_bin(&provider_type);
             let cache_key = if provider_type == ProviderType::Traex {
-                "traex".to_owned()
+                TRAEX_CACHE_KEY.to_owned()
             } else {
-                "codex_app_server".to_owned()
+                CODEX_APP_SERVER_CACHE_KEY.to_owned()
             };
             let mut discovery = match fresh_cached_discovery(&cache_key) {
                 Some(discovery) => discovery,
@@ -248,7 +248,7 @@ pub(crate) async fn list_provider_models(
                 configured_default_model(config, ProviderType::GrokBuild, aliases);
             let configured_reasoning =
                 configured_default_reasoning_effort(config, ProviderType::GrokBuild, aliases);
-            let cache_key = "grok_acp".to_owned();
+            let cache_key = GROK_ACP_CACHE_KEY.to_owned();
             let discovery = match fresh_cached_discovery(&cache_key) {
                 Some(discovery) => discovery,
                 None => discover_or_fallback(
@@ -310,6 +310,42 @@ use claude_code::*;
 use codex::*;
 use grok::*;
 use process_rpc::*;
+
+#[cfg(test)]
+pub(crate) fn isolate_provider_model_discovery_cache_for_tests()
+-> std::sync::MutexGuard<'static, ()> {
+    static TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    let guard = TEST_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    clear_provider_model_discovery_cache_for_tests();
+    guard
+}
+
+#[cfg(test)]
+pub(crate) fn store_claude_catalog_for_tests(scope: &ClaudeCatalogScope, model_id: &str) {
+    let supported_reasoning_efforts = reasoning_efforts("high", &["high"]);
+    store_discovery(
+        &scope.cache_key(),
+        ProviderModelDiscovery {
+            models: vec![ProviderModelOption {
+                id: model_id.to_owned(),
+                label: friendly_model_label(model_id),
+                description: None,
+                recommended: false,
+                default_reasoning_effort: Some("high".to_owned()),
+                supported_reasoning_efforts: supported_reasoning_efforts.clone(),
+                service_tiers: Vec::new(),
+            }],
+            default_model: None,
+            reasoning_efforts: supported_reasoning_efforts,
+            service_tiers: Vec::new(),
+            source: "claude_code_api",
+            error: None,
+        },
+    );
+}
 
 #[cfg(test)]
 mod tests;

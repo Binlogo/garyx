@@ -64,6 +64,7 @@ fn codex_configured_unknown_default_model_does_not_reuse_previous_options() {
 
 #[tokio::test]
 async fn claude_code_catalog_ignores_empty_configured_provider_default_reasoning_effort() {
+    let _cache_guard = isolate_provider_model_discovery_cache_for_tests();
     let mut config = GaryxConfig::default();
     config.agents.insert(
         "claude".to_owned(),
@@ -118,7 +119,7 @@ async fn antigravity_model_catalog_defaults_to_claude_opus() {
 
 #[tokio::test]
 async fn grok_catalog_uses_acp_source_and_configured_defaults() {
-    clear_provider_model_discovery_cache_for_tests();
+    let _cache_guard = isolate_provider_model_discovery_cache_for_tests();
     let mut config = GaryxConfig::default();
     config.agents.insert(
         "grok".to_owned(),
@@ -147,6 +148,7 @@ async fn grok_catalog_uses_acp_source_and_configured_defaults() {
 
 #[tokio::test]
 async fn claude_code_model_catalog_supports_selection_and_reasoning() {
+    let _cache_guard = isolate_provider_model_discovery_cache_for_tests();
     let response = list_provider_models(
         &GaryxConfig::default(),
         ProviderType::ClaudeCode,
@@ -451,7 +453,7 @@ async fn claude_code_effort_blind_catalog_degrades_without_replacing_last_good_c
     )
     .await;
 
-    clear_provider_model_discovery_cache_for_tests();
+    let _cache_guard = isolate_provider_model_discovery_cache_for_tests();
     let cache_key = "test_claude_effort_floor";
     let last_good = ProviderModelDiscovery {
         models: vec![ProviderModelOption {
@@ -495,7 +497,7 @@ async fn claude_code_effort_blind_catalog_degrades_without_replacing_last_good_c
 
 #[test]
 fn claude_code_effort_floor_without_stale_uses_capable_builtin_catalog() {
-    clear_provider_model_discovery_cache_for_tests();
+    let _cache_guard = isolate_provider_model_discovery_cache_for_tests();
 
     let discovery = discover_or_fallback(
         "test_claude_effort_floor_without_stale",
@@ -546,7 +548,7 @@ async fn claude_code_explicitly_unsupported_effort_remains_authoritative() {
 
 #[test]
 fn claude_code_catalog_cache_does_not_bleed_across_active_accounts() {
-    clear_provider_model_discovery_cache_for_tests();
+    let _cache_guard = isolate_provider_model_discovery_cache_for_tests();
     let account_a_scope = ClaudeCatalogScope::managed(
         "account-a".to_owned(),
         Some(std::path::PathBuf::from(
@@ -788,7 +790,7 @@ async fn claude_code_empty_catalog_keeps_the_existing_no_models_fallback() {
     )
     .await;
 
-    clear_provider_model_discovery_cache_for_tests();
+    let _cache_guard = isolate_provider_model_discovery_cache_for_tests();
     let discovery = discover_or_fallback("test_claude_empty_models", result, |error| {
         claude_code_builtin_models(Some(error))
     });
@@ -841,7 +843,7 @@ async fn claude_code_dynamic_catalog_non_200_and_timeout_are_errors() {
 
 #[test]
 fn claude_code_fallback_preserves_nonempty_builtin_catalog() {
-    clear_provider_model_discovery_cache_for_tests();
+    let _cache_guard = isolate_provider_model_discovery_cache_for_tests();
 
     let discovery = discover_or_fallback(
         "test_claude_fallback",
@@ -859,7 +861,7 @@ fn claude_code_fallback_preserves_nonempty_builtin_catalog() {
 
 #[test]
 fn discover_or_fallback_prefers_stale_success_before_builtin_preset() {
-    clear_provider_model_discovery_cache_for_tests();
+    let _cache_guard = isolate_provider_model_discovery_cache_for_tests();
     let cached = ProviderModelDiscovery {
         models: vec![ProviderModelOption {
             id: "claude-stale".to_owned(),
@@ -893,51 +895,15 @@ fn discover_or_fallback_prefers_stale_success_before_builtin_preset() {
 }
 
 #[test]
-fn discovery_cache_owns_unchanged_non_claude_provider_keys() {
-    clear_provider_model_discovery_cache_for_tests();
-    let cases = [
-        ("codex_app_server".to_owned(), "codex-cache-model"),
-        ("traex".to_owned(), "traex-cache-model"),
-        ("grok_acp".to_owned(), "grok-cache-model"),
-    ];
-
-    for (cache_key, model_id) in &cases {
-        let discovery = ProviderModelDiscovery {
-            models: vec![ProviderModelOption {
-                id: (*model_id).to_owned(),
-                label: (*model_id).to_owned(),
-                description: None,
-                recommended: false,
-                default_reasoning_effort: None,
-                supported_reasoning_efforts: Vec::new(),
-                service_tiers: Vec::new(),
-            }],
-            default_model: None,
-            reasoning_efforts: Vec::new(),
-            service_tiers: Vec::new(),
-            source: "test_dynamic",
-            error: None,
-        };
-        store_discovery(cache_key, discovery);
-    }
-    drop(cases);
-
-    assert_eq!(
-        cached_discovery("codex_app_server").unwrap().models[0].id,
-        "codex-cache-model"
-    );
-    assert_eq!(
-        cached_discovery("traex").unwrap().models[0].id,
-        "traex-cache-model"
-    );
-    assert_eq!(
-        cached_discovery("grok_acp").unwrap().models[0].id,
-        "grok-cache-model"
-    );
+fn non_claude_discovery_cache_keys_keep_their_contract_names() {
+    assert_eq!(CODEX_APP_SERVER_CACHE_KEY, "codex_app_server");
+    assert_eq!(TRAEX_CACHE_KEY, "traex");
+    assert_eq!(GROK_ACP_CACHE_KEY, "grok_acp");
 }
 
 #[tokio::test]
 async fn claude_code_catalog_uses_configured_provider_default_model() {
+    let _cache_guard = isolate_provider_model_discovery_cache_for_tests();
     let mut config = GaryxConfig::default();
     config.agents.insert(
         "claude".to_owned(),
@@ -960,6 +926,7 @@ async fn claude_code_catalog_uses_configured_provider_default_model() {
 
 #[tokio::test]
 async fn claude_code_catalog_exposes_configured_provider_default_reasoning_effort() {
+    let _cache_guard = isolate_provider_model_discovery_cache_for_tests();
     let mut config = GaryxConfig::default();
     config.agents.insert(
         "claude".to_owned(),
@@ -983,6 +950,7 @@ async fn claude_code_catalog_exposes_configured_provider_default_reasoning_effor
 
 #[tokio::test]
 async fn codex_app_server_model_catalog_supports_selection_and_reasoning() {
+    let _cache_guard = isolate_provider_model_discovery_cache_for_tests();
     let response = list_provider_models(
         &GaryxConfig::default(),
         ProviderType::CodexAppServer,
@@ -1001,6 +969,7 @@ async fn codex_app_server_model_catalog_supports_selection_and_reasoning() {
 
 #[tokio::test]
 async fn codex_app_server_catalog_uses_configured_provider_default_model() {
+    let _cache_guard = isolate_provider_model_discovery_cache_for_tests();
     let mut config = GaryxConfig::default();
     config.agents.insert(
         "codex".to_owned(),
@@ -1168,6 +1137,7 @@ async fn traex_app_server_real_discovery_lists_models() {
     if std::env::var_os("GARYX_ALLOW_REAL_APP_SERVER_MODEL_FETCH").is_none() {
         return;
     }
+    let _cache_guard = isolate_provider_model_discovery_cache_for_tests();
     let response = list_provider_models(
         &GaryxConfig::default(),
         ProviderType::Traex,
@@ -1192,6 +1162,7 @@ async fn codex_app_server_real_discovery_lists_models_with_reasoning() {
     if std::env::var_os("GARYX_ALLOW_REAL_APP_SERVER_MODEL_FETCH").is_none() {
         return;
     }
+    let _cache_guard = isolate_provider_model_discovery_cache_for_tests();
     let response = list_provider_models(
         &GaryxConfig::default(),
         ProviderType::CodexAppServer,
