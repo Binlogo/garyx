@@ -1,6 +1,7 @@
 import type {
   DesktopSettings,
   DesktopRecentThreadsPage,
+  DesktopThreadSummariesPage,
   DesktopThreadProviderType,
   DesktopThreadFavoritesPage,
   DesktopThreadFavoritesSnapshot,
@@ -8,6 +9,7 @@ import type {
   DesktopThreadSummary,
   GetThreadHistoryInput,
   ListRecentThreadsInput,
+  ListThreadSummariesInput,
   PendingThreadInput,
   ThreadActiveRunInfo,
   ThreadChannelBindingInfo,
@@ -48,6 +50,8 @@ const MAX_THREAD_HISTORY_USER_QUERY_LIMIT = 50;
 
 const MAX_RECENT_THREAD_PAGE_SIZE = 200;
 
+const MAX_THREAD_SUMMARY_PAGE_SIZE = 100;
+
 const EPOCH_ISO = new Date(0).toISOString();
 
 function requireNullableStringField(
@@ -71,6 +75,17 @@ function optionalNullableStringField(
     return null;
   }
   return requireContractString(record[field], path);
+}
+
+function optionalNullableBooleanField(
+  record: Record<string, unknown>,
+  field: string,
+  path: string,
+): boolean | null {
+  if (!hasContractField(record, field) || record[field] === null) {
+    return null;
+  }
+  return requireContractBoolean(record[field], path);
 }
 
 function mapThreadWorktreeInfo(value: unknown) {
@@ -626,6 +641,135 @@ function mapRecentThreadSummary(
   };
 }
 
+function mapThreadSummaryWorktree(
+  value: unknown,
+  context: string,
+): DesktopThreadSummary["worktree"] {
+  if (value === null) {
+    return null;
+  }
+  const record = requireContractRecord(value, context);
+  return {
+    mode: optionalNullableStringField(record, "mode", `${context}.mode`),
+    enabled: optionalNullableBooleanField(
+      record,
+      "enabled",
+      `${context}.enabled`,
+    ),
+    branch: optionalNullableStringField(record, "branch", `${context}.branch`),
+    sourceBranch: optionalNullableStringField(
+      record,
+      "source_branch",
+      `${context}.source_branch`,
+    ),
+    path: optionalNullableStringField(record, "path", `${context}.path`),
+    worktreeDir: optionalNullableStringField(
+      record,
+      "worktree_dir",
+      `${context}.worktree_dir`,
+    ),
+    sourceWorkspaceDir: optionalNullableStringField(
+      record,
+      "source_workspace_dir",
+      `${context}.source_workspace_dir`,
+    ),
+    sourceRepoRoot: optionalNullableStringField(
+      record,
+      "source_repo_root",
+      `${context}.source_repo_root`,
+    ),
+  };
+}
+
+function mapThreadSummaryRow(
+  value: unknown,
+  context: string,
+): DesktopThreadSummary {
+  const record = requireContractRecord(value, context);
+  const id = requireContractNonEmptyString(
+    requireContractField(record, "thread_id", context),
+    `${context}.thread_id`,
+  );
+  const title = requireNullableStringField(record, "title", context);
+  const workspacePath = requireNullableStringField(
+    record,
+    "workspace_dir",
+    context,
+  );
+  const threadType = requireContractNonEmptyString(
+    requireContractField(record, "thread_type", context),
+    `${context}.thread_type`,
+  );
+  requireNullableStringField(record, "provider_type", context);
+  const agentId = requireNullableStringField(record, "agent_id", context);
+  const createdAt = requireNullableStringField(record, "created_at", context);
+  const updatedAt = requireNullableStringField(record, "updated_at", context);
+  const messageCount = requireContractNonNegativeInteger(
+    requireContractField(record, "message_count", context),
+    `${context}.message_count`,
+  );
+  const lastUserMessage = requireNullableStringField(
+    record,
+    "last_user_message",
+    context,
+  );
+  const lastAssistantMessage = requireNullableStringField(
+    record,
+    "last_assistant_message",
+    context,
+  );
+  const lastMessagePreview = requireNullableStringField(
+    record,
+    "last_message_preview",
+    context,
+  );
+  const recentRunId = requireNullableStringField(
+    record,
+    "recent_run_id",
+    context,
+  );
+  const activeRunId = requireNullableStringField(
+    record,
+    "active_run_id",
+    context,
+  );
+  const worktree = mapThreadSummaryWorktree(
+    requireContractField(record, "worktree", context),
+    `${context}.worktree`,
+  );
+  const rootWorkspacePath = requireNullableStringField(
+    record,
+    "root_workspace_path",
+    context,
+  );
+  const workspaceOrigin = requireNullableStringField(
+    record,
+    "workspace_origin",
+    context,
+  );
+
+  return {
+    id,
+    title: title?.trim() || id,
+    threadType,
+    createdAt: createdAt || EPOCH_ISO,
+    updatedAt: updatedAt || createdAt || EPOCH_ISO,
+    lastMessagePreview:
+      lastMessagePreview?.trim() ||
+      lastUserMessage?.trim() ||
+      lastAssistantMessage?.trim() ||
+      "",
+    workspacePath,
+    rootWorkspacePath,
+    workspaceOrigin,
+    messageCount,
+    agentId,
+    recentRunId,
+    runState: activeRunId ? "running" : recentRunId ? "idle" : null,
+    worktree,
+  };
+}
+
 function mapThreadMetadataSummary(
   value: unknown,
   context: string,
@@ -1062,6 +1206,38 @@ export function validateListRecentThreadsInput(
   return { gatewayScope, tasks, limit, cursor };
 }
 
+export function validateListThreadSummariesInput(
+  value: unknown,
+): ListThreadSummariesInput {
+  const input = parseRecord(value);
+  const gatewayScope = normalizeGatewayUrl(asString(input.gatewayScope) || "");
+  if (!gatewayScope) {
+    throw new Error("gatewayScope is required");
+  }
+  const tasks = input.tasks;
+  if (tasks !== "include" && tasks !== "exclude" && tasks !== "only") {
+    throw new Error("tasks must be include, exclude, or only");
+  }
+  const q = typeof input.q === "string" ? input.q.trim() : "";
+  if (!q) {
+    throw new Error("q must be a non-empty string");
+  }
+  const limit = input.limit;
+  if (
+    typeof limit !== "number" ||
+    !Number.isSafeInteger(limit) ||
+    limit < 1 ||
+    limit > MAX_THREAD_SUMMARY_PAGE_SIZE
+  ) {
+    throw new Error("limit must be an integer between 1 and 100");
+  }
+  const cursor = input.cursor;
+  if (cursor !== null && (typeof cursor !== "string" || !cursor.trim())) {
+    throw new Error("cursor must be null or a non-empty opaque string");
+  }
+  return { gatewayScope, tasks, q, limit, cursor };
+}
+
 export function assertRecentThreadGatewayScope(
   settings: DesktopSettings,
   expectedGatewayScope: string,
@@ -1069,6 +1245,17 @@ export function assertRecentThreadGatewayScope(
   const gatewayScope = normalizeGatewayUrl(settings.gatewayUrl);
   if (gatewayScope !== expectedGatewayScope) {
     throw new Error("Gateway changed before the Recent request started");
+  }
+  return gatewayScope;
+}
+
+export function assertThreadSummaryGatewayScope(
+  settings: DesktopSettings,
+  expectedGatewayScope: string,
+): string {
+  const gatewayScope = normalizeGatewayUrl(settings.gatewayUrl);
+  if (gatewayScope !== expectedGatewayScope) {
+    throw new Error("Gateway changed before the thread search request started");
   }
   return gatewayScope;
 }
@@ -1160,6 +1347,95 @@ export async function fetchRecentThreads(
     count,
     total,
     limit,
+    hasMore,
+    nextCursor,
+  };
+}
+
+export async function fetchThreadSummaries(
+  settings: DesktopSettings,
+  options: Pick<
+    ListThreadSummariesInput,
+    "tasks" | "q" | "limit" | "cursor"
+  >,
+): Promise<DesktopThreadSummariesPage> {
+  const query = new URLSearchParams({
+    tasks: options.tasks,
+    limit: String(options.limit),
+  });
+  query.set("q", options.q);
+  if (options.cursor !== null) {
+    query.set("cursor", options.cursor);
+  }
+  const payloadValue = await requestJson<unknown>(
+    settings,
+    `/api/thread-summaries?${query.toString()}`,
+    "readRetryable",
+    {
+      signal: AbortSignal.timeout(REMOTE_STATE_FETCH_TIMEOUT_MS),
+    },
+  );
+  const payload = requireContractRecord(payloadValue, "thread summaries page");
+  const rawThreads = requireContractArray(
+    requireContractField(payload, "threads", "thread summaries page"),
+    "thread summaries page.threads",
+  );
+  const threads = rawThreads.map((thread, index) =>
+    mapThreadSummaryRow(
+      thread,
+      `thread summaries page.threads[${index}]`,
+    ),
+  );
+  const normalizedIds = threads.map((thread) => thread.id.trim());
+  if (
+    threads.length > options.limit ||
+    new Set(normalizedIds).size !== normalizedIds.length
+  ) {
+    throw new GatewayContractError(
+      "thread summaries page",
+      "must contain at most limit unique thread ids",
+    );
+  }
+  const hasMore = requireContractBoolean(
+    requireContractField(payload, "has_more", "thread summaries page"),
+    "thread summaries page.has_more",
+  );
+  const nextCursorValue = requireContractField(
+    payload,
+    "next_cursor",
+    "thread summaries page",
+  );
+  const nextCursor = nextCursorValue === null
+    ? null
+    : requireContractNonEmptyString(
+        nextCursorValue,
+        "thread summaries page.next_cursor",
+      );
+  if (hasMore !== (nextCursor !== null)) {
+    throw new GatewayContractError(
+      "thread summaries page",
+      "violates the cursor contract",
+    );
+  }
+  return {
+    gatewayScope: normalizeGatewayUrl(settings.gatewayUrl),
+    storeIncarnationId: requireContractNonEmptyString(
+      requireContractField(
+        payload,
+        "store_incarnation_id",
+        "thread summaries page",
+      ),
+      "thread summaries page.store_incarnation_id",
+    ),
+    serverBootId: requireContractNonEmptyString(
+      requireContractField(
+        payload,
+        "server_boot_id",
+        "thread summaries page",
+      ),
+      "thread summaries page.server_boot_id",
+    ),
+    threads,
     hasMore,
     nextCursor,
   };

@@ -177,6 +177,8 @@ const zhCN: Record<string, string> = {
   'No threads yet': '还没有线程',
   'No recent threads': '暂无最近线程',
   'No recent chats': '暂无最近聊天',
+  'Search threads by name': '按名称搜索线程',
+  'No threads named "{query}"': '没有名为“{query}”的线程',
   'Recent filter': '最近内容筛选',
   'All': '全部',
   'Chats': '聊天',

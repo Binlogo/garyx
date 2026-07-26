@@ -127,6 +127,7 @@ import type {
   DesktopDeepLinkListener,
   DesktopGatewayMutationResult,
   DesktopRecentThreadsPage,
+  DesktopThreadSummariesPage,
   DesktopThreadFavoritesPage,
   DesktopThreadFavoritesSnapshot,
   DesktopThreadSummary,
@@ -134,6 +135,7 @@ import type {
   GetThreadHistoryInput,
   InterruptResult,
   ListRecentThreadsInput,
+  ListThreadSummariesInput,
   OpenChatStreamResult,
   RenameThreadInput,
   SendMessageInput,
@@ -428,6 +430,9 @@ export interface GaryxDesktopApi {
   listRecentThreads: (
     input: ListRecentThreadsInput,
   ) => Promise<DesktopRecentThreadsPage>;
+  listThreadSummaries: (
+    input: ListThreadSummariesInput,
+  ) => Promise<DesktopThreadSummariesPage>;
   listThreadFavorites: (
     input: ThreadFavoritesReadInput,
   ) => Promise<DesktopThreadFavoritesPage>;

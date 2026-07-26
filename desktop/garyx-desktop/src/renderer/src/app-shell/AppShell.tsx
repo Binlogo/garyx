@@ -73,6 +73,10 @@ import {
 import { BotConversationSidebar } from "../BotConversationSidebar";
 import { RecentConversationSidebar } from "../RecentConversationSidebar";
 import { SidebarRecentThreadList } from "../SidebarRecentThreadList";
+import {
+  SidebarThreadSearchField,
+  SidebarThreadSearchResults,
+} from "../SidebarThreadSearch";
 import type { ThreadRailRow } from "../ThreadRailList";
 import {
   excludePinnedFromRecent,
@@ -248,6 +252,7 @@ import {
   createBrowserRouteHost,
 } from "./desktop-route-store";
 import { useRecentThreadFeeds } from "./useRecentThreadFeeds";
+import { useThreadSearch } from "./useThreadSearch";
 import { useThreadFavorites } from "./useThreadFavorites";
 import { presentedFavoriteRows } from "./favorites-ingress";
 import {
@@ -828,6 +833,7 @@ export function AppShell() {
   const [sidebarTab, setSidebarTabState] = useState<SidebarTab>(() =>
     readStoredSidebarTab(window.localStorage),
   );
+  const threadSearchInputRef = useRef<HTMLInputElement | null>(null);
   const selectSidebarTab = useCallback((tab: SidebarTab) => {
     setSidebarTabState(tab);
     persistSidebarTab(window.localStorage, tab);
@@ -1987,6 +1993,43 @@ export function AppShell() {
     sharedSummaries:
       desktopState?.threads || EMPTY_DESKTOP_THREAD_SUMMARIES,
   });
+  const threadSearch = useThreadSearch({
+    gatewayScope: desktopState?.entitiesGatewayUrl || "",
+  });
+  useEffect(() => {
+    function handleThreadSearchShortcut(event: KeyboardEvent) {
+      if (
+        event.defaultPrevented ||
+        !event.metaKey ||
+        event.ctrlKey ||
+        event.altKey ||
+        event.shiftKey ||
+        event.key.toLowerCase() !== "f"
+      ) {
+        return;
+      }
+      event.preventDefault();
+      const focusSearch = () => {
+        threadSearch.engage();
+        threadSearchInputRef.current?.focus();
+      };
+      if (sidebarCollapsed) {
+        toggleSidebarCollapsed();
+        // The expanded rail and its native-window frame settle on consecutive
+        // animation frames. Focus the mounted field after both are published.
+        window.requestAnimationFrame(() => {
+          window.requestAnimationFrame(focusSearch);
+        });
+      } else {
+        focusSearch();
+      }
+    }
+
+    window.addEventListener("keydown", handleThreadSearchShortcut);
+    return () => {
+      window.removeEventListener("keydown", handleThreadSearchShortcut);
+    };
+  }, [sidebarCollapsed, threadSearch.engage, toggleSidebarCollapsed]);
   const lifecycleStoreIncarnation = resolveLifecycleStoreIncarnation([
     threadFavorites.state.storeIncarnationId,
     recentThreadFeeds.state.feeds.all.storeIncarnationId,
@@ -2097,6 +2140,17 @@ export function AppShell() {
       visibleThreadEntrySelectionSource,
     ],
   );
+  const threadSearchRows = useMemo(
+    () =>
+      threadSearch.rows.map((thread) => ({
+        thread,
+        // Search replaces every other thread-entry surface, so the selected
+        // thread stays highlighted regardless of where it was opened.
+        isActive: visibleSelectedThreadId === thread.id,
+        isBusy: threadRunStateIsRunning(thread),
+      })),
+    [threadSearch.rows, visibleSelectedThreadId],
+  );
   const pinnedThreadRows = useMemo(
     () =>
       pinnedThreadIds
@@ -2169,6 +2223,9 @@ export function AppShell() {
   }
   function sidebarChatRailRows(): ThreadRailRow[] {
     return threadRailRowsFrom(sidebarChatRows, false);
+  }
+  function sidebarThreadSearchRailRows(): ThreadRailRow[] {
+    return threadRailRowsFrom(threadSearchRows, false);
   }
 
   async function setThreadPinned(threadId: string, pinned: boolean) {
@@ -4150,6 +4207,7 @@ export function AppShell() {
     setDeletingThreadId(targetThreadId);
     setError(null);
     const recentRollback = recentThreadFeeds.removeThread(targetThreadId);
+    const searchRollback = threadSearch.removeThread(targetThreadId);
     setDesktopState((current) =>
       current ? desktopStateWithoutThread(current, targetThreadId) : current,
     );
@@ -4195,6 +4253,7 @@ export function AppShell() {
       if (archivedResult.kind !== "applied") {
         if (settlement.rollbackOptimistic) {
           recentThreadFeeds.rollbackRemoval(recentRollback);
+          threadSearch.rollbackRemoval(searchRollback);
         }
         if (archivedResult.kind === "cancelled") {
           return;
@@ -4223,6 +4282,7 @@ export function AppShell() {
       }
     } catch (archiveError) {
       recentThreadFeeds.rollbackRemoval(recentRollback);
+      threadSearch.rollbackRemoval(searchRollback);
       setError(
         archiveError instanceof Error
           ? archiveError.message
@@ -4995,6 +5055,26 @@ export function AppShell() {
                 { requireGatewayConnection: true },
               );
             }}
+          />
+        }
+        threadSearchActive={threadSearch.state.engaged}
+        threadSearchFieldSlot={
+          <SidebarThreadSearchField
+            inputRef={threadSearchInputRef}
+            onBlur={threadSearch.disengageEmpty}
+            onChange={threadSearch.setQuery}
+            onClear={threadSearch.clear}
+            onFocus={threadSearch.engage}
+            query={threadSearch.state.rawQuery}
+          />
+        }
+        threadSearchResultsSlot={
+          <SidebarThreadSearchResults
+            formatThreadTimestamp={formatThreadTimestamp}
+            onLoadMore={threadSearch.loadMore}
+            onRetry={threadSearch.retry}
+            presentation={threadSearch.presentation}
+            rows={sidebarThreadSearchRailRows()}
           />
         }
         recentThreadsSlot={

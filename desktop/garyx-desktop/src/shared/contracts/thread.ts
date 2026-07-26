@@ -57,6 +57,28 @@ export interface DesktopRecentThreadsPage {
   nextCursor: string | null;
 }
 
+export type ThreadSummaryTaskFilter = "include" | "exclude" | "only";
+
+export interface ListThreadSummariesInput {
+  /** Normalized Gateway URL captured by the renderer-owned search ticket. */
+  gatewayScope: string;
+  tasks: ThreadSummaryTaskFilter;
+  /** Non-empty title query. Matching and Unicode normalization are server-owned. */
+  q: string;
+  limit: number;
+  cursor: string | null;
+}
+
+export interface DesktopThreadSummariesPage {
+  /** Normalized Gateway URL actually used by the main-process request. */
+  gatewayScope: string;
+  storeIncarnationId: string;
+  serverBootId: string;
+  threads: DesktopThreadSummary[];
+  hasMore: boolean;
+  nextCursor: string | null;
+}
+
 export interface DesktopThreadFavoriteRecord {
   threadId: string;
   favoritedAt: string;

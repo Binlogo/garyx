@@ -86,6 +86,20 @@ which is deprecated on iOS 26 in favor of the screen or trait collection from
 the active view context. The focused thread-search build reproduces this
 warning, but changing the shared Home row rendering is outside this feature.
 
+## Desktop
+
+### M-1 — Baseline i18n literal failure predates this feature
+
+- Source: `desktop/garyx-desktop/src/renderer/src/message-rich-text-linebreaks.test.mjs:71`
+  and `:75`.
+- Found while running `npm run test:i18n-literals` for the Mac thread-search
+  implementation. The unchanged baseline at commit `844b332f7` contains Han text
+  in a Markdown rendering fixture, so the repository-wide scanner fails before
+  it ever evaluates the thread-search diff. Independently reproduced by Gary on
+  clean `main`: the same two lines, and only those two.
+- This fixture/scanner contract is outside the thread-search implementation
+  path. Resolve it in a separate task; it is not a thread-search FAIL/BLOCKER.
+
 ## Explicitly still out of scope (do not re-open)
 
 Per §7 and D4 of the design, and confirmed unchanged by review:

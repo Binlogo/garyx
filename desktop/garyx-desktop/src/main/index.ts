@@ -69,6 +69,7 @@ import type {
   DeleteTaskInput,
   ListTaskForestInput,
   ListProviderRecentSessionsInput,
+  ListThreadSummariesInput,
   ListTasksInput,
   ListWorkspaceFilesInput,
   MarkAutomationSeenInput,
@@ -147,6 +148,7 @@ import {
   fetchThreadFavorites,
   fetchThreadFavoritesSnapshot,
   fetchRecentThreads,
+  fetchThreadSummaries,
   getCodingUsage,
   getClaudeCodeAuth,
   getCapsule,
@@ -193,8 +195,10 @@ import {
   deleteClaudeCodeAccount,
   assignTask,
   assertRecentThreadGatewayScope,
+  assertThreadSummaryGatewayScope,
   updateRemoteThread,
   validateListRecentThreadsInput,
+  validateListThreadSummariesInput,
 } from "./gary-client";
 import { wireGatewayTransport } from "./gateway-transport";
 import {
@@ -1337,6 +1341,17 @@ function registerIpcHandlers(): void {
       const settings = await resolveSettings();
       assertRecentThreadGatewayScope(settings, input.gatewayScope);
       return fetchRecentThreads(settings, input);
+    },
+  );
+
+  ipcMain.handle(
+    "garyx:list-thread-summaries",
+    async (_event, rawInput: unknown) => {
+      const input: ListThreadSummariesInput =
+        validateListThreadSummariesInput(rawInput);
+      const settings = await resolveSettings();
+      assertThreadSummaryGatewayScope(settings, input.gatewayScope);
+      return fetchThreadSummaries(settings, input);
     },
   );
 

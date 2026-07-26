@@ -88,6 +88,66 @@
   padding: 0;
 }
 
+.sidebar-thread-search {
+  display: flex;
+  align-items: center;
+  flex: 0 0 34px;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+  height: 34px;
+  padding: 0 10px;
+  border: 1px solid var(--color-token-border-light);
+  border-radius: 999px;
+  background: var(--color-token-bg-primary);
+  color: var(--color-token-description-foreground);
+}
+
+.sidebar-thread-search > svg {
+  flex: 0 0 auto;
+}
+
+.sidebar-thread-search-input {
+  flex: 1 1 auto;
+  width: 100%;
+  min-width: 0;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  box-shadow: none;
+  color: var(--color-token-text-primary);
+  font: inherit;
+  font-size: var(--text-sm);
+}
+
+.sidebar-thread-search-input::placeholder {
+  color: var(--color-token-description-foreground);
+}
+
+.sidebar-thread-search-input:focus {
+  box-shadow: none;
+}
+
+.sidebar-thread-search-input::-webkit-search-cancel-button {
+  cursor: pointer;
+}
+
+.sidebar-thread-search-results {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.sidebar-thread-search-results > .sidebar-thread-search-rows {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.sidebar-thread-search-rows > .workspace-empty-note {
+  padding: 8px;
+  text-align: center;
+}
+
 /* Pinned is a fixed region above the tabs. `flex-shrink: 0` is load-bearing:
    the tab panel below holds a long list, and a shrinkable pinned region gets
    squeezed to zero height by it. The cap keeps a large pin set from pushing the
