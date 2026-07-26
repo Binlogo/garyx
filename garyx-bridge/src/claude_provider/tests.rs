@@ -1583,7 +1583,7 @@ async fn test_process_messages_streaming_emits_user_ack_boundaries() {
 
     provider.set_pending_inputs("run-1", 1).await;
     let (response_text, result_data, _signals) = provider
-        .process_messages_streaming("run-1", "thread::test", &mut rx, &cb)
+        .process_messages_streaming("run-1", "thread::test", &mut rx, &cb, None, None)
         .await
         .expect("stream should process");
 
@@ -1646,7 +1646,7 @@ async fn test_process_messages_streaming_requires_result_message_for_completion(
 
     let cb: StreamCallback = Box::new(|_| {});
     let (response_text, result_data, _signals) = provider
-        .process_messages_streaming("run-no-result", "thread::test", &mut rx, &cb)
+        .process_messages_streaming("run-no-result", "thread::test", &mut rx, &cb, None, None)
         .await
         .expect("stream should process");
 
@@ -1668,7 +1668,7 @@ async fn test_process_messages_streaming_keeps_input_queue_open_during_post_resu
     let cb: StreamCallback = Box::new(|_| {});
     let task = tokio::spawn(async move {
         provider_for_task
-            .process_messages_streaming("run-post-result", "thread::test", &mut rx, &cb)
+            .process_messages_streaming("run-post-result", "thread::test", &mut rx, &cb, None, None)
             .await
     });
 
@@ -1782,7 +1782,7 @@ async fn test_process_messages_streaming_waits_for_background_task_notification_
     let cb: StreamCallback = Box::new(|_| {});
     let task = tokio::spawn(async move {
         provider_for_task
-            .process_messages_streaming("run-background-task", "thread::test", &mut rx, &cb)
+            .process_messages_streaming("run-background-task", "thread::test", &mut rx, &cb, None, None)
             .await
     });
 
@@ -2062,7 +2062,7 @@ async fn test_process_messages_streaming_survives_followup_gap_after_empty_backg
 
     let cb: StreamCallback = Box::new(|_| {});
     let (response_text, result_data, _signals) = provider
-        .process_messages_streaming("run-followup-gap", "thread::test", &mut source, &cb)
+        .process_messages_streaming("run-followup-gap", "thread::test", &mut source, &cb, None, None)
         .await
         .expect("stream should process");
 
@@ -2133,7 +2133,7 @@ async fn test_process_messages_streaming_survives_gap_when_task_edge_precedes_re
 
     let cb: StreamCallback = Box::new(|_| {});
     let (response_text, result_data, _signals) = provider
-        .process_messages_streaming("run-edge-first", "thread::test", &mut source, &cb)
+        .process_messages_streaming("run-edge-first", "thread::test", &mut source, &cb, None, None)
         .await
         .expect("stream should process");
 
@@ -2222,7 +2222,7 @@ async fn test_stop_hook_observation_holds_stdin_without_stream_task_events() {
 
     let cb: StreamCallback = Box::new(|_| {});
     let (response_text, result_data, _signals) = provider
-        .process_messages_streaming("run-stop-hook-hold", "thread::test", &mut source, &cb)
+        .process_messages_streaming("run-stop-hook-hold", "thread::test", &mut source, &cb, None, None)
         .await
         .expect("stream should process");
 
@@ -2266,7 +2266,7 @@ async fn test_stop_hook_observation_with_terminal_entries_releases_stdin() {
 
     let cb: StreamCallback = Box::new(|_| {});
     let (response_text, result_data, _signals) = provider
-        .process_messages_streaming("run-stop-hook-terminal", "thread::test", &mut source, &cb)
+        .process_messages_streaming("run-stop-hook-terminal", "thread::test", &mut source, &cb, None, None)
         .await
         .expect("stream should process");
 
@@ -2307,7 +2307,7 @@ async fn test_stop_hook_observation_empty_list_releases_prior_hold() {
 
     let cb: StreamCallback = Box::new(|_| {});
     let (response_text, _result_data, _signals) = provider
-        .process_messages_streaming("run-stop-hook-release", "thread::test", &mut source, &cb)
+        .process_messages_streaming("run-stop-hook-release", "thread::test", &mut source, &cb, None, None)
         .await
         .expect("stream should process");
 
@@ -2379,7 +2379,7 @@ async fn test_stop_hook_hold_without_wake_turn_hits_idle_backstop_without_closin
     let cb: StreamCallback = Box::new(|_| {});
     let started = tokio::time::Instant::now();
     let error = provider
-        .process_messages_streaming("run-stop-hook-no-wake", "thread::test", &mut source, &cb)
+        .process_messages_streaming("run-stop-hook-no-wake", "thread::test", &mut source, &cb, None, None)
         .await
         .expect_err("run should fail on the idle backstop");
 
@@ -2457,7 +2457,7 @@ async fn test_process_messages_streaming_reports_idle_stream_as_failure() {
     let cb: StreamCallback = Box::new(|_| {});
 
     let error = provider
-        .process_messages_streaming("run-idle", "thread::test", &mut source, &cb)
+        .process_messages_streaming("run-idle", "thread::test", &mut source, &cb, None, None)
         .await
         .expect_err("an idle stream must use the forceful error cleanup path");
 
@@ -2533,7 +2533,7 @@ async fn test_process_messages_streaming_emits_queued_input_ack_id_after_root_ac
     });
 
     let (_response_text, result_data, _signals) = provider
-        .process_messages_streaming("run-queued", "thread::test", &mut rx, &cb)
+        .process_messages_streaming("run-queued", "thread::test", &mut rx, &cb, None, None)
         .await
         .expect("stream should process");
 
@@ -2638,7 +2638,7 @@ async fn test_process_messages_streaming_suppresses_claude_synthetic_no_response
     });
 
     let (response_text, result_data, _signals) = provider
-        .process_messages_streaming("run-synthetic", "thread::test", &mut rx, &cb)
+        .process_messages_streaming("run-synthetic", "thread::test", &mut rx, &cb, None, None)
         .await
         .expect("stream should process");
 
@@ -2712,7 +2712,7 @@ async fn test_process_messages_streaming_preserves_non_synthetic_no_response_tex
     });
 
     let (response_text, result_data, _signals) = provider
-        .process_messages_streaming("run-real-text", "thread::test", &mut rx, &cb)
+        .process_messages_streaming("run-real-text", "thread::test", &mut rx, &cb, None, None)
         .await
         .expect("stream should process");
 
@@ -2799,7 +2799,7 @@ async fn test_process_messages_streaming_emits_assistant_segment_boundaries() {
     });
 
     let (response_text, _result_data, _signals) = provider
-        .process_messages_streaming("run-assistant-segment", "thread::test", &mut rx, &cb)
+        .process_messages_streaming("run-assistant-segment", "thread::test", &mut rx, &cb, None, None)
         .await
         .expect("stream should process");
 
@@ -2890,7 +2890,7 @@ async fn test_process_messages_streaming_emits_tool_result_user_echo_without_bou
 
     provider.set_pending_inputs("run-2", 1).await;
     let (response_text, _result_data, _signals) = provider
-        .process_messages_streaming("run-2", "thread::test", &mut rx, &cb)
+        .process_messages_streaming("run-2", "thread::test", &mut rx, &cb, None, None)
         .await
         .expect("stream should process");
 
@@ -2966,7 +2966,7 @@ async fn test_process_messages_streaming_emits_live_tool_events() {
     });
 
     let (response_text, _result_data, _signals) = provider
-        .process_messages_streaming("run-tools", "thread::test", &mut rx, &cb)
+        .process_messages_streaming("run-tools", "thread::test", &mut rx, &cb, None, None)
         .await
         .expect("stream should process");
 
@@ -3084,7 +3084,7 @@ async fn test_process_messages_streaming_nested_envelopes_have_zero_main_stream_
     });
 
     let (response_text, result_data, signals) = provider
-        .process_messages_streaming("run-subagent", "thread::test", &mut rx, &cb)
+        .process_messages_streaming("run-subagent", "thread::test", &mut rx, &cb, None, None)
         .await
         .expect("stream should process");
 
@@ -3223,7 +3223,7 @@ async fn test_process_messages_streaming_suppresses_orphan_nested_result() {
     });
 
     let (response_text, result_data, _signals) = provider
-        .process_messages_streaming("run-orphan-nested", "thread::test", &mut rx, &cb)
+        .process_messages_streaming("run-orphan-nested", "thread::test", &mut rx, &cb, None, None)
         .await
         .expect("stream should process");
 
@@ -3299,7 +3299,7 @@ async fn test_process_messages_streaming_error_result_skips_finalize_boundary() 
     });
 
     provider
-        .process_messages_streaming("run-error-result", "thread::test", &mut rx, &cb)
+        .process_messages_streaming("run-error-result", "thread::test", &mut rx, &cb, None, None)
         .await
         .expect("stream should process");
 
@@ -3350,7 +3350,7 @@ async fn test_process_messages_streaming_tool_tail_result_skips_finalize_boundar
     });
 
     provider
-        .process_messages_streaming("run-tool-tail", "thread::test", &mut rx, &cb)
+        .process_messages_streaming("run-tool-tail", "thread::test", &mut rx, &cb, None, None)
         .await
         .expect("stream should process");
 
@@ -3399,7 +3399,7 @@ async fn test_process_messages_streaming_finalizes_each_turn_result() {
     });
 
     provider
-        .process_messages_streaming("run-multi-result", "thread::test", &mut rx, &cb)
+        .process_messages_streaming("run-multi-result", "thread::test", &mut rx, &cb, None, None)
         .await
         .expect("stream should process");
 
@@ -3499,7 +3499,7 @@ async fn test_process_messages_streaming_preserves_assistant_block_order() {
     });
 
     let (response_text, result_data, _signals) = provider
-        .process_messages_streaming("run-order", "thread::test", &mut rx, &cb)
+        .process_messages_streaming("run-order", "thread::test", &mut rx, &cb, None, None)
         .await
         .expect("stream should process");
 
@@ -3626,7 +3626,7 @@ async fn test_process_messages_streaming_waits_for_all_pending_results() {
         .await
         .insert("run-3".to_owned(), pending_ack_queue(&["queued-1"]));
     let (response_text, result_data, _signals) = provider
-        .process_messages_streaming("run-3", "thread::test", &mut rx, &cb)
+        .process_messages_streaming("run-3", "thread::test", &mut rx, &cb, None, None)
         .await
         .expect("stream should process");
 
@@ -3871,7 +3871,7 @@ async fn test_sdk_unsupported_content_block_error_is_not_swallowed_as_no_result(
 
     let cb: StreamCallback = Box::new(|_| {});
     let err = provider
-        .process_messages_streaming("run-document", "thread::document", &mut rx, &cb)
+        .process_messages_streaming("run-document", "thread::document", &mut rx, &cb, None, None)
         .await
         .expect_err("unsupported SDK blocks should surface as parse errors");
 
@@ -4394,7 +4394,7 @@ async fn test_result_terminal_classification_carried_into_processed_result() {
 
     let (_chunks, cb) = collecting_callback();
     let (_text, result_data, _signals) = provider
-        .process_messages_streaming("run-term", "thread::test", &mut rx, &cb)
+        .process_messages_streaming("run-term", "thread::test", &mut rx, &cb, None, None)
         .await
         .expect("stream should process");
 
@@ -4471,7 +4471,7 @@ async fn test_blocking_limit_result_stages_rate_limit_for_take() {
 
     let (_chunks, cb) = collecting_callback();
     provider
-        .process_messages_streaming("run-limit", "thread::limit", &mut rx, &cb)
+        .process_messages_streaming("run-limit", "thread::limit", &mut rx, &cb, None, None)
         .await
         .expect("stream should process");
 
@@ -4513,7 +4513,7 @@ async fn test_rejected_rate_limit_without_result_still_stages() {
 
     let (_chunks, cb) = collecting_callback();
     provider
-        .process_messages_streaming("run-dead", "thread::dead", &mut rx, &cb)
+        .process_messages_streaming("run-dead", "thread::dead", &mut rx, &cb, None, None)
         .await
         .expect("stream should process");
 
@@ -4551,7 +4551,7 @@ async fn test_rate_limit_not_staged_on_success_or_warning() {
     drop(tx);
     let (_chunks, cb) = collecting_callback();
     provider
-        .process_messages_streaming("run-ok", "thread::ok", &mut rx, &cb)
+        .process_messages_streaming("run-ok", "thread::ok", &mut rx, &cb, None, None)
         .await
         .expect("stream should process");
     assert!(provider.take_rate_limit("thread::ok").await.is_none());
@@ -4579,7 +4579,7 @@ async fn test_rate_limit_not_staged_on_success_or_warning() {
     drop(tx);
     let (_chunks, cb) = collecting_callback();
     provider
-        .process_messages_streaming("run-warn", "thread::warn", &mut rx, &cb)
+        .process_messages_streaming("run-warn", "thread::warn", &mut rx, &cb, None, None)
         .await
         .expect("stream should process");
     assert!(provider.take_rate_limit("thread::warn").await.is_none());
@@ -4657,7 +4657,7 @@ async fn test_model_refusal_fallback_overrides_actual_model() {
 
     let (_chunks, cb) = collecting_callback();
     let (_text, result_data, _signals) = provider
-        .process_messages_streaming("run-refusal", "thread::test", &mut rx, &cb)
+        .process_messages_streaming("run-refusal", "thread::test", &mut rx, &cb, None, None)
         .await
         .expect("stream should process");
 
@@ -4687,7 +4687,7 @@ async fn test_assistant_api_error_captured_in_signals() {
 
     let (_chunks, cb) = collecting_callback();
     let (_text, _result_data, signals) = provider
-        .process_messages_streaming("run-apierr", "thread::test", &mut rx, &cb)
+        .process_messages_streaming("run-apierr", "thread::test", &mut rx, &cb, None, None)
         .await
         .expect("stream should process");
 
@@ -4727,7 +4727,7 @@ async fn test_compact_boundary_emits_paired_context_compaction_activity() {
 
     let (chunks, cb) = collecting_callback();
     let (_text, result_data, _signals) = provider
-        .process_messages_streaming("run-compact", "thread::test", &mut rx, &cb)
+        .process_messages_streaming("run-compact", "thread::test", &mut rx, &cb, None, None)
         .await
         .expect("stream should process");
 
@@ -4810,7 +4810,7 @@ async fn test_failed_compact_status_emits_error_activity() {
 
     let (chunks, cb) = collecting_callback();
     provider
-        .process_messages_streaming("run-compact-fail", "thread::test", &mut rx, &cb)
+        .process_messages_streaming("run-compact-fail", "thread::test", &mut rx, &cb, None, None)
         .await
         .expect("stream should process");
 
@@ -4838,7 +4838,7 @@ async fn test_failed_compact_status_emits_error_activity() {
     drop(tx);
     let (chunks, cb) = collecting_callback();
     provider
-        .process_messages_streaming("run-compacting", "thread::test", &mut rx, &cb)
+        .process_messages_streaming("run-compacting", "thread::test", &mut rx, &cb, None, None)
         .await
         .expect("stream should process");
     assert!(
@@ -4911,4 +4911,42 @@ async fn test_execute_sdk_run_entry_clears_stale_rate_limit_stash() {
             .is_none(),
         "connect-failure attempt must clear the stale rate-limit stash"
     );
+}
+
+#[test]
+fn build_claude_rate_limit_carries_launch_account_and_model() {
+    let info = json!({
+        "status": "rejected",
+        "rateLimitType": "five_hour",
+        "resetsAt": 1_893_477_600_i64,
+    });
+    let rate_limit = build_claude_rate_limit(
+        "claude_code",
+        None,
+        Some(&info),
+        Some("usage limit reached"),
+        Some(Path::new(
+            "/Users/test/.garyx/provider-accounts/claude-code/abc",
+        )),
+        Some("claude-fable-5"),
+    )
+    .expect("rate limit built");
+    assert_eq!(
+        rate_limit.account_dir.as_deref(),
+        Some("/Users/test/.garyx/provider-accounts/claude-code/abc")
+    );
+    assert_eq!(rate_limit.model.as_deref(), Some("claude-fable-5"));
+
+    // A system-default run carries no directory; blank models are dropped.
+    let rate_limit = build_claude_rate_limit(
+        "claude_code",
+        Some("blocking_limit"),
+        None,
+        None,
+        None,
+        Some("  "),
+    )
+    .expect("rate limit built");
+    assert_eq!(rate_limit.account_dir, None);
+    assert_eq!(rate_limit.model, None);
 }

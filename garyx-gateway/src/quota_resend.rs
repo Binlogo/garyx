@@ -48,6 +48,12 @@ struct RecoveryPlan {
     /// generation remains parked for account-switch or manual recovery, but
     /// must never wake from the timer by itself.
     reset_at: Option<DateTime<Utc>>,
+    /// Profile directory the blocked run launched with, when the bridge
+    /// enriched the event with it. Consumed by quota auto-switch.
+    account_dir: Option<String>,
+    /// Model the blocked run was using, when reported. Consumed by quota
+    /// auto-switch for scoped-bucket checks.
+    model: Option<String>,
 }
 
 /// Start the event projection and SQL recovery worker. Both are process-local
@@ -73,7 +79,7 @@ async fn run_event_projection(state: Arc<AppState>) {
         match rx.recv().await {
             Ok(raw_event) => {
                 if let Some(plan) = parse_recovery_plan(&raw_event) {
-                    register_plan(&state, plan).await;
+                    register_plan_with_auto_switch(&state, plan).await;
                 }
             }
             Err(broadcast::error::RecvError::Lagged(_)) => {
@@ -84,7 +90,7 @@ async fn run_event_projection(state: Arc<AppState>) {
                     .await
                 {
                     if let Some(plan) = parse_recovery_plan(&raw_event) {
-                        register_plan(&state, plan).await;
+                        register_plan_with_auto_switch(&state, plan).await;
                     }
                 }
             }
@@ -164,6 +170,18 @@ fn recovery_plan_from_control(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned);
+    let account_dir = rate_limit
+        .get("account_dir")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    let model = rate_limit
+        .get("model")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
     Some(RecoveryPlan {
         thread_id,
         run_id,
@@ -171,6 +189,8 @@ fn recovery_plan_from_control(
         provider,
         window,
         reset_at,
+        account_dir,
+        model,
     })
 }
 
@@ -192,7 +212,11 @@ fn due_at_for_reset(reset_at: DateTime<Utc>, now: DateTime<Utc>) -> DateTime<Utc
         .max(now + Duration::seconds(RESEND_BUFFER_SECS))
 }
 
-async fn register_plan(state: &Arc<AppState>, plan: RecoveryPlan) {
+/// Register the plan's durable recovery row. Returns the effective row — the
+/// freshly inserted generation, or the row a replayed/superseded event
+/// resolved to — so the live event path can decide whether auto-switch may
+/// evaluate. `None` means registration failed.
+async fn register_plan(state: &Arc<AppState>, plan: RecoveryPlan) -> Option<QuotaRecoveryJob> {
     let due_at = plan
         .reset_at
         .map(|reset_at| {
@@ -234,13 +258,39 @@ async fn register_plan(state: &Arc<AppState>, plan: RecoveryPlan) {
                 due_at = %job.due_at,
                 "registered quota recovery"
             );
+            Some(job)
         }
-        Err(error) => warn!(
-            thread_id = %log_thread_id,
-            run_id = %log_run_id,
-            error = %error,
-            "failed to register quota recovery"
-        ),
+        Err(error) => {
+            warn!(
+                thread_id = %log_thread_id,
+                run_id = %log_run_id,
+                error = %error,
+                "failed to register quota recovery"
+            );
+            None
+        }
+    }
+}
+
+/// Live-event path: register the durable row, then let quota auto-switch
+/// consider the blocked generation (docs/design/quota-auto-account-switch.md).
+/// Only the event projection calls this — manual retry and startup reconcile
+/// re-register historical generations without an auto-switch trigger.
+async fn register_plan_with_auto_switch(state: &Arc<AppState>, plan: RecoveryPlan) {
+    let context = crate::quota_auto_switch::AccountProvider::from_canonical(&plan.provider).map(
+        |provider| crate::quota_auto_switch::QuotaBlockContext {
+            thread_id: plan.thread_id.clone(),
+            provider,
+            account_dir: plan.account_dir.clone(),
+            model: plan.model.clone(),
+        },
+    );
+    let run_id = plan.run_id.clone();
+    let Some(job) = register_plan(state, plan).await else {
+        return;
+    };
+    if let Some(context) = context {
+        crate::quota_auto_switch::spawn_consideration(state, context, &job, &run_id);
     }
 }
 
@@ -602,7 +652,11 @@ pub(crate) async fn expedite_thread_manual(
     let thread_id_for_db = thread_id.to_owned();
     let db = state.ops.garyx_db.clone();
     let mut changed = db
-        .run_blocking(move |db| db.expedite_quota_recovery_thread(&thread_id_for_db, &now))
+        .run_blocking(move |db| db.expedite_quota_recovery_thread(
+                &thread_id_for_db,
+                &now,
+                crate::garyx_db::QuotaRecoveryWakeReason::Manual,
+            ))
         .await
         .map_err(|error| error.to_string())?;
     if !changed {
@@ -619,11 +673,42 @@ pub(crate) async fn expedite_thread_manual(
             let thread_id_for_db = thread_id.to_owned();
             let db = state.ops.garyx_db.clone();
             changed = db
-                .run_blocking(move |db| db.expedite_quota_recovery_thread(&thread_id_for_db, &now))
+                .run_blocking(move |db| db.expedite_quota_recovery_thread(
+                &thread_id_for_db,
+                &now,
+                crate::garyx_db::QuotaRecoveryWakeReason::Manual,
+            ))
                 .await
                 .map_err(|error| error.to_string())?;
         }
     }
+    if changed {
+        state.ops.quota_recovery_notify.notify_one();
+    }
+    Ok(changed)
+}
+
+/// Auto-switch straggler wake: make one thread's waiting row due now because
+/// the account it blocked on is no longer the active selection. Unlike the
+/// manual path there is no transcript re-registration — the caller just
+/// registered this generation from the live event.
+pub(crate) async fn expedite_thread_account_switch(
+    state: &Arc<AppState>,
+    thread_id: &str,
+) -> Result<bool, String> {
+    let now = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
+    let thread_id_for_db = thread_id.to_owned();
+    let db = state.ops.garyx_db.clone();
+    let changed = db
+        .run_blocking(move |db| {
+            db.expedite_quota_recovery_thread(
+                &thread_id_for_db,
+                &now,
+                crate::garyx_db::QuotaRecoveryWakeReason::AccountSwitch,
+            )
+        })
+        .await
+        .map_err(|error| error.to_string())?;
     if changed {
         state.ops.quota_recovery_notify.notify_one();
     }
@@ -707,6 +792,45 @@ mod tests {
         assert_eq!(plan.blocked_seq, 7);
         assert_eq!(plan.provider, "claude_code");
         assert_eq!(plan.window.as_deref(), Some("primary"));
+    }
+
+    #[test]
+    fn parses_account_dir_and_model_enrichment() {
+        let raw = json!({
+            "type": "committed_message",
+            "thread_id": "thread::quota",
+            "run_id": "run::one",
+            "seq": 7,
+            "message": {
+                "role": "system",
+                "control": {
+                    "kind": "run_complete",
+                    "run_id": "run::one",
+                    "status": "rate_limited",
+                    "rate_limit": {
+                        "provider": "claude",
+                        "window": "primary",
+                        "reset_at": "2026-07-23T00:00:00Z",
+                        "account_dir": "/Users/test/.garyx/provider-accounts/claude-code/abc",
+                        "model": "claude-fable-5",
+                        "will_auto_resend": true
+                    }
+                }
+            }
+        })
+        .to_string();
+        let plan = parse_recovery_plan(&raw).unwrap();
+        assert_eq!(
+            plan.account_dir.as_deref(),
+            Some("/Users/test/.garyx/provider-accounts/claude-code/abc")
+        );
+        assert_eq!(plan.model.as_deref(), Some("claude-fable-5"));
+
+        // Pre-enrichment events keep parsing with the fields absent.
+        let legacy = parse_recovery_plan(&raw_rate_limit_event("run::two", "2026-07-23T00:00:00Z"))
+            .unwrap();
+        assert_eq!(legacy.account_dir, None);
+        assert_eq!(legacy.model, None);
     }
 
     #[test]

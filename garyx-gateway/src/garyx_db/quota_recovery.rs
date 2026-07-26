@@ -499,6 +499,7 @@ impl GaryxDbService {
         &self,
         thread_id: &str,
         due_at: &str,
+        wake_reason: QuotaRecoveryWakeReason,
     ) -> GaryxDbResult<bool> {
         let thread_id = normalize_thread_id(thread_id)?;
         let due_at = normalize_required("due_at", due_at)?;
@@ -507,10 +508,10 @@ impl GaryxDbService {
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let changed = tx.execute(
             "UPDATE quota_recovery_jobs
-                SET due_at = ?2, wake_reason = 'manual', last_error = NULL,
+                SET due_at = ?2, wake_reason = ?4, last_error = NULL,
                     updated_at = ?3
               WHERE thread_id = ?1 AND state = 'waiting'",
-            params![thread_id, due_at, now],
+            params![thread_id, due_at, now, wake_reason.as_str()],
         )? > 0;
         let already_claimed = if changed {
             false
@@ -769,6 +770,26 @@ mod tests {
     }
 
     #[test]
+    fn thread_expedite_records_the_requested_wake_reason() {
+        let db = db();
+        insert(&db, "run::reason", "2099-01-01T00:00:00Z");
+        assert!(
+            db.expedite_quota_recovery_thread(
+                "thread::quota",
+                "2026-07-23T00:00:03Z",
+                QuotaRecoveryWakeReason::AccountSwitch,
+            )
+            .unwrap()
+        );
+        let job = db
+            .active_quota_recovery_job("thread::quota")
+            .unwrap()
+            .unwrap();
+        assert_eq!(job.wake_reason, QuotaRecoveryWakeReason::AccountSwitch);
+        assert_eq!(job.due_at, "2026-07-23T00:00:03Z");
+    }
+
+    #[test]
     fn account_switch_and_timer_share_one_claim() {
         let db = db();
         let job = insert(&db, "run::one", "2099-01-01T00:00:00Z");
@@ -786,7 +807,11 @@ mod tests {
             .unwrap();
         assert_eq!(claimed.job_id, job.job_id);
         assert!(
-            db.expedite_quota_recovery_thread("thread::quota", "2026-07-23T00:00:02Z")
+            db.expedite_quota_recovery_thread(
+                "thread::quota",
+                "2026-07-23T00:00:02Z",
+                QuotaRecoveryWakeReason::Manual,
+            )
                 .unwrap(),
             "a repeated manual retry should accept an already claimed generation"
         );
@@ -848,7 +873,11 @@ mod tests {
         );
 
         assert!(
-            db.expedite_quota_recovery_thread("thread::quota", "2026-07-23T00:00:00.000Z")
+            db.expedite_quota_recovery_thread(
+                "thread::quota",
+                "2026-07-23T00:00:00.000Z",
+                QuotaRecoveryWakeReason::Manual,
+            )
                 .unwrap()
         );
         assert_eq!(

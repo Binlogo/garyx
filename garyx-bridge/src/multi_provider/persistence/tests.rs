@@ -2077,3 +2077,33 @@ async fn test_save_thread_messages_marks_loop_continuation_as_internal() {
     assert_eq!(messages[1]["internal_kind"], "loop_continuation");
     assert_eq!(messages[1]["loop_origin"], "auto_continue");
 }
+
+#[test]
+fn rate_limit_control_value_carries_account_dir_and_model() {
+    let rate_limit = garyx_models::provider::ProviderRateLimit {
+        provider: "claude_code".to_owned(),
+        reset_at: Some("2026-07-23T00:00:00Z".to_owned()),
+        window: Some("primary".to_owned()),
+        account_dir: Some("/Users/test/.garyx/provider-accounts/claude-code/abc".to_owned()),
+        model: Some("claude-fable-5".to_owned()),
+        ..Default::default()
+    };
+    let value = rate_limit_control_value(&rate_limit);
+    assert_eq!(
+        value.get("account_dir").and_then(serde_json::Value::as_str),
+        Some("/Users/test/.garyx/provider-accounts/claude-code/abc")
+    );
+    assert_eq!(
+        value.get("model").and_then(serde_json::Value::as_str),
+        Some("claude-fable-5")
+    );
+
+    // Absent enrichment stays absent instead of serializing null.
+    let bare = garyx_models::provider::ProviderRateLimit {
+        provider: "claude_code".to_owned(),
+        ..Default::default()
+    };
+    let value = rate_limit_control_value(&bare);
+    assert!(value.get("account_dir").is_none());
+    assert!(value.get("model").is_none());
+}

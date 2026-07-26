@@ -239,6 +239,8 @@ fn build_claude_rate_limit(
     terminal_reason: Option<&str>,
     rate_limit_info: Option<&Value>,
     message: Option<&str>,
+    account_dir: Option<&Path>,
+    model: Option<&str>,
 ) -> Option<ProviderRateLimit> {
     let blocking_result = terminal_reason == Some("blocking_limit");
     let info = rate_limit_info.and_then(Value::as_object);
@@ -270,6 +272,11 @@ fn build_claude_rate_limit(
             Some("rate_limit_rejected".to_owned())
         },
         message: message
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned),
+        account_dir: account_dir.map(|path| path.to_string_lossy().into_owned()),
+        model: model
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(ToOwned::to_owned),
@@ -1725,8 +1732,17 @@ impl ClaudeCliProvider {
             )));
         }
 
+        let quota_account_dir = claude_config_dir(launch_env);
+        let requested_model = resolve_requested_model(&self.effective_config(), &options.metadata);
         let processing_result = self
-            .process_messages_streaming(run_id, &options.thread_id, &mut run, on_chunk)
+            .process_messages_streaming(
+                run_id,
+                &options.thread_id,
+                &mut run,
+                on_chunk,
+                quota_account_dir.as_deref(),
+                requested_model.as_deref(),
+            )
             .await;
 
         let (response_text, result_data, signals) = match processing_result {
@@ -1855,6 +1871,8 @@ impl ClaudeCliProvider {
         thread_id: &str,
         source: &mut (impl MessageSource + Send),
         on_chunk: &StreamCallback,
+        quota_account_dir: Option<&Path>,
+        requested_model: Option<&str>,
     ) -> Result<(String, Option<ProcessedResult>, StreamSignals), BridgeError> {
         // NOTE: the per-attempt quota-stash cleanup lives at the TOP of
         // `execute_sdk_run` (before connect/send can fail), not here — a
@@ -2359,6 +2377,8 @@ impl ClaudeCliProvider {
                     .and_then(|result| result.terminal_reason.as_deref()),
                 signals.rate_limit_info.as_ref(),
                 errors_joined.as_deref(),
+                quota_account_dir,
+                actual_model.as_deref().or(requested_model),
             ) {
                 tracing::warn!(
                     run_id = %run_id,

@@ -1094,6 +1094,20 @@ pub struct ProviderRateLimit {
     /// Human-readable detail reported by the provider, when available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    /// Provider profile directory the blocked run was launched with — the
+    /// run-snapshot `CLAUDE_CONFIG_DIR` (Claude) or the app-server slot's
+    /// `CODEX_HOME` (Codex). Absent means the system default profile. Runs
+    /// snapshot their environment at start, so this can differ from the
+    /// selection that is active when the block commits; quota auto-switch
+    /// uses it to tell "the active account is exhausted" from "a stale run
+    /// on a previously active account blocked".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_dir: Option<String>,
+    /// Model the blocked run was using (actual model when reported,
+    /// otherwise the configured model). Quota auto-switch uses it for
+    /// model-scoped allowance checks (e.g. Claude's Fable weekly bucket).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 /// Result of a provider-level agent run.

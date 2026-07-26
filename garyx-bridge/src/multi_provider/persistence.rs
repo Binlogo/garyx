@@ -1412,6 +1412,15 @@ fn rate_limit_control_value(rate_limit: &ProviderRateLimit) -> Value {
     if let Some(message) = &rate_limit.message {
         object.insert("message".to_owned(), Value::String(message.clone()));
     }
+    if let Some(account_dir) = &rate_limit.account_dir {
+        object.insert(
+            "account_dir".to_owned(),
+            Value::String(account_dir.clone()),
+        );
+    }
+    if let Some(model) = &rate_limit.model {
+        object.insert("model".to_owned(), Value::String(model.clone()));
+    }
     object.insert(
         "will_auto_resend".to_owned(),
         Value::Bool(rate_limit.reset_at.is_some()),

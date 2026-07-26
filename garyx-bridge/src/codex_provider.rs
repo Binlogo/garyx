@@ -379,6 +379,8 @@ fn build_codex_rate_limit(
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(ToOwned::to_owned),
+        account_dir: None,
+        model: None,
     })
 }
 
@@ -1682,13 +1684,27 @@ impl CodexAgentProvider {
         usage_limit_hit: bool,
         snapshot: Option<&Value>,
         message: Option<&str>,
+        account_dir: Option<&str>,
+        model: Option<&str>,
     ) {
-        if let Some(rate_limit) = build_codex_rate_limit(
+        if let Some(mut rate_limit) = build_codex_rate_limit(
             self.config.provider_type.as_slug(),
             usage_limit_hit,
             snapshot,
             message,
         ) {
+            // The blocked run's identity comes from the app-server slot that
+            // served it — a busy slot keeps its startup env across selection
+            // changes, so the slot's `CODEX_HOME` is the account that actually
+            // hit the quota.
+            rate_limit.account_dir = account_dir
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned);
+            rate_limit.model = model
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned);
             tracing::warn!(
                 thread_id = %thread_id,
                 provider = %rate_limit.provider,
@@ -2264,6 +2280,8 @@ impl CodexAgentProvider {
                 usage_limit_hit,
                 latest_rate_limit_snapshot.as_ref(),
                 streamed_error_message.as_deref(),
+                client_slot.env.get("CODEX_HOME").map(String::as_str),
+                actual_model.as_deref(),
             )
             .await;
             return Ok(ProviderRunResult {
@@ -2321,6 +2339,8 @@ impl CodexAgentProvider {
                 usage_limit_hit,
                 latest_rate_limit_snapshot.as_ref(),
                 error.as_deref(),
+                client_slot.env.get("CODEX_HOME").map(String::as_str),
+                actual_model.as_deref(),
             )
             .await;
         }
