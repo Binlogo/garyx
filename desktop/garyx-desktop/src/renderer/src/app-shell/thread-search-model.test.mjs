@@ -92,6 +92,7 @@ test("empty and whitespace-only queries never produce a debounce request", () =>
     query: "",
     footerKind: "hidden",
     canLoadMore: false,
+    renderBody: false,
   });
 
   state = threadSearchModel.setQuery(state, "");
@@ -197,10 +198,17 @@ test("presentation derives prompt, loading, results, empty, and failed distinctl
   const prompt = threadSearchModel.engage(
     threadSearchModel.createState("https://gateway.test"),
   );
-  assert.equal(threadSearchModel.presentation(prompt).kind, "prompt");
+  assert.deepEqual(threadSearchModel.presentation(prompt), {
+    kind: "prompt",
+    query: "",
+    footerKind: "hidden",
+    canLoadMore: false,
+    renderBody: false,
+  });
 
   const loading = threadSearchModel.setQuery(prompt, "named");
   assert.equal(threadSearchModel.presentation(loading).kind, "loading");
+  assert.equal(threadSearchModel.presentation(loading).renderBody, true);
 
   const resultsRequest = beginFirstPage(threadSearchModel, loading);
   const results = threadSearchModel.completeRequest(
@@ -216,6 +224,7 @@ test("presentation derives prompt, loading, results, empty, and failed distinctl
     query: "named",
     footerKind: "idle",
     canLoadMore: true,
+    renderBody: true,
   });
 
   const emptyLoading = threadSearchModel.setQuery(results, "missing");
@@ -226,6 +235,7 @@ test("presentation derives prompt, loading, results, empty, and failed distinctl
     page(),
   ).state;
   assert.equal(threadSearchModel.presentation(empty).kind, "empty");
+  assert.equal(threadSearchModel.presentation(empty).renderBody, true);
 
   const failedLoading = threadSearchModel.setQuery(empty, "broken");
   const failedRequest = beginFirstPage(threadSearchModel, failedLoading);
@@ -235,6 +245,7 @@ test("presentation derives prompt, loading, results, empty, and failed distinctl
     new Error("Synthetic failure"),
   );
   assert.equal(threadSearchModel.presentation(failed).kind, "failed");
+  assert.equal(threadSearchModel.presentation(failed).renderBody, true);
 });
 
 test("load-more failure stays in results and retries the same cursor", () => {
@@ -261,6 +272,7 @@ test("load-more failure stays in results and retries the same cursor", () => {
     query: "named",
     footerKind: "loadMoreFailure",
     canLoadMore: false,
+    renderBody: true,
   });
 
   const retry = threadSearchModel.requestLoadMore(state, true);

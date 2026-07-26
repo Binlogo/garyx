@@ -4,7 +4,7 @@ import {
   useState,
   type KeyboardEvent,
 } from "react";
-import { LoaderCircle, Search } from "lucide-react";
+import { LoaderCircle } from "lucide-react";
 
 import type { DesktopThreadSummary } from "@shared/contracts";
 
@@ -114,24 +114,15 @@ function ThreadSearchResultRow({
         label={avatar.label}
         providerIcon={avatar.providerIcon}
         providerType={avatar.providerType}
-        size="default"
       />
-      <span className="thread-search-result-copy">
-        <span className="thread-search-result-title" title={thread.title}>
-          {thread.title}
-        </span>
-        <span className="thread-search-result-meta">
-          <span className="thread-search-result-agent">{avatar.label}</span>
-          <span aria-hidden className="thread-search-result-separator">
-            ·
-          </span>
-          <span
-            className="thread-search-result-workspace"
-            title={workspaceLabel}
-          >
-            {workspaceLabel}
-          </span>
-        </span>
+      <span className="thread-search-result-title" title={thread.title}>
+        {thread.title}
+      </span>
+      <span
+        className="thread-search-result-meta"
+        title={`${avatar.label} · ${workspaceLabel}`}
+      >
+        {avatar.label} · {workspaceLabel}
       </span>
       {timeLabel ? (
         <time
@@ -163,6 +154,7 @@ export function ThreadSearchDialog({
   const inputRef = useRef<HTMLInputElement | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
   const rowRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const focusReturnRef = useRef<HTMLElement | null>(null);
   const [highlightedIndex, setHighlightedIndex] = useState(-1);
 
   useEffect(() => {
@@ -248,8 +240,20 @@ export function ThreadSearchDialog({
       <DialogContent
         className="thread-search-dialog"
         data-testid="thread-search-dialog"
+        onCloseAutoFocus={(event) => {
+          event.preventDefault();
+          const focusReturnTarget = focusReturnRef.current;
+          focusReturnRef.current = null;
+          if (focusReturnTarget?.isConnected) {
+            focusReturnTarget.focus();
+          }
+        }}
         onOpenAutoFocus={(event) => {
           event.preventDefault();
+          focusReturnRef.current =
+            document.activeElement instanceof HTMLElement
+              ? document.activeElement
+              : null;
           inputRef.current?.focus();
         }}
         showCloseButton={false}
@@ -260,7 +264,6 @@ export function ThreadSearchDialog({
         </DialogDescription>
 
         <div className="thread-search-input-shell" role="search">
-          <Search aria-hidden size={21} strokeWidth={1.8} />
           <Input
             aria-activedescendant={activeDescendant}
             aria-autocomplete="list"
@@ -282,105 +285,106 @@ export function ThreadSearchDialog({
           />
         </div>
 
-        <div
-          className="thread-search-body"
-          data-thread-search-state={presentation.kind}
-        >
-          {presentation.kind === "prompt" ? (
-            <div className="thread-search-state" role="status">
-              <Search aria-hidden size={24} strokeWidth={1.6} />
-              <span>{t("Search threads by name")}</span>
-            </div>
-          ) : presentation.kind === "loading" ? (
-            <div
-              aria-live="polite"
-              className="thread-search-state"
-              role="status"
-            >
-              <LoaderCircle
-                aria-hidden
-                className="thread-search-state-spinner"
-                size={24}
-                strokeWidth={1.7}
-              />
-              <span>{t("Searching threads…")}</span>
-            </div>
-          ) : presentation.kind === "empty" ? (
-            <div className="thread-search-state" role="status">
-              <Search aria-hidden size={24} strokeWidth={1.6} />
-              <span>
-                {t('No threads named "{query}"', {
-                  query: presentation.query,
-                })}
-              </span>
-            </div>
-          ) : presentation.kind === "failed" ? (
-            <div className="thread-search-state" role="alert">
-              <span>{t("Thread search unavailable")}</span>
-              <Button onClick={onRetry} size="sm" type="button" variant="outline">
-                {t("Retry")}
-              </Button>
-            </div>
-          ) : (
-            <div
-              aria-label={t("Thread search results")}
-              className="thread-search-results"
-              id="thread-search-results"
-              onScroll={(event) => {
-                if (
-                  presentation.canLoadMore &&
-                  isNearListEnd(event.currentTarget)
-                ) {
-                  onLoadMore();
-                }
-              }}
-              ref={listRef}
-              role="listbox"
-            >
-              {rows.map((thread, index) => (
-                <ThreadSearchResultRow
-                  formatThreadTimestamp={formatThreadTimestamp}
-                  highlighted={index === highlightedIndex}
-                  index={index}
-                  key={thread.id}
-                  onHighlight={setHighlightedIndex}
-                  onOpen={onOpenThread}
-                  rowRef={(node) => {
-                    rowRefs.current[index] = node;
-                  }}
-                  thread={thread}
-                  threadAvatarCatalog={threadAvatarCatalog}
+        {presentation.renderBody ? (
+          <div
+            className="thread-search-body"
+            data-thread-search-state={presentation.kind}
+          >
+            {presentation.kind === "loading" ? (
+              <div
+                aria-live="polite"
+                className="thread-search-state"
+                role="status"
+              >
+                <LoaderCircle
+                  aria-hidden
+                  className="thread-search-state-spinner"
+                  size={14}
+                  strokeWidth={1.7}
                 />
-              ))}
-              {presentation.footerKind === "loadingMore" ? (
-                <div
-                  aria-live="polite"
-                  className="thread-search-results-footer"
-                  role="status"
+                <span>{t("Searching threads…")}</span>
+              </div>
+            ) : presentation.kind === "empty" ? (
+              <div className="thread-search-state" role="status">
+                <span>
+                  {t('No threads named "{query}"', {
+                    query: presentation.query,
+                  })}
+                </span>
+              </div>
+            ) : presentation.kind === "failed" ? (
+              <div className="thread-search-state" role="alert">
+                <span>{t("Thread search unavailable")}</span>
+                <Button
+                  onClick={onRetry}
+                  size="sm"
+                  type="button"
+                  variant="outline"
                 >
-                  <LoaderCircle
-                    aria-hidden
-                    className="thread-search-state-spinner"
-                    size={16}
-                    strokeWidth={1.7}
+                  {t("Retry")}
+                </Button>
+              </div>
+            ) : (
+              <div
+                aria-label={t("Thread search results")}
+                className="thread-search-results"
+                id="thread-search-results"
+                onScroll={(event) => {
+                  if (
+                    presentation.canLoadMore &&
+                    isNearListEnd(event.currentTarget)
+                  ) {
+                    onLoadMore();
+                  }
+                }}
+                ref={listRef}
+                role="listbox"
+              >
+                {rows.map((thread, index) => (
+                  <ThreadSearchResultRow
+                    formatThreadTimestamp={formatThreadTimestamp}
+                    highlighted={index === highlightedIndex}
+                    index={index}
+                    key={thread.id}
+                    onHighlight={setHighlightedIndex}
+                    onOpen={onOpenThread}
+                    rowRef={(node) => {
+                      rowRefs.current[index] = node;
+                    }}
+                    thread={thread}
+                    threadAvatarCatalog={threadAvatarCatalog}
                   />
-                  <span>{t("Loading more")}</span>
-                </div>
-              ) : presentation.footerKind === "loadMoreFailure" ? (
-                <div className="thread-search-results-footer" role="alert">
-                  <Button
-                    onClick={onRetry}
-                    size="sm"
-                    type="button"
-                    variant="outline"
+                ))}
+                {presentation.footerKind === "loadingMore" ? (
+                  <div
+                    aria-live="polite"
+                    className="thread-search-results-footer"
+                    role="status"
                   >
-                    {t("Couldn't load more · Retry")}
-                  </Button>
-                </div>
-              ) : null}
-            </div>
-          )}
-        </div>
+                    <LoaderCircle
+                      aria-hidden
+                      className="thread-search-state-spinner"
+                      size={16}
+                      strokeWidth={1.7}
+                    />
+                    <span>{t("Loading more")}</span>
+                  </div>
+                ) : presentation.footerKind === "loadMoreFailure" ? (
+                  <div className="thread-search-results-footer" role="alert">
+                    <Button
+                      onClick={onRetry}
+                      size="sm"
+                      type="button"
+                      variant="outline"
+                    >
+                      {t("Couldn't load more · Retry")}
+                    </Button>
+                  </div>
+                ) : null}
+              </div>
+            )}
+          </div>
+        ) : null}
       </DialogContent>
     </Dialog>
   );
