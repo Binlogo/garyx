@@ -411,7 +411,6 @@ struct GaryxCapsuleFocusedPreviewView: View {
     @Environment(\.garyxMotion) private var motion
     @EnvironmentObject private var model: GaryxMobileModel
     let selection: GaryxCapsulePreviewSelection
-    var onRequestDismiss: (() -> Void)? = nil
     @StateObject private var loader = GaryxCapsuleFocusedPreviewLoader()
     @StateObject private var gestureBridge = GaryxCapsuleDismissGestureBridge()
     @State private var settleDriver = GaryxGestureSettleDriver.displayLinked()
@@ -790,15 +789,8 @@ struct GaryxCapsuleFocusedPreviewView: View {
             settleDriver.invalidate()
             GaryxMobileHaptics.shared.play(.capsuleDismissCommitted)
             loader.cancelForDismiss(model: model)
-            if let onRequestDismiss {
-                withAnimation(motion.animation(.morphClose)) {
-                    dragState = next
-                    onRequestDismiss()
-                }
-            } else {
-                dragState = next
-                dismiss()
-            }
+            dragState = next
+            dismiss()
         case .snapBack:
             settleCapsuleBack(
                 from: releasedState,
@@ -880,11 +872,7 @@ struct GaryxCapsuleFocusedPreviewView: View {
 
     private func requestFocusedPreviewDismissal() {
         loader.cancelForDismiss(model: model)
-        if let onRequestDismiss {
-            onRequestDismiss()
-        } else {
-            dismiss()
-        }
+        dismiss()
     }
 
     private func copyLink() {
