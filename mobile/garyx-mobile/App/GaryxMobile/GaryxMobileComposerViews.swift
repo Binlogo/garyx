@@ -766,7 +766,39 @@ struct GaryxComposer: View {
 
     private func sendLocalDraft() async {
         guard canSendLocalPayload else { return }
+        dismissKeyboardForConversationSend()
         _ = await model.sendDraft()
+    }
+
+    /// Sending into an existing conversation dismisses the keyboard through
+    /// the exact idle-dismissal path — focus binding plus first-responder
+    /// resignation at user-event time, outside any SwiftUI render
+    /// transaction — BEFORE the send pipeline can freeze the composer.
+    ///
+    /// The ordering is the whole point. The read-only freeze applies
+    /// `isEditable = false` inside a SwiftUI update, and a first responder
+    /// still installed at that moment is resigned implicitly inside that
+    /// update transaction: UIKit's keyboard-hide notification reaches
+    /// SwiftUI mid-update, and the full keyboard height lands on the
+    /// transcript viewport as a single-frame, unanimated cliff in the same
+    /// layout pass as the optimistic append (measured on device: viewport
+    /// 611 → 956 in one frame). The bottom size-change anchor resolves
+    /// against that cliff and produces the intermittent send flash.
+    /// Resigning here instead starts the ordinary animated keyboard
+    /// transition — the same multi-frame path as tapping blank space — and
+    /// the later freeze finds no first responder left to resign, so the
+    /// viewport change can never again share a layout pass with content
+    /// growth. Content appended mid-transition rides the animated
+    /// bottom-anchored following exactly like streaming text already does
+    /// during an idle dismissal.
+    ///
+    /// Draft sends never dismiss: route promotion deliberately retains
+    /// first-responder ownership until the route reaches its static
+    /// endpoint (`finalizeInput(preservingFocusUntilRouteTerminal:)`).
+    private func dismissKeyboardForConversationSend() {
+        guard case .thread = routeContext.composerKey else { return }
+        isFocused.wrappedValue = false
+        garyxDismissKeyboard()
     }
 
     private func attachPhotos(

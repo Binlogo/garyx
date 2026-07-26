@@ -9,7 +9,12 @@ private let garyxHistoryPrefetchBoundaryRows = 3
 private let garyxConversationOpeningViewportCoordinateSpace =
     "garyx-conversation-opening-viewport"
 
-private func garyxDismissKeyboard() {
+/// Shared idle-path keyboard dismissal: a direct first-responder resignation
+/// issued from user-event context, never as a side effect of a SwiftUI
+/// state change. Also used by the composer's conversation-send path, which
+/// must start the animated keyboard transition before the send freeze lands
+/// (see `dismissKeyboardForConversationSend`).
+func garyxDismissKeyboard() {
     UIApplication.shared.sendAction(
         #selector(UIResponder.resignFirstResponder),
         to: nil,
