@@ -186,12 +186,16 @@ export function workspaceSuggestionFromPath(
   if (!workspacePath) {
     return null;
   }
+  const workspaceName = workspaceLeafSegment(workspacePath);
+  // Label surfaces preserve separator-only roots such as "/"; this name field
+  // keeps its translated fallback because those paths have no named segment.
+  const hasNamedSegment = /[^\\/]/.test(workspaceName);
   const createdAt =
     timestamps?.createdAt?.trim() ||
     timestamps?.updatedAt?.trim() ||
     '1970-01-01T00:00:00.000Z';
   return {
-    name: workspaceLeafSegment(workspacePath) || fallbackName,
+    name: hasNamedSegment ? workspaceName : fallbackName,
     path: workspacePath,
     kind: 'local',
     createdAt,

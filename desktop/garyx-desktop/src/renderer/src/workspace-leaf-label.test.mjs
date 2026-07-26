@@ -128,3 +128,61 @@ test('composer chips preserve leaf, empty, and gateway-home labels', () => {
   assert.equal(workspaceChipLabel('', '/Users/test'), '');
   assert.equal(workspaceChipLabel('/Users/test', '/Users/test/'), '~');
 });
+
+test('root workspaces preserve every caller’s pre-refactor visible label', () => {
+  const searchMeta = threadSearchRowMeta(
+    {
+      workspacePath: '/',
+      rootWorkspacePath: null,
+      workspaceOrigin: 'explicit',
+    },
+    'Gary',
+    tZh('No workspace'),
+  );
+
+  assert.equal(searchMeta.text, 'Gary · /');
+  assert.equal(searchMeta.tooltip, 'Gary · /');
+  assert.equal(
+    workspaceSuggestionFromPath('/', tZh('Workspace'))?.name,
+    ZH_WORKSPACE,
+  );
+  assert.equal(recentSessionWorkspaceLabel('/', tZh), '/');
+  assert.equal(workspacePathPickerLabel('/'), '/');
+  assert.equal(getWorkspaceLabel(null, { workspacePath: '/' }, tZh), '/');
+  assert.equal(workspaceChipLabel('/', null), '/');
+});
+
+test('thread search never says no workspace while its tooltip shows a path', () => {
+  const workspacePaths = [
+    '/Users/test/projects/garyx',
+    '/',
+    '///',
+    '  /  ',
+    '\\\\\\',
+    'garyx',
+    '',
+    '   ',
+    null,
+    undefined,
+  ];
+
+  for (const workspacePath of workspacePaths) {
+    const meta = threadSearchRowMeta(
+      {
+        workspacePath,
+        rootWorkspacePath: null,
+        workspaceOrigin: 'explicit',
+      },
+      'Gary',
+      tZh('No workspace'),
+    );
+    const visibleSaysNoWorkspace = meta.text === `Gary · ${ZH_NO_WORKSPACE}`;
+    const tooltipSaysNoWorkspace = meta.tooltip === `Gary · ${ZH_NO_WORKSPACE}`;
+
+    assert.equal(
+      visibleSaysNoWorkspace,
+      tooltipSaysNoWorkspace,
+      `text/tooltip workspace state for ${JSON.stringify(workspacePath)}`,
+    );
+  }
+});

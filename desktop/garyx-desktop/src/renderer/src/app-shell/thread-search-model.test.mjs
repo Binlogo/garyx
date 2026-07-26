@@ -518,7 +518,7 @@ test("row meta handles root, trailing separators, and backslash paths", () => {
   assert.equal(
     threadSearchRowMeta(workspaceRow({ workspacePath: "/" }), "Gary", NO_WORKSPACE)
       .text,
-    `Gary · ${NO_WORKSPACE}`,
+    "Gary · /",
   );
   assert.equal(
     threadSearchRowMeta(
