@@ -264,7 +264,7 @@ extension GaryxMobileModel {
         catalogSnapshotRestored = false
         gatewaySettingsDocument = [:]
         isSavingBotSettings = false
-        providerModelsByType = [:]
+        providerModelCatalog.reset()
         claudeCodeAccounts = nil
         isLoadingClaudeCodeAccounts = false
         claudeCodeAccountsError = nil

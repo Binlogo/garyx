@@ -59,7 +59,12 @@ import {
 import { AgentOptionAvatar, AgentOptionRow } from './app-shell/components/AgentOptionAvatar';
 import { providerLabel as sharedProviderLabel } from './app-shell/components/agents-hub-helpers';
 import { AgentsIcon } from './app-shell/icons';
-import { resolveComposerModelControlState } from './composer-model-control';
+import {
+  resolveComposerModelControlState,
+  shouldClearServiceTierForModelSelection,
+  supportsComposerReasoningControl,
+  supportsComposerServiceTierControl,
+} from './composer-model-control';
 
 export type { ComposerAgentOption };
 
@@ -364,11 +369,12 @@ function renderComposerModelControl({
     thinkingLevelFallbackLabel: t("Thinking level"),
     standardServiceTierLabel: t("Standard"),
   });
-  const supportsReasoning =
-    Boolean(providerModels.supportsReasoningEffortSelection) &&
-    reasoningEfforts.length > 0;
-  const supportsServiceTier =
-    Boolean(providerModels.supportsServiceTierSelection) && serviceTiers.length > 0;
+  const supportsReasoning = supportsComposerReasoningControl(
+    reasoningEfforts,
+  );
+  const supportsServiceTier = supportsComposerServiceTierControl(
+    serviceTiers,
+  );
 
   // Selecting a model also clears a service tier the target model does not
   // support, so the thread never runs with an unsupported speed tier (mirrors
@@ -378,13 +384,13 @@ function renderComposerModelControl({
     if (!onSelectServiceTier || !effectiveServiceTierId) {
       return;
     }
-    const targetOption = modelId
-      ? models.find((option) => option.id === modelId)
-      : defaultModelOption;
-    const targetTiers = targetOption?.serviceTiers?.length
-      ? targetOption.serviceTiers
-      : providerModels.serviceTiers || [];
-    if (!targetTiers.some((tier) => tier.id === effectiveServiceTierId)) {
+    if (shouldClearServiceTierForModelSelection({
+      providerModels,
+      models,
+      defaultModelOption,
+      modelId,
+      effectiveServiceTierId,
+    })) {
       onSelectServiceTier(null);
     }
   };

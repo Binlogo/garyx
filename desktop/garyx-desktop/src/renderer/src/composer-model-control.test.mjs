@@ -1,7 +1,20 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 
-import { resolveComposerModelControlState } from './composer-model-control.ts';
+import {
+  resolveComposerModelControlState,
+  shouldClearServiceTierForModelSelection,
+  supportsComposerReasoningControl,
+  supportsComposerServiceTierControl,
+} from './composer-model-control.ts';
+
+const degradedProviderModels = JSON.parse(
+  readFileSync(
+    new URL('./fixtures/provider-models-claude-code-degraded.json', import.meta.url),
+    'utf8',
+  ),
+);
 
 const providerModels = {
   providerType: 'claude_code',
@@ -351,5 +364,144 @@ test('model-less Claude Code menu keeps provider-level reasoning intersection', 
   assert.deepEqual(
     state.reasoningEfforts.map((option) => option.id),
     ['low', 'medium', 'high'],
+  );
+});
+
+test('degraded catalog keeps the effective thinking-level control visible', () => {
+  const state = resolve({
+    providerModels: degradedProviderModels,
+    effectiveModel: 'claude-opus-5',
+    effectiveReasoningEffort: 'max',
+  });
+
+  assert.deepEqual(
+    state.reasoningEfforts.map((option) => option.id),
+    ['max'],
+  );
+  assert.equal(
+    supportsComposerReasoningControl(
+      state.reasoningEfforts,
+    ),
+    true,
+  );
+});
+
+test('provider with no thinking levels and no effective value keeps the control hidden', () => {
+  const state = resolve({
+    providerModels: degradedProviderModels,
+    effectiveModel: 'claude-sonnet-4-6',
+  });
+
+  assert.deepEqual(state.reasoningEfforts, []);
+  assert.equal(
+    supportsComposerReasoningControl(
+      state.reasoningEfforts,
+    ),
+    false,
+  );
+  assert.deepEqual(state.serviceTiers, []);
+  assert.equal(
+    supportsComposerServiceTierControl(
+      state.serviceTiers,
+    ),
+    false,
+  );
+});
+
+test('degraded catalog preserves an effective service tier across model selection', () => {
+  const state = resolve({
+    providerModels: degradedProviderModels,
+    effectiveModel: 'claude-opus-5',
+    effectiveServiceTier: 'priority',
+  });
+
+  assert.deepEqual(
+    state.serviceTiers.map((option) => option.id),
+    ['priority'],
+  );
+  assert.equal(
+    supportsComposerServiceTierControl(
+      state.serviceTiers,
+    ),
+    true,
+  );
+  assert.equal(
+    shouldClearServiceTierForModelSelection({
+      providerModels: degradedProviderModels,
+      models: state.models,
+      defaultModelOption: state.defaultModelOption,
+      modelId: 'claude-sonnet-4-6',
+      effectiveServiceTierId: state.effectiveServiceTierId,
+    }),
+    false,
+  );
+});
+
+test('healthy catalog still clears a genuinely unsupported service tier', () => {
+  const serviceTierCatalog = {
+    ...providerModels,
+    supportsServiceTierSelection: true,
+    serviceTiers: [{ id: 'standard', label: 'Standard', recommended: true }],
+    models: providerModels.models.map((model) => ({
+      ...model,
+      serviceTiers: [{ id: 'standard', label: 'Standard', recommended: true }],
+    })),
+  };
+  const state = resolve({
+    providerModels: serviceTierCatalog,
+    effectiveModel: 'claude-opus-4-8',
+    effectiveServiceTier: 'priority',
+  });
+
+  assert.equal(
+    shouldClearServiceTierForModelSelection({
+      providerModels: serviceTierCatalog,
+      models: state.models,
+      defaultModelOption: state.defaultModelOption,
+      modelId: 'claude-haiku-4-5',
+      effectiveServiceTierId: state.effectiveServiceTierId,
+    }),
+    true,
+  );
+});
+
+test('healthy service tiers keep their options, labels, selection, and ordering', () => {
+  const serviceTiers = [
+    { id: 'standard', label: 'Standard', recommended: true },
+    { id: 'priority', label: 'Fast', recommended: false },
+  ];
+  const serviceTierCatalog = {
+    ...providerModels,
+    supportsServiceTierSelection: true,
+    serviceTiers,
+    models: providerModels.models.map((model) => ({
+      ...model,
+      serviceTiers,
+    })),
+  };
+  const state = resolve({
+    providerModels: serviceTierCatalog,
+    effectiveModel: 'claude-opus-4-8',
+    effectiveServiceTier: 'priority',
+  });
+
+  assert.deepEqual(
+    state.serviceTiers.map(({ id, label }) => ({ id, label })),
+    [
+      { id: 'standard', label: 'Standard' },
+      { id: 'priority', label: 'Fast' },
+    ],
+  );
+  assert.equal(state.effectiveServiceTierId, 'priority');
+  assert.equal(supportsComposerServiceTierControl(state.serviceTiers), true);
+  assert.equal(
+    shouldClearServiceTierForModelSelection({
+      providerModels: serviceTierCatalog,
+      models: state.models,
+      defaultModelOption: state.defaultModelOption,
+      modelId: 'claude-haiku-4-5',
+      effectiveServiceTierId: state.effectiveServiceTierId,
+    }),
+    false,
   );
 });

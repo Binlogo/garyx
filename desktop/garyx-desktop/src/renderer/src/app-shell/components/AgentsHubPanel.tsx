@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import type {
   DesktopAgentCatalog,
@@ -85,6 +85,8 @@ import type {
 
 type AgentsHubPanelProps = {
   gatewayScope?: string;
+  providerModelsByType?: Partial<Record<ProviderType, DesktopProviderModels>>;
+  refreshProviderModels?: (providerType: ProviderType) => Promise<boolean>;
   workspaces?: DesktopWorkspace[];
   onAddWorkspace?: (path: string) => Promise<DesktopWorkspace | null>;
   onRefreshAgentTargets?: () => Promise<void>;
@@ -95,6 +97,8 @@ type AgentsHubPanelProps = {
 
 export function AgentsHubPanel({
   gatewayScope = '',
+  providerModelsByType = {},
+  refreshProviderModels = async () => false,
   workspaces = [],
   onAddWorkspace,
   onRefreshAgentTargets,
@@ -151,13 +155,6 @@ export function AgentsHubPanel({
   const avatarFlowRef = useRef(avatarFlow);
   const avatarGenerationEpochRef = useRef(0);
   const previousGatewayScopeRef = useRef(gatewayScope);
-  const [providerModelsByType, setProviderModelsByType] = useState<
-    Partial<Record<ProviderType, DesktopProviderModels>>
-  >({});
-  const [providerModelsLoading, setProviderModelsLoading] = useState<
-    Partial<Record<ProviderType, boolean>>
-  >({});
-
   async function loadData(options: { silent?: boolean } = {}) {
     // A silent refresh (e.g. when the window regains focus) must not flash the
     // loading state, blank the lists, or toast on a transient failure. It only
@@ -170,30 +167,12 @@ export function AgentsHubPanel({
     }
   }
 
-  async function ensureProviderModels(providerType: ProviderType) {
-    if (providerModelsByType[providerType] || providerModelsLoading[providerType]) {
-      return;
-    }
-    setProviderModelsLoading((current) => ({ ...current, [providerType]: true }));
-    try {
-      const result = await window.garyxDesktop.listProviderModels(providerType);
-      setProviderModelsByType((current) => ({ ...current, [providerType]: result }));
-    } catch (error) {
-      setProviderModelsByType((current) => ({
-        ...current,
-        [providerType]: {
-          providerType,
-          supportsModelSelection: false,
-          models: [],
-          defaultModel: null,
-          source: 'desktop',
-          error: error instanceof Error ? error.message : t('Failed to load models'),
-        },
-      }));
-    } finally {
-      setProviderModelsLoading((current) => ({ ...current, [providerType]: false }));
-    }
-  }
+  const ensureProviderModels = useCallback(
+    async (providerType: ProviderType) => {
+      await refreshProviderModels(providerType);
+    },
+    [refreshProviderModels],
+  );
 
   useEffect(() => {
     void loadData();
@@ -218,6 +197,15 @@ export function AgentsHubPanel({
       closeAvatarStyleDialog();
     }
   }, [gatewayScope, avatarStyleDialogOpen]);
+
+  useEffect(() => {
+    const providerTypes = new Set(
+      agents.map((agent) => agent.providerType as ProviderType),
+    );
+    for (const providerType of providerTypes) {
+      void ensureProviderModels(providerType);
+    }
+  }, [agents, ensureProviderModels, gatewayScope]);
 
   // Re-fetch when the user returns to the app, so changes made on another
   // surface (e.g. editing an agent's model on mobile) show up without a manual
@@ -247,7 +235,7 @@ export function AgentsHubPanel({
     if (agentDialogMode === 'create' || agentDialogMode === 'edit') {
       void ensureProviderModels(agentDraft.providerType);
     }
-  }, [agentDialogMode, agentDraft.providerType]);
+  }, [agentDialogMode, agentDraft.providerType, ensureProviderModels]);
 
   useEffect(() => {
     // The view dialog resolves model/effort ids to catalog labels.
@@ -257,7 +245,7 @@ export function AgentsHubPanel({
         void ensureProviderModels(agent.providerType as ProviderType);
       }
     }
-  }, [agentDialogMode, selectedAgentId, agents]);
+  }, [agentDialogMode, selectedAgentId, agents, ensureProviderModels]);
 
   useEffect(() => {
     if (agentDialogMode !== 'create' || agentIdTouched) {

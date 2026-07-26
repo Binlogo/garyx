@@ -21,7 +21,6 @@ import {
   type ConnectionStatus,
   type DesktopChatStreamEvent,
   type DesktopChannelEndpoint,
-  type DesktopProviderModels,
   type DesktopSessionProviderHint,
   type DesktopState,
   type DesktopThreadSummary,
@@ -56,6 +55,7 @@ import { SettingsErrorBoundary } from "../SettingsErrorBoundary";
 import { Input } from "../components/ui/input";
 import { WorkspacePathPickerDialog } from "../components/WorkspacePathPicker";
 import { workspaceGitStatusCache } from "../workspace-git-status-cache";
+import { ProviderModelCatalog } from "../provider-model-catalog";
 import { WorkspaceEpochContext } from "../components/workspace-data-adapter";
 // Side-effect import: wires cross-store capsule cache invalidation (a `/serve`
 // 404 in either the HTML or thumbnail store tombstones the other for that id).
@@ -662,6 +662,12 @@ export function AppShell() {
           messageStateRef.current.intentsById[intentId] || null,
       }),
   );
+  const [providerModelCatalog] = useState(
+    () =>
+      new ProviderModelCatalog((providerType) =>
+        window.garyxDesktop.listProviderModels(providerType),
+      ),
+  );
   // 5b-7a: shell-owned side-chat session store (bindings/drafts/transients
   // outlive the inspector dock; its shadow refs feed the orchestration deps).
   const [sideChatSessions] = useState(() => new SideChatSessions());
@@ -703,6 +709,7 @@ export function AppShell() {
     gatewayMirror.beginConnectionScope(committedGatewayKey, {
       desktopState,
     });
+    providerModelCatalog.setGatewayScope(committedGatewayKey);
     sideChatSessions.setGatewayScope(committedGatewayKey);
     threadSideToolsVisibility.setGatewayScope(committedGatewayKey);
     // Pending automation-run reconciliation belongs to the previous
@@ -716,6 +723,7 @@ export function AppShell() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     gatewayMirror,
+    providerModelCatalog,
     sideChatSessions,
     threadSideToolsVisibility,
     committedGatewayKey,
@@ -769,9 +777,16 @@ export function AppShell() {
     useState<string | null>(null);
   const [pendingModelServiceTier, setPendingModelServiceTier] =
     useState<string | null>(null);
-  const [providerModelsByType, setProviderModelsByType] = useState<
-    Record<string, DesktopProviderModels | null>
-  >({});
+  const providerModelCatalogSnapshot = useSyncExternalStore(
+    providerModelCatalog.subscribe,
+    providerModelCatalog.getSnapshot,
+  );
+  const providerModelsByType = providerModelCatalogSnapshot.catalogs;
+  const refreshProviderModels = useCallback(
+    (providerType: DesktopApiProviderType) =>
+      providerModelCatalog.refresh(providerType),
+    [providerModelCatalog],
+  );
   const hasNewThreadDraft = newThreadDraftActive && !selectedThreadId;
   const activeThreadMessageKey =
     selectedThreadId ||
@@ -1142,62 +1157,37 @@ export function AppShell() {
     if (!pendingAgentProviderType) {
       return;
     }
-    if (pendingAgentProviderType in providerModelsByType) {
-      return;
-    }
-    let cancelled = false;
-    void window.garyxDesktop.listProviderModels(pendingAgentProviderType).then(
-      (models) => {
-        if (!cancelled) {
-          setProviderModelsByType((current) => ({
-            ...current,
-            [pendingAgentProviderType]: models,
-          }));
-        }
-      },
-      () => {
-        if (!cancelled) {
-          setProviderModelsByType((current) => ({
-            ...current,
-            [pendingAgentProviderType]: null,
-          }));
-        }
-      },
-    );
-    return () => {
-      cancelled = true;
-    };
-  }, [pendingAgentProviderType, providerModelsByType]);
+    void refreshProviderModels(pendingAgentProviderType);
+  }, [
+    committedGatewayKey,
+    pendingAgentId,
+    pendingAgentProviderType,
+    refreshProviderModels,
+  ]);
   useEffect(() => {
     if (!activeThreadProviderType) {
       return;
     }
-    if (activeThreadProviderType in providerModelsByType) {
-      return;
-    }
-    let cancelled = false;
-    void window.garyxDesktop.listProviderModels(activeThreadProviderType).then(
-      (models) => {
-        if (!cancelled) {
-          setProviderModelsByType((current) => ({
-            ...current,
-            [activeThreadProviderType]: models,
-          }));
-        }
-      },
-      () => {
-        if (!cancelled) {
-          setProviderModelsByType((current) => ({
-            ...current,
-            [activeThreadProviderType]: null,
-          }));
-        }
-      },
-    );
-    return () => {
-      cancelled = true;
+    void refreshProviderModels(activeThreadProviderType);
+  }, [
+    activeThreadProviderType,
+    committedGatewayKey,
+    refreshProviderModels,
+    selectedThreadId,
+  ]);
+  useEffect(() => {
+    const refreshOnReturn = () => {
+      if (!document.hidden) {
+        void providerModelCatalog.refreshKnown();
+      }
     };
-  }, [activeThreadProviderType, providerModelsByType]);
+    window.addEventListener("focus", refreshOnReturn);
+    document.addEventListener("visibilitychange", refreshOnReturn);
+    return () => {
+      window.removeEventListener("focus", refreshOnReturn);
+      document.removeEventListener("visibilitychange", refreshOnReturn);
+    };
+  }, [providerModelCatalog]);
   const activeAgent = activeAgentId
     ? desktopAgentMap.get(activeAgentId) || null
     : null;
@@ -5377,6 +5367,12 @@ export function AppShell() {
                     gatewaySaving={gatewaySettingsSaving}
                     gatewayStatusMessage={gatewaySettingsStatus}
                     gatewayProfiles={gatewayProfiles}
+                    providerCatalogScope={committedGatewayKey}
+                    providerModelsByType={providerModelsByType}
+                    providerModelsRefreshing={
+                      providerModelCatalogSnapshot.refreshing
+                    }
+                    refreshProviderModels={refreshProviderModels}
                     localSettingsDirty={localSettingsDirty}
                     localSettings={settingsDraft}
                     onAddGatewayProfile={async (input) => {
@@ -5516,6 +5512,8 @@ export function AppShell() {
                   desktopState.settings.gatewayAuthToken,
                   desktopState.settings.gatewayHeaders,
                 ].join('\u001f') : ''}
+                providerModelsByType={providerModelsByType}
+                refreshProviderModels={refreshProviderModels}
                 workspaces={workspacePickerWorkspaces}
                 onAddWorkspace={addWorkspacePathFromPicker}
                 onOpenMemory={(agent) => {

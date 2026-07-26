@@ -346,15 +346,16 @@ final class GaryxThreadModelOverridePresentationTests: XCTestCase {
 
     /// A provider advertising nothing usable yields no rows at all, so the
     /// follow-default row never appears alone.
-    func testModelPickerHasNoRowsWhenEveryAdvertisedIdIsBlank() throws {
+    func testModelPickerKeepsEffectiveValueWhenEveryAdvertisedIdIsBlank() throws {
         let providerModels = try decodeProviderModels(onlyBlankIdProviderJSON)
 
-        XCTAssertTrue(
+        XCTAssertEqual(
             GaryxThreadModelOverridePresentation.modelPickerOptions(
                 providerModels: providerModels,
                 effectiveModel: "claude-opus-5",
                 defaultRowLabel: "Agent default"
-            ).isEmpty
+            ).map(\.id),
+            ["", "claude-opus-5"]
         )
     }
 
@@ -485,13 +486,14 @@ final class GaryxThreadModelOverridePresentationTests: XCTestCase {
         )
     }
 
-    func testModelPickerHasNoRowsWithoutAdvertisedModels() {
-        XCTAssertTrue(
+    func testModelPickerKeepsEffectiveModelWithoutCatalog() {
+        XCTAssertEqual(
             GaryxThreadModelOverridePresentation.modelPickerOptions(
                 providerModels: nil,
                 effectiveModel: "claude-opus-5",
                 defaultRowLabel: "Agent default"
-            ).isEmpty
+            ).map(\.id),
+            ["", "claude-opus-5"]
         )
     }
 
@@ -511,6 +513,134 @@ final class GaryxThreadModelOverridePresentationTests: XCTestCase {
         XCTAssertEqual(options.map(\.id), ["", "low", "high", "max"])
     }
 
+    func testDegradedCatalogKeepsEffectiveReasoningEffortRow() throws {
+        let degraded = try capturedDegradedProviderModels()
+
+        let options = GaryxThreadModelOverridePresentation.reasoningEffortPickerOptions(
+            providerModels: degraded,
+            model: "claude-opus-5",
+            effectiveReasoningEffort: "max",
+            defaultRowLabel: "Agent default"
+        )
+
+        XCTAssertEqual(options.map(\.id), ["", "max"])
+        XCTAssertEqual(options.map(\.label), ["Agent default", "max"])
+    }
+
+    func testMissingCatalogKeepsEffectiveReasoningEffortRow() {
+        let options = GaryxThreadModelOverridePresentation.reasoningEffortPickerOptions(
+            providerModels: nil,
+            model: "claude-opus-5",
+            effectiveReasoningEffort: "max",
+            defaultRowLabel: "Agent default"
+        )
+
+        XCTAssertEqual(options.map(\.id), ["", "max"])
+    }
+
+    func testProviderWithoutReasoningEffortsOrEffectiveValueKeepsRowHidden() throws {
+        let degraded = try capturedDegradedProviderModels()
+
+        XCTAssertTrue(
+            GaryxThreadModelOverridePresentation.reasoningEffortPickerOptions(
+                providerModels: degraded,
+                model: "claude-sonnet-4-6",
+                effectiveReasoningEffort: nil,
+                defaultRowLabel: "Agent default"
+            ).isEmpty
+        )
+    }
+
+    func testDegradedCatalogKeepsEffectiveServiceTierRow() throws {
+        let degraded = try capturedDegradedProviderModels()
+
+        let options = GaryxThreadModelOverridePresentation.serviceTierPickerOptions(
+            providerModels: degraded,
+            model: "claude-opus-5",
+            effectiveServiceTier: "priority",
+            defaultRowLabel: "Standard"
+        )
+
+        XCTAssertEqual(options.map(\.id), ["", "priority"])
+        XCTAssertEqual(options.map(\.label), ["Standard", "priority"])
+    }
+
+    func testProviderWithoutServiceTiersOrEffectiveValueKeepsRowHidden() throws {
+        let degraded = try capturedDegradedProviderModels()
+
+        XCTAssertTrue(
+            GaryxThreadModelOverridePresentation.serviceTierPickerOptions(
+                providerModels: degraded,
+                model: "claude-sonnet-4-6",
+                effectiveServiceTier: nil,
+                defaultRowLabel: "Standard"
+            ).isEmpty
+        )
+    }
+
+    func testHealthyServiceTierPickerKeepsOrderingLabelsAndSelection() throws {
+        let providerModels = try decodeProviderModels(serviceTierProviderJSON)
+        let options = GaryxThreadModelOverridePresentation.serviceTierPickerOptions(
+            providerModels: providerModels,
+            model: "codex-test",
+            effectiveServiceTier: "priority",
+            defaultRowLabel: "Standard"
+        )
+
+        XCTAssertEqual(options.map(\.id), ["", "standard", "priority"])
+        XCTAssertEqual(options.map(\.label), ["Standard", "Standard", "Fast"])
+        XCTAssertEqual(
+            GaryxThreadModelOverridePresentation.selectedPickerOptionId(cell: "priority"),
+            "priority"
+        )
+        XCTAssertEqual(
+            GaryxThreadModelOverridePresentation.sanitizedServiceTier(
+                providerModels: providerModels,
+                model: "codex-test",
+                serviceTier: "priority"
+            ),
+            "priority"
+        )
+        XCTAssertNil(
+            GaryxThreadModelOverridePresentation.sanitizedServiceTier(
+                providerModels: providerModels,
+                model: "codex-test",
+                serviceTier: "turbo"
+            )
+        )
+    }
+
+    func testDegradedCatalogDoesNotClearPinnedRuntimeCellsOnModelSelection() throws {
+        let degraded = try capturedDegradedProviderModels()
+
+        let update = GaryxThreadModelOverridePresentation.modelSelectionUpdate(
+            providerModels: degraded,
+            selected: "claude-sonnet-4-6",
+            threadAgentId: nil,
+            agents: [],
+            reasoningEffortCell: "max",
+            serviceTierCell: "priority"
+        )
+
+        XCTAssertNil(update.reasoningEffort)
+        XCTAssertNil(update.serviceTier)
+    }
+
+    func testHealthyCatalogStillClearsGenuinelyUnsupportedRuntimeCells() throws {
+        let providerModels = try decodeProviderModels(configuredClaudeProviderJSON)
+
+        let update = GaryxThreadModelOverridePresentation.modelSelectionUpdate(
+            providerModels: providerModels,
+            selected: "claude-sonnet-4-6",
+            threadAgentId: nil,
+            agents: [],
+            reasoningEffortCell: "max",
+            serviceTierCell: nil
+        )
+
+        XCTAssertEqual(update.reasoningEffort, "")
+    }
+
     private func makeAgent(id: String, model: String, enabled: Bool) -> GaryxAgentSummary {
         GaryxAgentSummary(
             id: id,
@@ -523,6 +653,17 @@ final class GaryxThreadModelOverridePresentationTests: XCTestCase {
 
     private func decodeProviderModels(_ json: String) throws -> GaryxProviderModels {
         try JSONDecoder().decode(GaryxProviderModels.self, from: Data(json.utf8))
+    }
+
+    private func capturedDegradedProviderModels() throws -> GaryxProviderModels {
+        let url = try XCTUnwrap(
+            Bundle.module.url(
+                forResource: "provider-models-claude-code-degraded",
+                withExtension: "json",
+                subdirectory: "Fixtures"
+            )
+        )
+        return try JSONDecoder().decode(GaryxProviderModels.self, from: Data(contentsOf: url))
     }
 
     private let claudeProviderJSON = """
@@ -697,6 +838,33 @@ final class GaryxThreadModelOverridePresentationTests: XCTestCase {
         "supports_model_selection": false,
         "source": "provider",
         "models": []
+    }
+    """
+
+    private let serviceTierProviderJSON = """
+    {
+        "provider_type": "codex_app_server",
+        "supports_model_selection": true,
+        "models": [
+            {
+                "id": "codex-test",
+                "label": "Codex Test",
+                "recommended": true,
+                "service_tiers": [
+                    { "id": "standard", "label": "Standard", "recommended": true },
+                    { "id": "priority", "label": "Fast", "recommended": false }
+                ]
+            }
+        ],
+        "supports_reasoning_effort_selection": false,
+        "reasoning_efforts": [],
+        "supports_service_tier_selection": true,
+        "service_tiers": [
+            { "id": "standard", "label": "Standard", "recommended": true },
+            { "id": "priority", "label": "Fast", "recommended": false }
+        ],
+        "default_model": "codex-test",
+        "source": "codex_app_server"
     }
     """
 }

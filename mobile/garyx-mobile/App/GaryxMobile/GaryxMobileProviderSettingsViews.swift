@@ -49,8 +49,7 @@ struct GaryxSettingsProviderContent: View {
             async let usageRefresh: Void = model.refreshCodingUsageWidget()
             async let accountsRefresh: Void = model.loadClaudeCodeAccounts()
             _ = await (usageRefresh, accountsRefresh)
-            for provider in GaryxModelProviderDefaults.providers
-            where model.providerModelsByType[provider.providerType] == nil {
+            for provider in GaryxModelProviderDefaults.providers {
                 await model.loadProviderModels(providerType: provider.providerType)
             }
         }

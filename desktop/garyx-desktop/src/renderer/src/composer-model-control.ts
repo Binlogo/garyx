@@ -19,6 +19,44 @@ export type ComposerModelControlState = {
   defaultServiceTierLabel: string;
 };
 
+export function supportsComposerReasoningControl(
+  reasoningEfforts: DesktopProviderModelOption[],
+): boolean {
+  return reasoningEfforts.length > 0;
+}
+
+export function supportsComposerServiceTierControl(
+  serviceTiers: DesktopProviderModelOption[],
+): boolean {
+  return serviceTiers.length > 0;
+}
+
+export function shouldClearServiceTierForModelSelection({
+  providerModels,
+  models,
+  defaultModelOption,
+  modelId,
+  effectiveServiceTierId,
+}: {
+  providerModels: DesktopProviderModels;
+  models: DesktopProviderModelOption[];
+  defaultModelOption?: DesktopProviderModelOption;
+  modelId: string | null;
+  effectiveServiceTierId: string;
+}): boolean {
+  if (!effectiveServiceTierId) {
+    return false;
+  }
+  const targetOption = modelId
+    ? models.find((option) => option.id === modelId)
+    : defaultModelOption;
+  const targetTiers = targetOption?.serviceTiers?.length
+    ? targetOption.serviceTiers
+    : providerModels.serviceTiers || [];
+  return targetTiers.length > 0
+    && !targetTiers.some((tier) => tier.id === effectiveServiceTierId);
+}
+
 export function resolveComposerModelControlState({
   providerModels,
   agentConfiguredModel,
