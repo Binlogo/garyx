@@ -123,6 +123,28 @@ export type GatewayMutationResult<T> =
 let gatewayFetchImpl: GatewayFetch | null = null;
 let gatewayStreamFetchImpl: GatewayFetch | null = null;
 
+const READ_TRANSPORT_RETRY_DELAYS_MS = [150, 500] as const;
+const RETRYABLE_CHROMIUM_NETWORK_ERRORS = new Set([
+  "ERR_ADDRESS_UNREACHABLE",
+  "ERR_CONNECTION_ABORTED",
+  "ERR_CONNECTION_CLOSED",
+  "ERR_CONNECTION_RESET",
+  "ERR_INTERNET_DISCONNECTED",
+  "ERR_NAME_NOT_RESOLVED",
+  "ERR_NETWORK_CHANGED",
+  "ERR_NETWORK_IO_SUSPENDED",
+  "ERR_TIMED_OUT",
+]);
+const RETRYABLE_SYSTEM_NETWORK_ERRORS = new Set([
+  "ECONNABORTED",
+  "ECONNRESET",
+  "EHOSTUNREACH",
+  "ENETDOWN",
+  "ENETRESET",
+  "ENETUNREACH",
+  "ETIMEDOUT",
+]);
+
 export function setGatewayFetch(fetchImpl: GatewayFetch | null): void {
   gatewayFetchImpl = fetchImpl;
 }
@@ -368,6 +390,107 @@ function messageFromUnknown(error: unknown): string {
     : String(error || "Gateway request failed.");
 }
 
+function retryableNetworkCode(error: unknown): string | null {
+  const visited = new Set<unknown>();
+  let current: unknown = error;
+  while (
+    current &&
+    (typeof current === "object" || typeof current === "function") &&
+    !visited.has(current)
+  ) {
+    visited.add(current);
+    const record = current as { code?: unknown; message?: unknown; cause?: unknown };
+    if (typeof record.code === "string") {
+      const code = record.code.replace(/^net::/, "").toUpperCase();
+      if (
+        RETRYABLE_CHROMIUM_NETWORK_ERRORS.has(code) ||
+        RETRYABLE_SYSTEM_NETWORK_ERRORS.has(code)
+      ) {
+        return code;
+      }
+    }
+    if (typeof record.message === "string") {
+      const chromiumCode = record.message.match(/\b(?:net::)?(ERR_[A-Z0-9_]+)\b/)?.[1];
+      if (
+        chromiumCode &&
+        RETRYABLE_CHROMIUM_NETWORK_ERRORS.has(chromiumCode)
+      ) {
+        return chromiumCode;
+      }
+      const systemCode = record.message.match(
+        /\b(E(?:CONNABORTED|CONNRESET|HOSTUNREACH|NETDOWN|NETRESET|NETUNREACH|TIMEDOUT))\b/,
+      )?.[1];
+      if (systemCode && RETRYABLE_SYSTEM_NETWORK_ERRORS.has(systemCode)) {
+        return systemCode;
+      }
+    }
+    current = record.cause;
+  }
+  return null;
+}
+
+function abortReason(signal: AbortSignal): unknown {
+  return signal.reason ?? new DOMException("The request was aborted.", "AbortError");
+}
+
+async function waitForReadRetry(
+  delayMs: number,
+  signal: AbortSignal | null | undefined,
+): Promise<void> {
+  if (signal?.aborted) {
+    throw abortReason(signal);
+  }
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, delayMs);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(abortReason(signal as AbortSignal));
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+async function retryReadTransport<T>(
+  signal: AbortSignal | null | undefined,
+  operation: () => Promise<T>,
+): Promise<T> {
+  for (let attempt = 0; ; attempt += 1) {
+    if (signal?.aborted) {
+      throw abortReason(signal);
+    }
+    try {
+      return await operation();
+    } catch (error) {
+      const delayMs = READ_TRANSPORT_RETRY_DELAYS_MS[attempt];
+      if (
+        delayMs === undefined ||
+        signal?.aborted ||
+        retryableNetworkCode(error) === null
+      ) {
+        throw error;
+      }
+      await waitForReadRetry(delayMs, signal);
+    }
+  }
+}
+
+async function fetchResponseBody(
+  url: string,
+  init: RequestInit,
+  semantics: GatewayRequestSemantics,
+): Promise<{ response: Response; body: string }> {
+  const fetchAndRead = async () => {
+    const response = await gatewayFetch(url, init);
+    return { response, body: await response.text() };
+  };
+  return semantics === "readRetryable"
+    ? retryReadTransport(init.signal, fetchAndRead)
+    : fetchAndRead();
+}
+
 function taggedErrorFromPayload(
   payload: unknown,
   expectedOperation: string,
@@ -407,8 +530,11 @@ export async function requestJson<T>(
     init,
     "application/json",
   );
-  const response = await gatewayFetch(request.url, request.init);
-  const body = await response.text();
+  const { response, body } = await fetchResponseBody(
+    request.url,
+    request.init,
+    semantics,
+  );
   const payload = tryParseJson<T>(body);
 
   if (!response.ok) {
@@ -554,8 +680,11 @@ export async function requestText(
     init,
     "text/html, text/plain;q=0.9, */*;q=0.1",
   );
-  const response = await gatewayFetch(request.url, request.init);
-  const body = await response.text();
+  const { response, body } = await fetchResponseBody(
+    request.url,
+    request.init,
+    semantics,
+  );
   const payload = tryParseJson<unknown>(body);
 
   if (!response.ok) {
@@ -593,11 +722,15 @@ export async function requestJsonFromGatewayUrl<T>(
     headers.set("Content-Type", "application/json");
   }
 
-  const response = await gatewayFetch(buildUrlFromGatewayUrl(gatewayUrl, path), {
+  const requestInit: RequestInit = {
     ...init,
     headers,
-  });
-  const body = await response.text();
+  };
+  const { response, body } = await fetchResponseBody(
+    buildUrlFromGatewayUrl(gatewayUrl, path),
+    requestInit,
+    semantics,
+  );
   const payload = tryParseJson<T>(body);
 
   if (!response.ok) {

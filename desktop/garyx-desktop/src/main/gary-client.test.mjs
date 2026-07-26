@@ -1201,6 +1201,85 @@ test("setGatewayFetch routes gateway requests through the injected transport", a
   }
 });
 
+test("readRetryable requests recover from a Chromium network change", async () => {
+  let attempts = 0;
+  setGatewayFetch(async () => {
+    attempts += 1;
+    if (attempts === 1) {
+      throw new Error("net::ERR_NETWORK_CHANGED");
+    }
+    return new Response(JSON.stringify({ ok: true }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  });
+  try {
+    const result = await requestJson(
+      { gatewayUrl: "https://garyx.example.test", gatewayAuthToken: "" },
+      "/api/thing",
+      "readRetryable",
+    );
+    assert.deepEqual(result, { ok: true });
+    assert.equal(attempts, 2);
+  } finally {
+    setGatewayFetch(null);
+  }
+});
+
+test("readRetryable requests retry a network change while reading the response body", async () => {
+  let attempts = 0;
+  setGatewayFetch(async () => {
+    attempts += 1;
+    if (attempts === 1) {
+      return {
+        ok: true,
+        status: 200,
+        statusText: "OK",
+        text: async () => {
+          throw new Error("net::ERR_NETWORK_CHANGED");
+        },
+      };
+    }
+    return new Response(JSON.stringify({ ok: true }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  });
+  try {
+    const result = await requestJson(
+      { gatewayUrl: "https://garyx.example.test", gatewayAuthToken: "" },
+      "/api/thing",
+      "readRetryable",
+    );
+    assert.deepEqual(result, { ok: true });
+    assert.equal(attempts, 2);
+  } finally {
+    setGatewayFetch(null);
+  }
+});
+
+test("mutationSingleAttempt requests never retry a network change", async () => {
+  let attempts = 0;
+  setGatewayFetch(async () => {
+    attempts += 1;
+    throw new Error("net::ERR_NETWORK_CHANGED");
+  });
+  try {
+    await assert.rejects(
+      requestJson(
+        { gatewayUrl: "https://garyx.example.test", gatewayAuthToken: "" },
+        "/api/thing",
+        "mutationSingleAttempt",
+        { method: "POST" },
+      ),
+      /ERR_NETWORK_CHANGED/,
+    );
+    assert.equal(attempts, 1);
+  } finally {
+    setGatewayFetch(null);
+  }
+});
+
 test("gatewayFetch falls back to globalThis.fetch when no transport is injected", async () => {
   // Outside Electron (unit tests / tooling) no transport is injected, so
   // gatewayFetch must read the live globalThis.fetch each call so stubs work.
