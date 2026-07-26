@@ -4,34 +4,19 @@ This record covers the iOS 26-only P2-F polish pass. Visual probes used a
 synthetic DEBUG snapshot and were removed after capture; no Capsule or Artifact
 was created, and no fixture ships in the app.
 
-## Capsule gallery spatial continuity
+## Capsule detail presentation ownership
 
-The gallery thumbnail publishes its bounds through
-`GaryxCapsuleGalleryThumbnailAnchorKey`. One clipped destination canvas samples
-`GaryxAnchoredFullscreenMorphGeometry` in both directions, so dismissal does
-not hand off to a second transition or a different coordinate system.
+The gallery-specific spatial transition recorded by this earlier P2-F pass was
+retired by `#TASK-2767`. Its destination canvas was owned by the gallery's
+safe-area-sized overlay, while transcript cards used a system full-screen
+cover. The two containers exposed different status-bar and home-indicator
+backgrounds even though both mounted the same inner detail view.
 
-- The Core test samples progress `0.0 ... 1.0` in eleven steps and asserts that
-  every closing frame reversed has the same origin, size, corner radius, and
-  content opacity as its opening counterpart.
-- An iOS 26.2 simulator recording captured 68 opening frames and 37 closing
-  frames on the production `garyx://mobile/capsules` route. Both sequences
-  begin/end at the tapped gallery cell; closing returns to the same still
-  mounted cell.
-- The final destination preserves safe-area insets. The close and favorite
-  glass controls resolve to `y = 72 ... 116 pt` on an iPhone 17 Pro instead of
-  entering the status bar or Dynamic Island region.
-- Open and close use their existing purpose-specific spring timings. Their
-  elapsed time may differ, but the sampled spatial path is the same function in
-  reverse.
-
-Local review artifacts:
-
-- `/tmp/garyx-task2468-evidence/capsule-open-production-route.mov`
-- `/tmp/garyx-task2468-evidence/capsule-close-production-route.mov`
-- `/tmp/garyx-task2468-evidence/capsule-open-production-contact-sheet.png`
-- `/tmp/garyx-task2468-evidence/capsule-close-production-contact-sheet.png`
-- `/tmp/garyx-task2468-evidence/capsule-open-final.png`
+Capsule gallery cards, Capsule routes, and transcript cards now submit one
+`GaryxCapsuleDetailPresentationRequest` to the always-attached app-root owner.
+`GaryxCapsuleDetailPresentationPolicy` resolves both entry points to
+`rootFullScreenCover`; no feature surface owns a second overlay or safe-area
+canvas. The Core policy test asserts the two configurations are identical.
 
 ## Glass materialization
 

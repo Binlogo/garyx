@@ -148,6 +148,9 @@ struct GaryxRootView: View {
                 .presentationDetents([.medium, .large])
                 .presentationDragIndicator(.visible)
         }
+        .garyxCapsuleDetailPresentationOwner(
+            store: model.capsuleDetailPresentationStore
+        )
         .environment(
             \.garyxPresentationLeaseCoordinator,
             model.productionRouteStore.presentationCoordinator

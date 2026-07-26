@@ -269,13 +269,9 @@ final class GaryxMobileModel: ObservableObject {
         didSet { pruneCapsuleHTMLCache(validCapsules: capsules) }
     }
     var capsuleFavoriteState = GaryxCapsuleFavoriteReducerState()
-    /// Focused capsule preview presented over the Capsules gallery (card tap or
-    /// `garyx://mobile/capsule` deep link).
-    @Published var galleryFocusedCapsule: GaryxCapsulePreviewSelection?
-    /// Focused capsule preview presented over the current conversation (chat
-    /// capsule-card tap). Kept separate from the gallery cover so each surface
-    /// hosts and dismisses its own preview.
-    @Published var conversationCapsulePreview: GaryxCapsulePreviewSelection?
+    /// Single app-root owner state shared by gallery cards, capsule routes, and
+    /// in-transcript cards.
+    let capsuleDetailPresentationStore = GaryxCapsuleDetailPresentationStore()
     /// Scene notifications are versioned so every focused preview receives
     /// repeated inactive/background/active transitions, even when the enum case
     /// itself is unchanged.

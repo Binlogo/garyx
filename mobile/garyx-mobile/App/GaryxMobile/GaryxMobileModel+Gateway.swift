@@ -247,8 +247,7 @@ extension GaryxMobileModel {
         gatewayDefaultAgentId = nil
         effectiveDefaultAgentId = nil
         skills = []
-        galleryFocusedCapsule = nil
-        conversationCapsulePreview = nil
+        capsuleDetailPresentationStore.dismiss()
         capsuleFavoriteState = GaryxCapsuleFavoriteReducerState()
         capsules = []
         capsuleHTMLCache = [:]

@@ -17,6 +17,53 @@ public struct GaryxCapsulePreviewSelection: Identifiable, Equatable, Sendable {
     }
 }
 
+/// The product surface that requested a focused Capsule detail.
+///
+/// Entry points are retained for diagnostics and policy tests only; they do
+/// not own presentation chrome. Every entry point resolves through
+/// `GaryxCapsuleDetailPresentationPolicy` to the one root presentation owner.
+public enum GaryxCapsuleDetailEntryPoint: Equatable, Sendable {
+    case conversationTranscript
+    case capsulesSurface
+}
+
+/// The sole supported Capsule-detail presentation contract.
+///
+/// Keeping this as a closed Core value prevents feature views from silently
+/// inventing a second overlay, safe-area canvas, or dismissal owner.
+public enum GaryxCapsuleDetailPresentationConfiguration: Equatable, Sendable {
+    case rootFullScreenCover
+}
+
+public enum GaryxCapsuleDetailPresentationPolicy {
+    public static func configuration(
+        for entryPoint: GaryxCapsuleDetailEntryPoint
+    ) -> GaryxCapsuleDetailPresentationConfiguration {
+        switch entryPoint {
+        case .conversationTranscript, .capsulesSurface:
+            .rootFullScreenCover
+        }
+    }
+}
+
+/// One request consumed by the always-attached app-root presentation owner.
+public struct GaryxCapsuleDetailPresentationRequest: Identifiable, Equatable, Sendable {
+    public let selection: GaryxCapsulePreviewSelection
+    public let entryPoint: GaryxCapsuleDetailEntryPoint
+    public let configuration: GaryxCapsuleDetailPresentationConfiguration
+
+    public var id: String { selection.id }
+
+    public init(
+        selection: GaryxCapsulePreviewSelection,
+        entryPoint: GaryxCapsuleDetailEntryPoint
+    ) {
+        self.selection = selection
+        self.entryPoint = entryPoint
+        configuration = GaryxCapsuleDetailPresentationPolicy.configuration(for: entryPoint)
+    }
+}
+
 /// Complete identity of one focused-preview load cycle. A catalog revision
 /// change, present-to-missing projection, or explicit retry cycle therefore
 /// cancels the old task and starts a distinct request.

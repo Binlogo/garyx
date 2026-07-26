@@ -2,6 +2,21 @@ import XCTest
 @testable import GaryxMobileCore
 
 final class GaryxCapsulePreviewLoadingTests: XCTestCase {
+    func testTranscriptAndCapsulesSurfaceShareRootFullScreenPresentation() {
+        let selection = GaryxCapsulePreviewSelection(capsule: capsule(revision: 1))
+        let transcript = GaryxCapsuleDetailPresentationRequest(
+            selection: selection,
+            entryPoint: .conversationTranscript
+        )
+        let capsulesSurface = GaryxCapsuleDetailPresentationRequest(
+            selection: selection,
+            entryPoint: .capsulesSurface
+        )
+
+        XCTAssertEqual(transcript.configuration, capsulesSurface.configuration)
+        XCTAssertEqual(transcript.configuration, .rootFullScreenCover)
+    }
+
     func testProjectionRevisionChangeAndPresentToMissingChangeLoadKey() {
         let selection = GaryxCapsulePreviewSelection(capsule: capsule(revision: 1))
         let rev1 = GaryxCapsulePreviewProjection.loadKey(

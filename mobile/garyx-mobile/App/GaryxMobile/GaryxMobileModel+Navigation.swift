@@ -501,7 +501,7 @@ extension GaryxMobileModel {
         case .automationThreads(let automation):
             replaceAutomation(automation)
         case .capsule(let selection):
-            galleryFocusedCapsule = selection
+            capsuleDetailPresentationStore.present(selection, from: .capsulesSurface)
         case .agent(let agent):
             selectedAgentDetail = agent
         case .skill(let editor, let document):
@@ -567,8 +567,7 @@ extension GaryxMobileModel {
     private func clearRouteDrivenDetailState() {
         selectedAutomationEditor = nil
         selectedAgentDetail = nil
-        galleryFocusedCapsule = nil
-        conversationCapsulePreview = nil
+        capsuleDetailPresentationStore.dismiss()
         routeNotFoundStore.selection = nil
         closeSkillDetail()
     }
