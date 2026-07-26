@@ -18,6 +18,7 @@ import {
   CapsulesIcon,
   NewThreadIcon,
   RecentIcon,
+  SearchIcon,
   SettingsIcon,
   SettingsTabIcon,
   SkillsIcon,
@@ -29,9 +30,6 @@ type AppLeftRailProps = {
   gatewayIdentitySlot?: React.ReactNode;
   /** Threads-tab body: the recent thread list, owned by AppShell. */
   recentThreadsSlot?: React.ReactNode;
-  threadSearchFieldSlot: React.ReactNode;
-  threadSearchResultsSlot: React.ReactNode;
-  threadSearchActive: boolean;
   sidebarTab: SidebarTab;
   onSelectSidebarTab: (tab: SidebarTab) => void;
   isSettingsView: boolean;
@@ -56,6 +54,7 @@ type AppLeftRailProps = {
   onSelectSettingsTab: (tabId: SettingsTabId) => void;
   onBackToThreads: () => void;
   onNewThread: () => void;
+  onOpenThreadSearch: () => void;
   onOpenRecent: () => void;
   onSelectAutomation: (automationId: string | null) => void;
   onOpenCapsules: () => void;
@@ -85,9 +84,6 @@ type AppLeftRailProps = {
 export function AppLeftRail({
   gatewayIdentitySlot,
   recentThreadsSlot,
-  threadSearchFieldSlot,
-  threadSearchResultsSlot,
-  threadSearchActive,
   sidebarTab,
   onSelectSidebarTab,
   isSettingsView,
@@ -112,6 +108,7 @@ export function AppLeftRail({
   onSelectSettingsTab,
   onBackToThreads,
   onNewThread,
+  onOpenThreadSearch,
   onOpenRecent,
   onSelectAutomation,
   onOpenCapsules,
@@ -143,50 +140,42 @@ export function AppLeftRail({
   return (
     <aside className={`left-rail ${isSettingsView ? 'settings-rail-shell' : ''}`}>
       {isSettingsView ? (
-        <>
-          {threadSearchFieldSlot}
-          {threadSearchActive ? (
-            threadSearchResultsSlot
-          ) : (
-            <nav
-              aria-label={t('Settings navigation')}
-              className="sidebar-nav settings-sidebar-nav"
-            >
+        <nav
+          aria-label={t('Settings navigation')}
+          className="sidebar-nav settings-sidebar-nav"
+        >
+          <button
+            className="sidebar-action sidebar-back-action"
+            onClick={onBackToThreads}
+            type="button"
+          >
+            <BackIcon />
+            <span>{t('Back to App')}</span>
+          </button>
+
+          <div className="settings-rail-list">
+            {SETTINGS_TABS.map((tab) => (
               <button
-                className="sidebar-action sidebar-back-action"
-                onClick={onBackToThreads}
+                key={tab.id}
+                className={`settings-rail-item ${tab.id === settingsActiveTab ? 'active' : ''}`}
+                onClick={() => {
+                  onSelectSettingsTab(tab.id);
+                }}
                 type="button"
               >
-                <BackIcon />
-                <span>{t('Back to App')}</span>
+                <span className="settings-rail-item-icon">
+                  <SettingsTabIcon tabId={tab.id} />
+                </span>
+                <span className="settings-rail-item-label">{t(tab.label)}</span>
               </button>
-
-              <div className="settings-rail-list">
-                {SETTINGS_TABS.map((tab) => (
-                  <button
-                    key={tab.id}
-                    className={`settings-rail-item ${tab.id === settingsActiveTab ? 'active' : ''}`}
-                    onClick={() => {
-                      onSelectSettingsTab(tab.id);
-                    }}
-                    type="button"
-                  >
-                    <span className="settings-rail-item-icon">
-                      <SettingsTabIcon tabId={tab.id} />
-                    </span>
-                    <span className="settings-rail-item-label">{t(tab.label)}</span>
-                  </button>
-                ))}
-              </div>
-            </nav>
-          )}
-        </>
+            ))}
+          </div>
+        </nav>
       ) : (
         <>
           <div className="sidebar-update-slot">
             <UpdatePill />
           </div>
-          {threadSearchFieldSlot}
           <nav
             aria-label={t('Primary actions')}
             className="sidebar-nav"
@@ -198,6 +187,14 @@ export function AppLeftRail({
             >
               <NewThreadIcon />
               <span>{t('New Thread')}</span>
+            </button>
+            <button
+              className="sidebar-action"
+              onClick={onOpenThreadSearch}
+              type="button"
+            >
+              <SearchIcon />
+              <span>{t('Search')}</span>
             </button>
             <button
               className={`sidebar-action ${isAutomationView ? 'active' : ''}`}
@@ -251,63 +248,54 @@ export function AppLeftRail({
             </button>
           </nav>
 
-          {threadSearchActive ? (
-            threadSearchResultsSlot
-          ) : (
-            <>
-              {/* Pinned is its own region: always visible, in neither tab. */}
-              {pinnedThreadRows.length ? (
-                <div className="sidebar-pinned-region">
-                  <PinnedThreadsSidebar
-                    formatThreadTimestamp={formatThreadTimestamp}
-                    onArchiveThread={onArchivePinnedThread}
-                    onDragCancel={onPinnedThreadDragCancel}
-                    onDragStart={onPinnedThreadDragStart}
-                    onOpenThread={onOpenPinnedThread}
-                    onReorderThreads={onReorderPinnedThreads}
-                    onUnpinThread={onUnpinThread}
-                    rows={pinnedThreadRows}
-                    syncPending={pinnedThreadSyncPending}
-                  />
-                </div>
-              ) : null}
+          {/* Pinned is its own region: always visible, in neither tab. */}
+          {pinnedThreadRows.length ? (
+            <div className="sidebar-pinned-region">
+              <PinnedThreadsSidebar
+                formatThreadTimestamp={formatThreadTimestamp}
+                onArchiveThread={onArchivePinnedThread}
+                onDragCancel={onPinnedThreadDragCancel}
+                onDragStart={onPinnedThreadDragStart}
+                onOpenThread={onOpenPinnedThread}
+                onReorderThreads={onReorderPinnedThreads}
+                onUnpinThread={onUnpinThread}
+                rows={pinnedThreadRows}
+                syncPending={pinnedThreadSyncPending}
+              />
+            </div>
+          ) : null}
 
-              <SidebarTabs
-                onSelectTab={onSelectSidebarTab}
-                selectedTab={sidebarTab}
+          <SidebarTabs onSelectTab={onSelectSidebarTab} selectedTab={sidebarTab} />
+
+          {sidebarTab === 'threads' ? (
+            <div aria-label={t('Threads')} className="sidebar-tab-panel" role="group">
+              {recentThreadsSlot ?? null}
+            </div>
+          ) : (
+            <div aria-label={t('Projects')} className="sidebar-scroll-area" role="group">
+              <BotSidebar
+                activeConversationGroupId={activeBotConversationGroupId}
+                groups={botGroups}
+                onAddBot={onAddBot}
+                onOpenBot={onOpenBot}
+                onToggleConversationGroup={onToggleBotConversationGroup}
+                selectedThreadId={visibleSelectedThreadId}
               />
 
-              {sidebarTab === 'threads' ? (
-                <div aria-label={t('Threads')} className="sidebar-tab-panel" role="group">
-                  {recentThreadsSlot ?? null}
-                </div>
-              ) : (
-                <div aria-label={t('Projects')} className="sidebar-scroll-area" role="group">
-                  <BotSidebar
-                    activeConversationGroupId={activeBotConversationGroupId}
-                    groups={botGroups}
-                    onAddBot={onAddBot}
-                    onOpenBot={onOpenBot}
-                    onToggleConversationGroup={onToggleBotConversationGroup}
-                    selectedThreadId={visibleSelectedThreadId}
-                  />
-
-                  <WorkspaceThreadSidebar
-                    activeThreadId={visibleSelectedThreadId}
-                    gatewayHome={gatewayHome}
-                    onAddWorkspace={onAddWorkspace}
-                    onCreateThreadForWorkspace={onCreateThreadForWorkspace}
-                    onOpenThread={onOpenPinnedThread}
-                    onPinWorkspace={onPinWorkspace}
-                    onRequestRemoveWorkspace={onRequestRemoveWorkspace}
-                    setWorkspaceMenuOpenPath={setWorkspaceMenuOpenPath}
-                    workspaceMenuOpenPath={workspaceMenuOpenPath}
-                    workspaceMutation={workspaceMutation}
-                    workspaceThreadGroups={workspaceThreadGroups}
-                  />
-                </div>
-              )}
-            </>
+              <WorkspaceThreadSidebar
+                activeThreadId={visibleSelectedThreadId}
+                gatewayHome={gatewayHome}
+                onAddWorkspace={onAddWorkspace}
+                onCreateThreadForWorkspace={onCreateThreadForWorkspace}
+                onOpenThread={onOpenPinnedThread}
+                onPinWorkspace={onPinWorkspace}
+                onRequestRemoveWorkspace={onRequestRemoveWorkspace}
+                setWorkspaceMenuOpenPath={setWorkspaceMenuOpenPath}
+                workspaceMenuOpenPath={workspaceMenuOpenPath}
+                workspaceMutation={workspaceMutation}
+                workspaceThreadGroups={workspaceThreadGroups}
+              />
+            </div>
           )}
 
           <div className="sidebar-footer">

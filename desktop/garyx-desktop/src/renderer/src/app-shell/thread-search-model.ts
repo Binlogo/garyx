@@ -7,6 +7,48 @@ import type { RecentFeedFooterKind } from "../recent-conversation-sidebar-model"
 export const THREAD_SEARCH_DEBOUNCE_MS = 250;
 export const THREAD_SEARCH_PAGE_LIMIT = 30;
 
+export type ThreadSearchHighlightDirection = "next" | "previous";
+
+export function threadSearchHighlightForRows(
+  current: number,
+  rowCount: number,
+): number {
+  const count = Math.max(0, Math.trunc(rowCount));
+  if (count === 0) {
+    return -1;
+  }
+  return current >= 0 && current < count ? current : 0;
+}
+
+export function moveThreadSearchHighlight(
+  current: number,
+  rowCount: number,
+  direction: ThreadSearchHighlightDirection,
+): number {
+  const count = Math.max(0, Math.trunc(rowCount));
+  if (count === 0) {
+    return -1;
+  }
+  if (direction === "previous") {
+    return current <= 0 || current >= count ? count - 1 : current - 1;
+  }
+  return current < 0 || current >= count - 1 ? 0 : current + 1;
+}
+
+export function threadSearchHighlightedItem<T>(
+  rows: readonly T[],
+  highlightedIndex: number,
+): T | null {
+  if (
+    !Number.isInteger(highlightedIndex) ||
+    highlightedIndex < 0 ||
+    highlightedIndex >= rows.length
+  ) {
+    return null;
+  }
+  return rows[highlightedIndex] ?? null;
+}
+
 export type ThreadSearchHeadStatus =
   | "idle"
   | "debouncing"

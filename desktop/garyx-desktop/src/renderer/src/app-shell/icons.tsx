@@ -5,6 +5,7 @@ import {
   History,
   ListTodo,
   Router,
+  Search,
   Settings2,
   SlidersHorizontal,
   type LucideIcon,
@@ -213,6 +214,10 @@ export function TasksIcon() {
 
 export function RecentIcon() {
   return <SettingsRailIcon glyph={History} />;
+}
+
+export function SearchIcon() {
+  return <SettingsRailIcon glyph={Search} />;
 }
 
 export function MemoryIcon() {
