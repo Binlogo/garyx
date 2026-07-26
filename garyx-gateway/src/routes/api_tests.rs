@@ -1218,6 +1218,7 @@ async fn test_update_custom_agent_blank_system_prompt_clears_prompt() {
 
 #[tokio::test]
 async fn test_provider_models_reports_claude_code_catalog() {
+    let _cache_guard = crate::provider_models::isolate_provider_model_discovery_cache_for_tests();
     let state = test_state();
     let router = api_router(state);
     let req = Request::builder()
@@ -1237,6 +1238,66 @@ async fn test_provider_models_reports_claude_code_catalog() {
     assert_eq!(json["supports_reasoning_effort_selection"], true);
     assert_eq!(json["default_model"], Value::Null);
     assert!(!json["models"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_provider_models_route_serves_the_active_managed_account_catalog() {
+    const ACCOUNT_ID: &str = "11111111-2222-4333-8444-555555555555";
+    let _cache_guard = crate::provider_models::isolate_provider_model_discovery_cache_for_tests();
+    let temp = tempdir().expect("temp dir");
+    let mut config = GaryxConfig::default();
+    config.provider_accounts.claude_code.active_account_id = Some(ACCOUNT_ID.to_owned());
+    let state = crate::server::AppStateBuilder::new(config)
+        .with_config_path(temp.path().join("garyx.json"))
+        .build();
+    let managed_scope = crate::provider_models::ClaudeCatalogScope::managed(
+        ACCOUNT_ID.to_owned(),
+        Some(temp.path().join(".invalid-claude-account-selection")),
+    );
+    crate::provider_models::store_claude_catalog_for_tests(
+        &managed_scope,
+        "claude-managed-route-model",
+    );
+    let router = api_router(state);
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/provider-models/claude")
+        .body(Body::empty())
+        .unwrap();
+
+    let resp = router.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(json["source"], "claude_code_api");
+    assert_eq!(json["models"][0]["id"], "claude-managed-route-model");
+    assert!(json.get("error").is_none());
+}
+
+#[tokio::test]
+async fn test_provider_models_resolves_invalid_managed_account_to_quarantine_scope() {
+    let temp = tempdir().expect("temp dir");
+    let mut config = GaryxConfig::default();
+    config.provider_accounts.claude_code.active_account_id =
+        Some("missing-managed-account".to_owned());
+    let state = crate::server::AppStateBuilder::new(config.clone())
+        .with_config_path(temp.path().join("garyx.json"))
+        .build();
+
+    let scope = super::custom_agents::resolve_claude_catalog_scope(state.as_ref(), &config).await;
+
+    assert_eq!(scope.cache_key(), "claude_code:missing-managed-account");
+    assert_eq!(
+        scope.config_dir(),
+        Some(
+            temp.path()
+                .join(".invalid-claude-account-selection")
+                .as_path()
+        )
+    );
 }
 
 #[tokio::test]

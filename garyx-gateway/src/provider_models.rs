@@ -1,5 +1,6 @@
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -71,6 +72,46 @@ pub(crate) struct ProviderCatalogDefault {
     pub service_tier: Option<String>,
 }
 
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ClaudeCatalogScope {
+    account_id: Option<String>,
+    config_dir: Option<PathBuf>,
+}
+
+impl ClaudeCatalogScope {
+    pub(crate) fn system() -> Self {
+        Self::default()
+    }
+
+    pub(crate) fn managed(account_id: String, config_dir: Option<PathBuf>) -> Self {
+        Self {
+            account_id: Some(account_id),
+            config_dir,
+        }
+    }
+
+    pub(crate) fn cache_key(&self) -> String {
+        match self.account_id.as_deref() {
+            Some(account_id) => format!("claude_code:{account_id}"),
+            None => "claude_code:system".to_owned(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn config_dir(&self) -> Option<&Path> {
+        self.config_dir.as_deref()
+    }
+
+    fn managed_config_dir(&self) -> Result<Option<&Path>, String> {
+        match self.account_id.as_ref() {
+            Some(_) => self.config_dir.as_deref().map(Some).ok_or_else(|| {
+                "Claude managed catalog scope had no validated config directory".to_owned()
+            }),
+            None => Ok(None),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct ProviderModelDiscovery {
     models: Vec<ProviderModelOption>,
@@ -86,6 +127,7 @@ type CodexModelDiscovery = ProviderModelDiscovery;
 pub(crate) async fn list_provider_models(
     config: &GaryxConfig,
     provider_type: ProviderType,
+    claude_catalog_scope: ClaudeCatalogScope,
 ) -> ProviderModelsResponse {
     match provider_type {
         ProviderType::AntigravityCli => {
@@ -109,11 +151,12 @@ pub(crate) async fn list_provider_models(
             let default_model = configured_default_model(config, ProviderType::ClaudeCode, aliases);
             let default_reasoning_effort =
                 configured_default_reasoning_effort(config, ProviderType::ClaudeCode, aliases);
-            let mut discovery = match fresh_cached_discovery("claude_code") {
+            let cache_key = claude_catalog_scope.cache_key();
+            let mut discovery = match fresh_cached_discovery(&cache_key) {
                 Some(discovery) => discovery,
                 None => {
-                    let result = fetch_claude_code_models().await;
-                    discover_or_fallback("claude_code", result, |error| {
+                    let result = fetch_claude_code_models(&claude_catalog_scope).await;
+                    discover_or_fallback(&cache_key, result, |error| {
                         claude_code_builtin_models(Some(error))
                     })
                 }
@@ -154,18 +197,18 @@ pub(crate) async fn list_provider_models(
                 configured_default_reasoning_effort(config, provider_type.clone(), aliases);
             let bin = app_server_model_bin(&provider_type);
             let cache_key = if provider_type == ProviderType::Traex {
-                "traex"
+                TRAEX_CACHE_KEY.to_owned()
             } else {
-                "codex_app_server"
+                CODEX_APP_SERVER_CACHE_KEY.to_owned()
             };
-            let mut discovery = match fresh_cached_discovery(cache_key) {
+            let mut discovery = match fresh_cached_discovery(&cache_key) {
                 Some(discovery) => discovery,
                 None => {
                     let result = fetch_app_server_models(bin, source).await;
                     if provider_type == ProviderType::Traex {
-                        discover_or_fallback(cache_key, result, traex_unavailable_models)
+                        discover_or_fallback(&cache_key, result, traex_unavailable_models)
                     } else {
-                        discover_or_fallback(cache_key, result, |error| {
+                        discover_or_fallback(&cache_key, result, |error| {
                             codex_builtin_models(Some(error))
                         })
                     }
@@ -205,10 +248,11 @@ pub(crate) async fn list_provider_models(
                 configured_default_model(config, ProviderType::GrokBuild, aliases);
             let configured_reasoning =
                 configured_default_reasoning_effort(config, ProviderType::GrokBuild, aliases);
-            let discovery = match fresh_cached_discovery("grok_acp") {
+            let cache_key = GROK_ACP_CACHE_KEY.to_owned();
+            let discovery = match fresh_cached_discovery(&cache_key) {
                 Some(discovery) => discovery,
                 None => discover_or_fallback(
-                    "grok_acp",
+                    &cache_key,
                     fetch_grok_models(config).await,
                     grok_unavailable_models,
                 ),
@@ -266,6 +310,42 @@ use claude_code::*;
 use codex::*;
 use grok::*;
 use process_rpc::*;
+
+#[cfg(test)]
+pub(crate) fn isolate_provider_model_discovery_cache_for_tests()
+-> std::sync::MutexGuard<'static, ()> {
+    static TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    let guard = TEST_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    clear_provider_model_discovery_cache_for_tests();
+    guard
+}
+
+#[cfg(test)]
+pub(crate) fn store_claude_catalog_for_tests(scope: &ClaudeCatalogScope, model_id: &str) {
+    let supported_reasoning_efforts = reasoning_efforts("high", &["high"]);
+    store_discovery(
+        &scope.cache_key(),
+        ProviderModelDiscovery {
+            models: vec![ProviderModelOption {
+                id: model_id.to_owned(),
+                label: friendly_model_label(model_id),
+                description: None,
+                recommended: false,
+                default_reasoning_effort: Some("high".to_owned()),
+                supported_reasoning_efforts: supported_reasoning_efforts.clone(),
+                service_tiers: Vec::new(),
+            }],
+            default_model: None,
+            reasoning_efforts: supported_reasoning_efforts,
+            service_tiers: Vec::new(),
+            source: "claude_code_api",
+            error: None,
+        },
+    );
+}
 
 #[cfg(test)]
 mod tests;

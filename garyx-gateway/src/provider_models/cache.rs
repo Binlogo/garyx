@@ -1,6 +1,9 @@
 use super::*;
 
 pub(super) const PROVIDER_MODEL_DISCOVERY_SUCCESS_TTL: Duration = Duration::from_secs(10 * 60);
+pub(super) const CODEX_APP_SERVER_CACHE_KEY: &str = "codex_app_server";
+pub(super) const TRAEX_CACHE_KEY: &str = "traex";
+pub(super) const GROK_ACP_CACHE_KEY: &str = "grok_acp";
 
 #[derive(Debug, Clone)]
 pub(super) struct ProviderModelDiscoveryCacheEntry {
@@ -9,28 +12,28 @@ pub(super) struct ProviderModelDiscoveryCacheEntry {
 }
 
 pub(super) fn provider_model_discovery_cache()
--> &'static Mutex<HashMap<&'static str, ProviderModelDiscoveryCacheEntry>> {
-    static CACHE: OnceLock<Mutex<HashMap<&'static str, ProviderModelDiscoveryCacheEntry>>> =
+-> &'static Mutex<HashMap<String, ProviderModelDiscoveryCacheEntry>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, ProviderModelDiscoveryCacheEntry>>> =
         OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-pub(super) fn fresh_cached_discovery(cache_key: &'static str) -> Option<ProviderModelDiscovery> {
+pub(super) fn fresh_cached_discovery(cache_key: &str) -> Option<ProviderModelDiscovery> {
     let guard = provider_model_discovery_cache().lock().ok()?;
     let entry = guard.get(cache_key)?;
     (entry.fetched_at.elapsed() < PROVIDER_MODEL_DISCOVERY_SUCCESS_TTL)
         .then(|| entry.discovery.clone())
 }
 
-pub(super) fn cached_discovery(cache_key: &'static str) -> Option<ProviderModelDiscovery> {
+pub(super) fn cached_discovery(cache_key: &str) -> Option<ProviderModelDiscovery> {
     let guard = provider_model_discovery_cache().lock().ok()?;
     guard.get(cache_key).map(|entry| entry.discovery.clone())
 }
 
-pub(super) fn store_discovery(cache_key: &'static str, discovery: ProviderModelDiscovery) {
+pub(super) fn store_discovery(cache_key: &str, discovery: ProviderModelDiscovery) {
     if let Ok(mut guard) = provider_model_discovery_cache().lock() {
         guard.insert(
-            cache_key,
+            cache_key.to_owned(),
             ProviderModelDiscoveryCacheEntry {
                 fetched_at: Instant::now(),
                 discovery,
@@ -40,7 +43,7 @@ pub(super) fn store_discovery(cache_key: &'static str, discovery: ProviderModelD
 }
 
 pub(super) fn discover_or_fallback(
-    cache_key: &'static str,
+    cache_key: &str,
     discover_result: Result<ProviderModelDiscovery, String>,
     fallback: impl FnOnce(String) -> ProviderModelDiscovery,
 ) -> ProviderModelDiscovery {
@@ -58,7 +61,7 @@ pub(super) fn discover_or_fallback(
 }
 
 pub(super) fn stale_or_fallback(
-    cache_key: &'static str,
+    cache_key: &str,
     error: String,
     fallback: impl FnOnce(String) -> ProviderModelDiscovery,
 ) -> ProviderModelDiscovery {
