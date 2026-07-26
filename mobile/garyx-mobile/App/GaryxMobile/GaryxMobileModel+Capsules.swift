@@ -338,7 +338,10 @@ extension GaryxMobileModel {
         }
         let fallback = capsules.first { $0.id == id }
             ?? GaryxCapsuleSummary(id: id, title: "Capsule")
-        conversationCapsulePreview = GaryxCapsulePreviewSelection(capsule: fallback)
+        capsuleDetailPresentationStore.present(
+            GaryxCapsulePreviewSelection(capsule: fallback),
+            from: .conversationTranscript
+        )
     }
 
     func deleteCapsule(_ capsule: GaryxCapsuleSummary) async {
@@ -346,8 +349,7 @@ extension GaryxMobileModel {
         do {
             _ = try await client().deleteCapsule(id: capsule.id)
             guard runtimeGeneration == gatewayRequestToken else { return }
-            if galleryFocusedCapsule?.id == capsule.id { galleryFocusedCapsule = nil }
-            if conversationCapsulePreview?.id == capsule.id { conversationCapsulePreview = nil }
+            capsuleDetailPresentationStore.dismiss(ifPresenting: capsule.id)
             capsuleFavoriteState.mutations.removeValue(forKey: capsule.id)
             // didSet prunes the deleted capsule's preview HTML and bumps the epoch.
             capsules.removeAll { $0.id == capsule.id }
