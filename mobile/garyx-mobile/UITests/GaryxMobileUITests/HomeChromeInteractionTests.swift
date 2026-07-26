@@ -1,3 +1,4 @@
+import UIKit
 import XCTest
 
 final class HomeChromeInteractionTests: XCTestCase {
@@ -49,6 +50,7 @@ final class HomeChromeInteractionTests: XCTestCase {
         XCTAssertEqual(search.frame.width, 44, accuracy: 1)
         XCTAssertEqual(search.frame.height, 44, accuracy: 1)
         let collapsedFrame = search.frame
+        let collapsedScreenshot = app.screenshot()
 
         search.tap()
 
@@ -75,7 +77,19 @@ final class HomeChromeInteractionTests: XCTestCase {
             "an empty search field must not expose a clear control"
         )
 
-        let attachment = XCTAttachment(screenshot: app.screenshot())
+        // Reproduce the reported settled state instead of sampling a morph
+        // frame. The collapsed icon itself supplies the pixel mask, so the
+        // check follows the exact SF Symbol geometry rendered on this runtime.
+        Thread.sleep(forTimeInterval: 1.5)
+        let expandedScreenshot = app.screenshot()
+        try assertNoCollapsedSearchGlyphResidue(
+            collapsedScreenshot: collapsedScreenshot,
+            expandedScreenshot: expandedScreenshot,
+            collapsedFrame: collapsedFrame,
+            appFrame: app.frame
+        )
+
+        let attachment = XCTAttachment(screenshot: expandedScreenshot)
         attachment.name = "Home thread search expanded"
         attachment.lifetime = .keepAlways
         add(attachment)
@@ -277,5 +291,111 @@ final class HomeChromeInteractionTests: XCTestCase {
 
     private func tapTrailingCircleEdge(_ element: XCUIElement) {
         element.coordinate(withNormalizedOffset: CGVector(dx: 0.88, dy: 0.5)).tap()
+    }
+
+    private func assertNoCollapsedSearchGlyphResidue(
+        collapsedScreenshot: XCUIScreenshot,
+        expandedScreenshot: XCUIScreenshot,
+        collapsedFrame: CGRect,
+        appFrame: CGRect
+    ) throws {
+        let collapsedImage = try XCTUnwrap(collapsedScreenshot.image.cgImage)
+        let expandedImage = try XCTUnwrap(expandedScreenshot.image.cgImage)
+        XCTAssertEqual(collapsedImage.width, expandedImage.width)
+        XCTAssertEqual(collapsedImage.height, expandedImage.height)
+
+        let collapsedData = try XCTUnwrap(collapsedImage.dataProvider?.data)
+        let expandedData = try XCTUnwrap(expandedImage.dataProvider?.data)
+        let collapsedBytes = try XCTUnwrap(CFDataGetBytePtr(collapsedData))
+        let expandedBytes = try XCTUnwrap(CFDataGetBytePtr(expandedData))
+        let collapsedBytesPerPixel = collapsedImage.bitsPerPixel / 8
+        let expandedBytesPerPixel = expandedImage.bitsPerPixel / 8
+        guard collapsedBytesPerPixel >= 3, expandedBytesPerPixel >= 3 else {
+            XCTFail("search screenshot pixel format has fewer than three color bytes")
+            return
+        }
+
+        let scaleX = CGFloat(collapsedImage.width) / appFrame.width
+        let scaleY = CGFloat(collapsedImage.height) / appFrame.height
+        let minX = max(
+            0,
+            Int(floor((collapsedFrame.minX - appFrame.minX) * scaleX))
+        )
+        let maxX = min(
+            collapsedImage.width - 1,
+            Int(ceil((collapsedFrame.maxX - appFrame.minX) * scaleX)) - 1
+        )
+        let minY = max(
+            0,
+            Int(floor((collapsedFrame.minY - appFrame.minY) * scaleY))
+        )
+        let maxY = min(
+            collapsedImage.height - 1,
+            Int(ceil((collapsedFrame.maxY - appFrame.minY) * scaleY)) - 1
+        )
+        let referenceOffset = Int((collapsedFrame.width * scaleX).rounded())
+
+        var sourceBrightness: CGFloat = 0
+        var referenceBrightness: CGFloat = 0
+        var maskPixelCount = 0
+
+        for y in minY...maxY {
+            for x in minX...maxX {
+                let collapsedIndex = y * collapsedImage.bytesPerRow
+                    + x * collapsedBytesPerPixel
+                let maskBrightness = (
+                    CGFloat(collapsedBytes[collapsedIndex])
+                        + CGFloat(collapsedBytes[collapsedIndex + 1])
+                        + CGFloat(collapsedBytes[collapsedIndex + 2])
+                ) / 3
+                guard maskBrightness < 128 else { continue }
+
+                let referenceX = x - referenceOffset
+                guard referenceX >= 0 else {
+                    XCTFail("search residue reference sample falls outside the screenshot")
+                    return
+                }
+                let sourceIndex = y * expandedImage.bytesPerRow
+                    + x * expandedBytesPerPixel
+                let referenceIndex = y * expandedImage.bytesPerRow
+                    + referenceX * expandedBytesPerPixel
+                sourceBrightness += (
+                    CGFloat(expandedBytes[sourceIndex])
+                        + CGFloat(expandedBytes[sourceIndex + 1])
+                        + CGFloat(expandedBytes[sourceIndex + 2])
+                ) / 3
+                referenceBrightness += (
+                    CGFloat(expandedBytes[referenceIndex])
+                        + CGFloat(expandedBytes[referenceIndex + 1])
+                        + CGFloat(expandedBytes[referenceIndex + 2])
+                ) / 3
+                maskPixelCount += 1
+            }
+        }
+
+        guard maskPixelCount > 100 else {
+            XCTFail("collapsed search glyph mask contained only \(maskPixelCount) pixels")
+            return
+        }
+        let sourceMean = sourceBrightness / CGFloat(maskPixelCount)
+        let referenceMean = referenceBrightness / CGFloat(maskPixelCount)
+        let luminanceDip = referenceMean - sourceMean
+        let report = String(
+            format: "mask=%d source=%.3f reference=%.3f dip=%.3f",
+            maskPixelCount,
+            sourceMean,
+            referenceMean,
+            luminanceDip
+        )
+        let metricsAttachment = XCTAttachment(string: report)
+        metricsAttachment.name = "Home search residue luminance"
+        metricsAttachment.lifetime = .keepAlways
+        add(metricsAttachment)
+
+        XCTAssertLessThan(
+            luminanceDip,
+            1,
+            "the expanded search chrome must not redraw the collapsed magnifying-glass node (\(report))"
+        )
     }
 }

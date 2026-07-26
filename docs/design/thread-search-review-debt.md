@@ -84,6 +84,30 @@ which is deprecated on iOS 26 in favor of the screen or trait collection from
 the active view context. The focused thread-search build reproduces this
 warning, but changing the shared Home row rendering is outside this feature.
 
+### I-5 — Other mounted morph sources may leak through the shared glass pass
+
+- `mobile/garyx-mobile/App/GaryxMobile/GaryxCapsuleChromePanel.swift:53-70`
+- `mobile/garyx-mobile/App/GaryxMobile/GaryxMobileConversationViews.swift:1560-1584`
+
+Both pre-existing morph sources keep their compact button mounted, switch its
+glass to `.identity` with `isEnabled: !isHidden`, and then hide the Button with
+an ancestor opacity. The Home search residue proved that an enclosing
+`GlassEffectContainer` can render a glass node outside that ancestor opacity on
+iOS 26.5. These two surfaces need their own visual reproduction and pixel
+coverage before changing them; they are outside the Home search fix.
+
+### I-6 — `garyxAdaptiveGlass(isEnabled:)` combines two visibility contracts
+
+`mobile/garyx-mobile/App/GaryxMobile/GaryxMobileDesignSystem.swift:330-369`.
+
+On the Liquid Glass path, disabling the modifier selects `Glass.identity`; on
+the Reduce Transparency path, it also removes the opaque
+`secondarySystemBackground` fallback entirely. Those are separate concerns.
+Changing or omitting `isEnabled` for a morph source can therefore alter the
+accessibility fallback even when the glass-path intent is only to control
+shared-pass participation. Split the contracts in a dedicated design-system
+task rather than broadening the Home search fix.
+
 ## Desktop
 
 ### M-1 — Baseline i18n literal failure predates this feature
