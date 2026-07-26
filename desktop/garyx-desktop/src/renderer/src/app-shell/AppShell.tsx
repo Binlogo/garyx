@@ -1737,21 +1737,27 @@ export function AppShell() {
   );
   const pendingWorkspaceSuggestion = useMemo(
     () =>
-      pendingWorkspaceEntry || workspaceSuggestionFromPath(pendingWorkspacePath),
-    [pendingWorkspaceEntry, pendingWorkspacePath],
+      pendingWorkspaceEntry ||
+      workspaceSuggestionFromPath(pendingWorkspacePath, t("Workspace")),
+    [pendingWorkspaceEntry, pendingWorkspacePath, t],
   );
   const activeThreadWorkspaceSuggestion = useMemo(
     () =>
       activeThreadWorkspace ||
-      workspaceSuggestionFromPath(activeThread?.workspacePath, {
-        createdAt: activeThread?.createdAt,
-        updatedAt: activeThread?.updatedAt,
-      }),
+      workspaceSuggestionFromPath(
+        activeThread?.workspacePath,
+        t("Workspace"),
+        {
+          createdAt: activeThread?.createdAt,
+          updatedAt: activeThread?.updatedAt,
+        },
+      ),
     [
       activeThreadWorkspace,
       activeThread?.workspacePath,
       activeThread?.createdAt,
       activeThread?.updatedAt,
+      t,
     ],
   );
   const selectableNewThreadWorkspaces = useMemo(

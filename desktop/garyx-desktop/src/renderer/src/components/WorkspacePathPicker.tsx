@@ -15,6 +15,7 @@ import {
 import { Field, FieldDescription, FieldError, FieldGroup } from '@/components/ui/field';
 import { Input } from '@/components/ui/input';
 import { Separator } from '@/components/ui/separator';
+import { workspaceLeafSegment } from '../app-shell/workspace-helpers.ts';
 import { useI18n } from '@/i18n';
 import { cn } from '@/lib/utils';
 import { decodeDirectoryListingError } from '@shared/workspace-payload';
@@ -69,15 +70,8 @@ function workspacePathKey(path?: string | null): string {
   return normalizeWorkspacePath(path || '').toLowerCase();
 }
 
-function workspaceLeafName(path: string): string {
-  const normalized = normalizeWorkspacePath(path);
-  if (!normalized) return '';
-  const parts = normalized.split('/').filter(Boolean);
-  return parts.at(-1) || normalized;
-}
-
-function workspaceLabel(path: string): string {
-  return workspaceLeafName(path) || path;
+export function workspacePathPickerLabel(path: string): string {
+  return workspaceLeafSegment(path) || path;
 }
 
 type WorkspacePathSummaryProps = {
@@ -90,7 +84,7 @@ function WorkspacePathSummary({ path, placeholder }: WorkspacePathSummaryProps) 
   return (
     <span className="flex min-w-0 flex-col gap-0.5 text-left">
       <span className={cn('truncate text-sm', trimmed ? 'font-medium' : 'font-normal text-muted-foreground')}>
-        {trimmed ? workspaceLabel(trimmed) : placeholder}
+        {trimmed ? workspacePathPickerLabel(trimmed) : placeholder}
       </span>
       {trimmed ? (
         <span className="workspace-path-secondary truncate text-xs text-muted-foreground">
@@ -368,7 +362,7 @@ function WorkspaceAddDialog({ open, initialPath, saving = false, onOpenChange, o
   const [draft, setDraft] = useState(initialPath);
   const [nameDraft, setNameDraft] = useState('');
   const [nameTouched, setNameTouched] = useState(false);
-  const defaultName = workspaceLeafName(draft);
+  const defaultName = workspaceLeafSegment(draft);
   const effectiveName = nameTouched ? nameDraft : defaultName;
 
   useEffect(() => {
@@ -687,7 +681,7 @@ export function WorkspacePathPickerDialog({
   const [nameTouched, setNameTouched] = useState(false);
   const trimmed = draft.trim();
   const canSave = Boolean(trimmed && isAbsoluteWorkspacePath(trimmed));
-  const defaultName = workspaceLeafName(trimmed);
+  const defaultName = workspaceLeafSegment(trimmed);
   const effectiveName = nameTouched ? nameDraft : defaultName;
 
   useEffect(() => {

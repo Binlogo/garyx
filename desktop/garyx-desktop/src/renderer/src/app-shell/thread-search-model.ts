@@ -3,7 +3,7 @@ import type {
   DesktopThreadSummary,
 } from "@shared/contracts";
 import type { RecentFeedFooterKind } from "../recent-conversation-sidebar-model";
-import { compactPathLabel } from "./workspace-helpers.ts";
+import { workspaceLeafSegment } from "./workspace-helpers.ts";
 
 export const THREAD_SEARCH_DEBOUNCE_MS = 250;
 export const THREAD_SEARCH_PAGE_LIMIT = 30;
@@ -80,7 +80,7 @@ export function threadSearchRowMeta(
   const hasWorkspace =
     thread.workspaceOrigin !== "implicit" && Boolean(workspacePath);
   const visibleWorkspace = hasWorkspace
-    ? compactPathLabel(workspacePath)
+    ? workspaceLeafSegment(workspacePath) || noWorkspaceLabel
     : noWorkspaceLabel;
   const fullWorkspace = hasWorkspace ? workspacePath : noWorkspaceLabel;
   return {

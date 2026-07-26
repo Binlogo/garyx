@@ -14,7 +14,28 @@ const bundled = await esbuild.build({
 const helpers = await import(
   `data:text/javascript;base64,${Buffer.from(bundled.outputFiles[0].text).toString('base64')}`
 );
-const { resolveThreadFilePreviewTarget } = helpers;
+const { resolveThreadFilePreviewTarget, workspaceLeafSegment } = helpers;
+
+test('workspace leaf segments handle every supported path shape', () => {
+  const cases = [
+    ['/Users/test/projects/garyx', 'garyx', 'normal absolute path'],
+    ['/Users/test/projects/garyx/', 'garyx', 'single trailing separator'],
+    ['/Users/test/projects/garyx///', 'garyx', 'repeated trailing separators'],
+    ['C:\\Users\\test\\projects\\garyx', 'garyx', 'backslash path'],
+    ['C:\\Users/test\\projects/garyx', 'garyx', 'mixed separators'],
+    ['  /Users/test/projects/garyx  ', 'garyx', 'outer whitespace'],
+    ['/', '', 'root path'],
+    ['garyx', 'garyx', 'single segment'],
+    ['', '', 'empty string'],
+    [' \n\t ', '', 'whitespace-only'],
+    [null, '', 'null'],
+    [undefined, '', 'undefined'],
+  ];
+
+  for (const [input, expected, description] of cases) {
+    assert.equal(workspaceLeafSegment(input), expected, description);
+  }
+});
 
 test('absolute transcript image paths preview through their gateway-side parent', () => {
   assert.deepEqual(

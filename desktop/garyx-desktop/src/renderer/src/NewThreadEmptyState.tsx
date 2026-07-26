@@ -14,7 +14,8 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import { useI18n } from "./i18n";
+import { workspaceLeafSegment } from "./app-shell/workspace-helpers.ts";
+import { useI18n, type Translate } from "./i18n";
 
 const RESUME_PROVIDER_OPTIONS: Array<{
   value: DesktopSessionProviderHint;
@@ -254,7 +255,7 @@ export function NewThreadEmptyState({
                       </span>
                       <span className="new-thread-resume-session-main">
                         <strong>{session.title}</strong>
-                        <span>{workspaceLabel(session.workspaceDir)}</span>
+                        <span>{recentSessionWorkspaceLabel(session.workspaceDir, t)}</span>
                       </span>
                       <span className="new-thread-resume-session-meta">
                         <span>{formatRelativeTime(session.updatedAt)}</span>
@@ -320,12 +321,11 @@ function shortSessionId(sessionId: string): string {
   return `${value.slice(0, 8)}…${value.slice(-4)}`;
 }
 
-function workspaceLabel(workspaceDir: string): string {
-  const normalized = workspaceDir.trim();
-  if (!normalized) {
-    return "No workspace";
-  }
-  return normalized.split("/").filter(Boolean).pop() || normalized;
+export function recentSessionWorkspaceLabel(
+  workspaceDir: string,
+  t: Translate,
+): string {
+  return workspaceLeafSegment(workspaceDir) || t("No workspace");
 }
 
 function formatRelativeTime(value?: string | null): string {

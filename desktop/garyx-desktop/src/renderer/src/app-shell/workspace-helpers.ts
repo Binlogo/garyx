@@ -2,14 +2,15 @@ import type { DesktopWorkspace, DesktopWorkspaceFileEntry } from '@shared/contra
 
 import type { WorkspaceDirectoryState } from './types';
 
-export function compactPathLabel(path?: string | null): string {
-  const trimmed = path?.trim() || '';
-  if (!trimmed) {
-    return 'Workspace unavailable';
-  }
-
-  const segments = trimmed.split(/[\\/]/).filter(Boolean);
-  return segments[segments.length - 1] || trimmed;
+/**
+ * The workspace's last path segment, or '' when the input has no segments.
+ * Never returns user-facing copy — callers own their own fallback string so it
+ * can go through t().
+ */
+export function workspaceLeafSegment(path?: string | null): string {
+  const normalized = (path?.trim() || '').replace(/[\\/]+$/, '');
+  const segments = normalized.split(/[\\/]/).filter(Boolean);
+  return segments[segments.length - 1] || '';
 }
 
 export function workspaceDirectoryKey(workspacePath: string, directoryPath = ''): string {

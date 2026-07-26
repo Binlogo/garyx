@@ -31,6 +31,7 @@ import {
   loadWorkspaceGitStatusCached,
   workspaceGitStatusCache,
 } from '../workspace-git-status-cache';
+import { workspaceLeafSegment } from '../app-shell/workspace-helpers.ts';
 import { useI18n } from '../i18n';
 
 const GIT_STATUS_CHECK_DELAY_MS = 120;
@@ -49,12 +50,12 @@ type WorkspaceComposerChipProps = {
 /** Codex parity: the chip echoes only the leaf directory name; the
  *  gateway home itself keeps its `~` spelling (a bare leaf would be
  *  meaningless there). */
-function workspaceChipLabel(path: string, gatewayHome: string | null): string {
+export function workspaceChipLabel(path: string, gatewayHome: string | null): string {
   const home = gatewayHome?.replace(/\/+$/, '');
   if (home && path === home) {
     return '~';
   }
-  return path.split('/').filter(Boolean).pop() || path;
+  return workspaceLeafSegment(path) || path;
 }
 
 /**
