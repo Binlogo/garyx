@@ -92,7 +92,50 @@ against an unknown layout completion instead of observing it:
    reversals), and the generation guard cancelled queued freezes during
    ordinary presentation reconciliation, so only 5/15 dismissals ran.
 
-The correct shape, for whoever picks this up: make the handshake **causal, not
+### Fifth attempt, and what it disproved (2026-07-26)
+
+Attempt 5 stopped scheduling anything and instead suspended the size-change
+bottom anchor for the window UIKit reports as "keyboard geometry in flight"
+(`keyboardWillChangeFrame` set, `keyboardDidShow`/`DidHide` cleared), settling
+once when the window closed. Review #TASK-2750 measured 14/15 reversals — worse
+than the unfixed build — and the frame traces explain why, which is the useful
+part:
+
+**The premise of all five attempts is wrong.** The 235pt same-row jump lands in
+the SAME frame as both the viewport release and the content growth. Those are
+not two separable events that arrive in some order we can influence; UIKit's
+keyboard geometry change and SwiftUI's content update are reconciled inside one
+layout pass. Suspending the anchor does not decouple them, and no barrier can,
+because there is nothing to sit between.
+
+Attempt 5 also introduced a worse hazard: `keyboardWillChangeFrame` has its own
+`keyboardDidChangeFrame` counterpart, which was not observed. Injecting a
+standard frame-only pair into the running binary left the window open for over
+12 seconds with no DidShow/DidHide following, i.e. tail-following silently dead
+for the rest of that window — a candidate bar or floating keyboard could trigger
+exactly that shape in production. A single Bool also cannot express overlapping
+windows, and the state was not cleared on thread switch.
+
+So the next attempt must not try to order the append against the keyboard at
+all. Two directions that do not depend on ordering:
+
+1. **Own the motion.** Compensate the transcript's bottom content inset by
+   exactly the keyboard height as it collapses, so the scrollable geometry the
+   anchor sees never changes; then animate that compensation away as one
+   deliberate, settled motion after both the append and the keyboard have
+   finished. The reposition becomes ours instead of a stale-viewport
+   resolution.
+2. **Remove the trigger.** The keyboard only collapses because the read-only
+   freeze resigns first responder. If the freeze never touches first responder
+   and dismissal is an explicit product decision with its own sequencing, the
+   viewport change stops coinciding with the append by construction. This is a
+   visible behavior change and needs the boss's call.
+
+The earlier causal-handshake idea below is still worth trying, but note the
+frame evidence above: if the append and the keyboard truly share one layout
+pass, a "row is laid out" signal may arrive too late to help.
+
+The original framing, for reference: make the handshake **causal, not
 temporal**. The transcript already measures its content edges after layout;
 have it publish "the appended row is laid out" for the send in flight, and let
 the composer's freeze wait on that signal rather than on any clock. Failing
