@@ -218,6 +218,11 @@ relying on the existing `codex resume failed → start new thread` fallback
 (Garyx transcript state preserves conversation context), and the shared-store
 approach is recorded as debt.
 
+Gate result (2026-07-26, codex-cli 0.144.0): **PASS** — a thread started by an
+app-server under home A (one real turn, rollout persisted through the shared
+`sessions` symlink) resumed successfully from an app-server under home B with
+fresh per-home sqlite state, including history preview.
+
 ## Quota
 
 Per-account usage extends the existing Codex usage path
