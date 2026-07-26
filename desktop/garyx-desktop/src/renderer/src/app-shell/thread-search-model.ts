@@ -145,13 +145,6 @@ export type ThreadSearchPresentation =
       canLoadMore: false;
     };
 
-export interface ThreadSearchRemovalRollback {
-  gatewayScope: string;
-  generation: number;
-  index: number;
-  row: DesktopThreadSummary | null;
-}
-
 export interface ThreadSearchModelDependencies {
   normalizeQuery: (value: string) => string;
   debounceMs: number;
@@ -261,12 +254,6 @@ export function createThreadSearchModel(
 
   function engage(state: ThreadSearchState): ThreadSearchState {
     return state.engaged ? state : { ...state, engaged: true };
-  }
-
-  function disengageEmpty(state: ThreadSearchState): ThreadSearchState {
-    return state.rawQuery.length === 0 && state.engaged
-      ? { ...state, engaged: false }
-      : state;
   }
 
   function setQuery(
@@ -591,53 +578,11 @@ export function createThreadSearchModel(
     };
   }
 
-  function removeThread(
-    state: ThreadSearchState,
-    threadId: string,
-  ): { state: ThreadSearchState; rollback: ThreadSearchRemovalRollback } {
-    const index = state.rows.findIndex((row) => row.id === threadId);
-    const row = index >= 0 ? state.rows[index] : null;
-    return {
-      state:
-        index >= 0
-          ? {
-              ...state,
-              rows: state.rows.filter((_, rowIndex) => rowIndex !== index),
-            }
-          : state,
-      rollback: {
-        gatewayScope: state.gatewayScope,
-        generation: state.generation,
-        index,
-        row,
-      },
-    };
-  }
-
-  function rollbackRemoval(
-    state: ThreadSearchState,
-    rollback: ThreadSearchRemovalRollback,
-  ): ThreadSearchState {
-    if (
-      !rollback.row ||
-      rollback.index < 0 ||
-      rollback.gatewayScope !== state.gatewayScope ||
-      rollback.generation !== state.generation ||
-      state.rows.some((row) => row.id === rollback.row?.id)
-    ) {
-      return state;
-    }
-    const rows = [...state.rows];
-    rows.splice(Math.min(rollback.index, rows.length), 0, rollback.row);
-    return { ...state, rows };
-  }
-
   return {
     debounceMs: dependencies.debounceMs,
     pageLimit: dependencies.pageLimit,
     createState,
     engage,
-    disengageEmpty,
     setQuery,
     clear,
     resetScope,
@@ -648,8 +593,6 @@ export function createThreadSearchModel(
     completeRequest,
     presentation,
     mergeRows,
-    removeThread,
-    rollbackRemoval,
   };
 }
 

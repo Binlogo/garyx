@@ -579,7 +579,7 @@ button.new-thread-mode-trigger[data-state="open"] {
 .thread-search-dialog[data-slot="dialog-content"] {
   --app-dialog-card-width: min(760px, var(--app-dialog-available-width));
   --thread-search-dialog-height: min(620px, calc(100dvh - 48px));
-  grid-template-rows: 72px minmax(0, 1fr);
+  grid-template-rows: 73px minmax(0, 1fr);
   gap: 0;
   height: var(--thread-search-dialog-height);
   min-height: var(--thread-search-dialog-height);

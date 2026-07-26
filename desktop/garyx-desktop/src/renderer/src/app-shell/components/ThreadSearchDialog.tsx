@@ -77,7 +77,8 @@ function ThreadSearchResultRow({
 }: ThreadSearchResultRowProps) {
   const { t } = useI18n();
   const avatar = resolveThreadAvatarIdentity(thread, threadAvatarCatalog);
-  const workspacePath = thread.workspacePath?.trim() || "";
+  const workspacePath =
+    (thread.rootWorkspacePath ?? thread.workspacePath)?.trim() || "";
   const workspaceLabel =
     thread.workspaceOrigin === "implicit" || !workspacePath
       ? t("No workspace")
