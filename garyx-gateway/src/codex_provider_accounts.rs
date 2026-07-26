@@ -106,11 +106,16 @@ fn spawn_codex_account_switch_effects(
         // transcript-to-SQL projection window, matching the Claude switch
         // path. There is no session reconcile step: managed Codex homes share
         // one rollout store through the `sessions` symlink.
-        let recovery =
-            crate::quota_resend::expedite_waiting_provider_recoveries(&state, CODEX_RECOVERY_PROVIDER)
-                .await;
+        let recovery = crate::quota_resend::expedite_waiting_provider_recoveries(
+            &state,
+            CODEX_RECOVERY_PROVIDER,
+        )
+        .await;
         if let Err(error) = recovery.as_ref() {
-            tracing::warn!(error, "Codex account changed but quota recovery wake failed");
+            tracing::warn!(
+                error,
+                "Codex account changed but quota recovery wake failed"
+            );
         }
 
         // Sending the HTTP response is best-effort. Dropping its receiver must
@@ -257,7 +262,12 @@ pub(crate) async fn validated_active_codex_home(
     config: &GaryxConfig,
 ) -> Option<PathBuf> {
     let account_id = config.provider_accounts.codex.active_account_id.clone()?;
-    let validation = if config.provider_accounts.codex.account(&account_id).is_some() {
+    let validation = if config
+        .provider_accounts
+        .codex
+        .account(&account_id)
+        .is_some()
+    {
         validate_owned_account_dir(state, &account_id).await
     } else {
         Err(AccountsApiError::not_found(&account_id))
@@ -486,10 +496,7 @@ impl CodexAuthTarget {
         self.codex_home
             .as_ref()
             .map(|home| {
-                HashMap::from([(
-                    "CODEX_HOME".to_owned(),
-                    home.to_string_lossy().into_owned(),
-                )])
+                HashMap::from([("CODEX_HOME".to_owned(), home.to_string_lossy().into_owned())])
             })
             .unwrap_or_default()
     }
@@ -607,7 +614,10 @@ pub(crate) async fn complete_codex_auth_target(
     Ok(())
 }
 
-pub(crate) async fn cleanup_failed_codex_auth_target(state: &Arc<AppState>, target: &CodexAuthTarget) {
+pub(crate) async fn cleanup_failed_codex_auth_target(
+    state: &Arc<AppState>,
+    target: &CodexAuthTarget,
+) {
     if !target.is_new {
         return;
     }
@@ -963,5 +973,363 @@ impl IntoResponse for AccountsApiError {
 impl std::fmt::Display for AccountsApiError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(formatter, "{}", self.message)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::extract::State;
+    use tempfile::tempdir;
+
+    fn managed_account_state(root: &Path) -> (Arc<AppState>, String, PathBuf) {
+        let id = Uuid::new_v4().to_string();
+        let config_path = root.join("config.json");
+        let account_dir = managed_account_dir(Some(&config_path), &id);
+        std::fs::create_dir_all(&account_dir).unwrap();
+        std::fs::write(account_dir.join(OWNERSHIP_MARKER), &id).unwrap();
+        let mut config = GaryxConfig::default();
+        config
+            .provider_accounts
+            .codex
+            .accounts
+            .push(CodexManagedAccount {
+                id: id.clone(),
+                name: "Work".to_owned(),
+                email: None,
+                plan: None,
+                chatgpt_account_id: None,
+                created_at: Utc::now().to_rfc3339(),
+                updated_at: Utc::now().to_rfc3339(),
+            });
+        config.provider_accounts.codex.active_account_id = Some(id.clone());
+        let state = crate::server::AppStateBuilder::new(config)
+            .with_config_path(config_path)
+            .build();
+        state
+            .ops
+            .garyx_db
+            .run_thread_data_startup_migrations()
+            .unwrap();
+        (state, id, account_dir)
+    }
+
+    fn insert_waiting_codex_recovery(state: &AppState, thread_id: &str) {
+        state
+            .ops
+            .garyx_db
+            .write_thread_record_with_projections(thread_id, "{}", None, None)
+            .unwrap();
+        state
+            .ops
+            .garyx_db
+            .register_quota_recovery_job(crate::garyx_db::NewQuotaRecoveryJob {
+                thread_id,
+                provider: CODEX_RECOVERY_PROVIDER,
+                blocked_run_id: "run::blocked",
+                blocked_seq: 1,
+                quota_window: Some("primary"),
+                reset_at: Some("2099-01-01T00:00:00Z"),
+                due_at: "2099-01-01T00:01:00Z",
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn managed_account_directory_is_derived_below_owned_root() {
+        let config_path = Path::new("/tmp/garyx/config.yaml");
+        let id = Uuid::new_v4().to_string();
+        assert_eq!(
+            managed_account_dir(Some(config_path), &id),
+            PathBuf::from("/tmp/garyx/provider-accounts/codex").join(id)
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_active_account_is_quarantined_instead_of_using_system_home() {
+        let temp = tempdir().unwrap();
+        let id = Uuid::new_v4().to_string();
+        let mut config = GaryxConfig::default();
+        config
+            .provider_accounts
+            .codex
+            .accounts
+            .push(CodexManagedAccount {
+                id: id.clone(),
+                name: "Missing".to_owned(),
+                email: None,
+                plan: None,
+                chatgpt_account_id: None,
+                created_at: Utc::now().to_rfc3339(),
+                updated_at: Utc::now().to_rfc3339(),
+            });
+        config.provider_accounts.codex.active_account_id = Some(id.clone());
+        let state = crate::server::AppStateBuilder::new(config.clone())
+            .with_config_path(temp.path().join("config.yaml"))
+            .build();
+
+        let selected = validated_active_codex_home(&state, &config)
+            .await
+            .expect("invalid managed selection must still isolate Codex");
+        assert_eq!(
+            selected,
+            temp.path().join(".invalid-codex-account-selection")
+        );
+        assert!(!selected.exists(), "quarantine path must not exist");
+
+        config.provider_accounts.codex.accounts.clear();
+        let unknown_selected = validated_active_codex_home(&state, &config)
+            .await
+            .expect("unknown managed selection must still isolate Codex");
+        assert_eq!(unknown_selected, selected);
+    }
+
+    #[tokio::test]
+    async fn changing_account_expedites_every_waiting_codex_recovery() {
+        let temp = tempdir().unwrap();
+        let (state, _, _) = managed_account_state(temp.path());
+        insert_waiting_codex_recovery(&state, "thread::codex-quota-switch");
+
+        let Json(response) = select_codex_account(
+            State(state.clone()),
+            Json(SelectCodexAccountRequest { account_id: None }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response["selection_changed"], true);
+        assert_eq!(response["recovery"]["matched_threads"], 1);
+        assert_eq!(response["recovery"]["expedited_threads"], 1);
+        let job = state
+            .ops
+            .garyx_db
+            .active_quota_recovery_job("thread::codex-quota-switch")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            job.wake_reason,
+            crate::garyx_db::QuotaRecoveryWakeReason::AccountSwitch
+        );
+        assert_ne!(job.due_at, "2099-01-01T00:01:00Z");
+    }
+
+    #[tokio::test]
+    async fn selecting_the_current_account_does_not_wake_quota_recovery() {
+        let temp = tempdir().unwrap();
+        let (state, id, _) = managed_account_state(temp.path());
+        insert_waiting_codex_recovery(&state, "thread::codex-noop-switch");
+
+        let Json(response) = select_codex_account(
+            State(state.clone()),
+            Json(SelectCodexAccountRequest {
+                account_id: Some(id),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response["selection_changed"], false);
+        assert_eq!(response["recovery"]["matched_threads"], 0);
+        let job = state
+            .ops
+            .garyx_db
+            .active_quota_recovery_job("thread::codex-noop-switch")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            job.wake_reason,
+            crate::garyx_db::QuotaRecoveryWakeReason::QuotaReset
+        );
+        assert_eq!(job.due_at, "2099-01-01T00:01:00Z");
+    }
+
+    #[tokio::test]
+    async fn reserved_account_home_gets_shared_symlinks() {
+        let temp = tempdir().unwrap();
+        let state = crate::server::AppStateBuilder::new(GaryxConfig::default())
+            .with_config_path(temp.path().join("config.yaml"))
+            .build();
+
+        let target = prepare_codex_auth_target(&state, Some("Work"), None)
+            .await
+            .expect("managed target");
+        let home = target.codex_home.as_deref().unwrap();
+        assert!(home.join(OWNERSHIP_MARKER).is_file());
+        for name in SHARED_HOME_DIR_LINKS {
+            let link = home.join(name);
+            assert!(
+                std::fs::symlink_metadata(&link)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink(),
+                "{name} should be a symlink"
+            );
+            assert_eq!(
+                std::fs::read_link(&link).unwrap(),
+                temp.path().join(".test-codex").join(name)
+            );
+            assert!(temp.path().join(".test-codex").join(name).is_dir());
+        }
+        for name in SHARED_HOME_FILE_LINKS {
+            assert!(
+                std::fs::symlink_metadata(home.join(name))
+                    .unwrap()
+                    .file_type()
+                    .is_symlink(),
+                "{name} should be a symlink"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn selection_apply_repairs_missing_links_but_keeps_real_entries() {
+        let temp = tempdir().unwrap();
+        let state = crate::server::AppStateBuilder::new(GaryxConfig::default())
+            .with_config_path(temp.path().join("config.yaml"))
+            .build();
+        let target = prepare_codex_auth_target(&state, Some("Work"), None)
+            .await
+            .expect("managed target");
+        let account_id = target.account_id.clone().unwrap();
+        let home = target.codex_home.clone().unwrap();
+
+        // Simulate drift: a lost symlink and a config Codex rewrote in place.
+        std::fs::remove_file(home.join("skills")).unwrap();
+        std::fs::remove_file(home.join("config.toml")).unwrap();
+        std::fs::write(home.join("config.toml"), "local = true\n").unwrap();
+
+        let mut config = state.config_snapshot().as_ref().clone();
+        config
+            .provider_accounts
+            .codex
+            .accounts
+            .push(CodexManagedAccount {
+                id: account_id.clone(),
+                name: "Work".to_owned(),
+                email: None,
+                plan: None,
+                chatgpt_account_id: None,
+                created_at: Utc::now().to_rfc3339(),
+                updated_at: Utc::now().to_rfc3339(),
+            });
+        config.provider_accounts.codex.active_account_id = Some(account_id);
+        let selected = validated_active_codex_home(&state, &config)
+            .await
+            .expect("selection resolves");
+        assert_eq!(selected, home);
+        assert!(
+            std::fs::symlink_metadata(home.join("skills"))
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "missing shared link must be repaired"
+        );
+        let config_meta = std::fs::symlink_metadata(home.join("config.toml")).unwrap();
+        assert!(
+            config_meta.file_type().is_file(),
+            "drifted real file must never be destructively repaired"
+        );
+        assert_eq!(
+            std::fs::read_to_string(home.join("config.toml")).unwrap(),
+            "local = true\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn ownership_validation_rejects_symlinked_marker() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempdir().unwrap();
+        let state = crate::server::AppStateBuilder::new(GaryxConfig::default())
+            .with_config_path(temp.path().join("config.yaml"))
+            .build();
+        let target = prepare_codex_auth_target(&state, Some("Work"), None)
+            .await
+            .expect("managed target");
+        let account_id = target.account_id.as_deref().unwrap();
+        let home = target.codex_home.as_deref().unwrap();
+        let marker = home.join(OWNERSHIP_MARKER);
+        std::fs::remove_file(&marker).unwrap();
+        let outside = temp.path().join("outside-marker");
+        std::fs::write(&outside, account_id).unwrap();
+        symlink(&outside, &marker).unwrap();
+
+        let error = validate_owned_account_dir(&state, account_id)
+            .await
+            .expect_err("symlink marker must be rejected");
+        assert_eq!(error.code, "unsafe_codex_account_directory");
+        assert!(home.is_dir(), "unsafe cleanup must not remove directory");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn managed_root_creation_rejects_symlinked_container_without_writing_outside() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        symlink(outside.path(), temp.path().join("provider-accounts")).unwrap();
+        let state = crate::server::AppStateBuilder::new(GaryxConfig::default())
+            .with_config_path(temp.path().join("config.yaml"))
+            .build();
+
+        let error = prepare_codex_auth_target(&state, Some("Work"), None)
+            .await
+            .expect_err("a symlinked managed-root component must be rejected");
+        assert_eq!(error.code, "codex_account_operation_failed");
+        assert!(
+            !outside.path().join("codex").exists(),
+            "validation must happen before creating anything through the symlink"
+        );
+    }
+
+    fn fixture_jwt(payload: Value) -> String {
+        let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"none"}"#);
+        let body = URL_SAFE_NO_PAD.encode(payload.to_string().as_bytes());
+        format!("{header}.{body}.sig")
+    }
+
+    #[tokio::test]
+    async fn identity_decodes_email_plan_and_account_from_id_token() {
+        let temp = tempdir().unwrap();
+        let id_token = fixture_jwt(json!({
+            "email": "user@example.com",
+            "https://api.openai.com/auth": {
+                "chatgpt_plan_type": "pro",
+                "chatgpt_account_id": "00000000-0000-4000-8000-000000000001",
+            },
+        }));
+        let auth_path = temp.path().join("auth.json");
+        std::fs::write(
+            &auth_path,
+            json!({
+                "auth_mode": "chatgpt",
+                "tokens": {
+                    "id_token": id_token,
+                    "access_token": "at",
+                    "refresh_token": "rt",
+                    "account_id": "00000000-0000-4000-8000-000000000001",
+                },
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let identity = read_codex_auth_identity(&auth_path).await.unwrap();
+        assert_eq!(identity.email.as_deref(), Some("user@example.com"));
+        assert_eq!(identity.plan.as_deref(), Some("pro"));
+        assert_eq!(
+            identity.chatgpt_account_id.as_deref(),
+            Some("00000000-0000-4000-8000-000000000001")
+        );
+    }
+
+    #[tokio::test]
+    async fn identity_rejects_auth_without_chatgpt_tokens() {
+        let temp = tempdir().unwrap();
+        let auth_path = temp.path().join("auth.json");
+        std::fs::write(&auth_path, r#"{"OPENAI_API_KEY":"sk-test"}"#).unwrap();
+        let error = read_codex_auth_identity(&auth_path).await.unwrap_err();
+        assert!(error.contains("no ChatGPT tokens"), "{error}");
     }
 }

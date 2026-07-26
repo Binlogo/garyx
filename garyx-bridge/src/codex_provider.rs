@@ -771,7 +771,8 @@ fn normalize_codex_mcp_servers(metadata: &HashMap<String, Value>) -> Option<Valu
 /// Environment variables that outrank `auth.json` inside the Codex CLI. A
 /// managed account selection must strip them or the selection would be a
 /// silent no-op; System default leaves them untouched for API-key workflows.
-const CODEX_AUTH_ENV_OVERRIDES: &[&str] = &["OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_ACCESS_TOKEN"];
+const CODEX_AUTH_ENV_OVERRIDES: &[&str] =
+    &["OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_ACCESS_TOKEN"];
 
 fn resolve_runtime_codex_env(
     launch_env: &HashMap<String, String>,

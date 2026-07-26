@@ -777,7 +777,10 @@ async fn request_codex_usage(auth: &CodexChatgptAuth) -> Result<Value, UsageFetc
     }
 
     let response = request.send().await.map_err(|error| {
-        UsageFetchError::new(USAGE_ERROR_NETWORK, format!("Codex usage request failed: {error}"))
+        UsageFetchError::new(
+            USAGE_ERROR_NETWORK,
+            format!("Codex usage request failed: {error}"),
+        )
     })?;
     let status = response.status();
     let headers = response.headers().clone();
@@ -845,8 +848,8 @@ async fn fetch_codex_usage_via_app_server(home: &Path) -> Result<ProviderUsage, 
     }
 
     use crate::provider_models::process_rpc::{
-        process_error_code, process_error_message, read_process_response, send_process_notification,
-        send_process_request, shutdown_child,
+        process_error_code, process_error_message, read_process_response,
+        send_process_notification, send_process_request, shutdown_child,
     };
     use std::process::Stdio;
     use tokio::io::{AsyncBufReadExt as _, BufReader};
@@ -908,8 +911,7 @@ async fn fetch_codex_usage_via_app_server(home: &Path) -> Result<ProviderUsage, 
     .await;
 
     shutdown_child(&mut child).await;
-    let result =
-        result.map_err(|error| UsageFetchError::new(USAGE_ERROR_UPSTREAM, error))?;
+    let result = result.map_err(|error| UsageFetchError::new(USAGE_ERROR_UPSTREAM, error))?;
     // Plan type is identity metadata, not part of the snapshot; read it from
     // the (possibly just-refreshed) id_token in this home.
     let plan = codex_provider_accounts::read_codex_auth_identity(&home.join("auth.json"))
@@ -928,7 +930,9 @@ fn parse_codex_rate_limit_snapshot(
     plan: Option<String>,
 ) -> Result<ProviderUsage, String> {
     let snapshot = result.get("rateLimits").unwrap_or(result);
-    let primary = snapshot.get("primary").and_then(parse_codex_snapshot_window);
+    let primary = snapshot
+        .get("primary")
+        .and_then(parse_codex_snapshot_window);
     let secondary = snapshot
         .get("secondary")
         .and_then(parse_codex_snapshot_window);
@@ -1087,7 +1091,10 @@ fn read_codex_chatgpt_auth_at(home: &Path) -> Result<CodexChatgptAuth, String> {
     let contents = std::fs::read_to_string(&auth_path)
         .map_err(|error| format!("Codex auth ({}) not readable: {error}", auth_path.display()))?;
     let value: Value = serde_json::from_str(&contents).map_err(|error| {
-        format!("Codex auth file ({}) was not valid JSON: {error}", auth_path.display())
+        format!(
+            "Codex auth file ({}) was not valid JSON: {error}",
+            auth_path.display()
+        )
     })?;
     let tokens = value
         .get("tokens")
@@ -2149,6 +2156,55 @@ mod tests {
         });
         let usage = parse_codex_usage(&near_weekly).unwrap();
         assert!(usage.weekly.is_some());
+    }
+
+    #[test]
+    fn parses_codex_app_server_snapshot_windows() {
+        // app-server RateLimitSnapshot: camelCase windows keyed primary/secondary.
+        let result = json!({
+            "rateLimits": {
+                "primary": {"usedPercent": 20.5, "windowMinutes": 300, "resetsInSeconds": 1200},
+                "secondary": {"usedPercent": 61.0, "windowMinutes": 10080, "resetsAt": 4102444800i64},
+            }
+        });
+        let usage = parse_codex_rate_limit_snapshot(&result, Some("pro".to_owned())).unwrap();
+        assert_eq!(usage.plan.as_deref(), Some("pro"));
+        let weekly = usage.weekly.expect("weekly window");
+        assert!((weekly.used_percent - 61.0).abs() < f64::EPSILON);
+        assert!(weekly.resets_at.is_some());
+        let session = usage.session.expect("session window");
+        assert!((session.used_percent - 20.5).abs() < f64::EPSILON);
+        assert_eq!(session.reset_after_seconds, Some(1200));
+
+        // Flattened snapshot (params are the snapshot) still parses.
+        let flat = json!({
+            "primary": {"usedPercent": 5.0, "windowMinutes": 300},
+        });
+        let usage = parse_codex_rate_limit_snapshot(&flat, None).unwrap();
+        assert!(usage.session.is_some());
+        assert!(usage.weekly.is_none());
+
+        // Windows without usedPercent must not fabricate quota.
+        let empty = json!({"rateLimits": {"primary": {"windowMinutes": 300}}});
+        assert!(parse_codex_rate_limit_snapshot(&empty, None).is_err());
+    }
+
+    #[test]
+    fn codex_access_token_expiry_is_checked_locally() {
+        use base64::Engine as _;
+        let payload = |exp: i64| {
+            let body = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .encode(json!({ "exp": exp }).to_string());
+            format!("h.{body}.s")
+        };
+        assert!(codex_access_token_locally_valid(&payload(2000), 1000));
+        assert!(
+            !codex_access_token_locally_valid(&payload(1030), 1000),
+            "inside the 60s skew is expired"
+        );
+        assert!(!codex_access_token_locally_valid(&payload(500), 1000));
+        // Undecodable tokens defer to the request itself.
+        assert!(codex_access_token_locally_valid("opaque-token", 1000));
     }
 
     #[test]

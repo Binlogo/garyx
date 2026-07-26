@@ -222,11 +222,7 @@ pub async fn start_codex_auth(
     };
 
     let session = Arc::new(CodexAuthSession::new(login_id.clone(), target));
-    state
-        .ops
-        .codex_auth_sessions
-        .insert(session.clone())
-        .await;
+    state.ops.codex_auth_sessions.insert(session.clone()).await;
     let (started_tx, started_rx) = oneshot::channel();
     tokio::spawn(drive_codex_auth(
         session.clone(),
@@ -386,16 +382,16 @@ async fn drive_codex_auth(
 
     let final_snapshot = session.snapshot().await;
     if final_snapshot.status == CodexAuthLoginStatus::Failed {
-        codex_provider_accounts::cleanup_failed_codex_auth_target(&app_state, &session.target).await;
+        codex_provider_accounts::cleanup_failed_codex_auth_target(&app_state, &session.target)
+            .await;
         send_start_error_once(
             &mut started_tx,
             ApiError::new(
                 StatusCode::BAD_GATEWAY,
                 "codex_auth_failed_before_code",
-                final_snapshot
-                    .error
-                    .clone()
-                    .unwrap_or_else(|| "Codex auth failed before returning a device code.".to_owned()),
+                final_snapshot.error.clone().unwrap_or_else(|| {
+                    "Codex auth failed before returning a device code.".to_owned()
+                }),
             ),
         );
     }
@@ -654,5 +650,421 @@ impl IntoResponse for ApiError {
             })),
         )
             .into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::{Body, to_bytes};
+    use axum::http::StatusCode;
+    use garyx_models::config::GaryxConfig;
+    use std::fs;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::{Path, PathBuf};
+    use std::time::Instant;
+    use tempfile::tempdir;
+    use tower::ServiceExt;
+
+    /// Fake `codex` CLI: prints the device-auth banner (with ANSI colors,
+    /// matching codex-cli 0.144.0 output), then waits for an `authorized` or
+    /// `authorized-empty` marker next to itself. `authorized` writes a real
+    /// ChatGPT auth.json into CODEX_HOME (or the test system home) before
+    /// exiting 0; `authorized-empty` exits 0 without writing credentials.
+    fn write_fake_codex(dir: &Path) -> PathBuf {
+        let path = dir.join("codex");
+        fs::write(
+            &path,
+            r#"#!/usr/bin/env python3
+import base64, json, os, sys, time
+from pathlib import Path
+
+args = sys.argv[1:]
+if args != ["login", "--device-auth"]:
+    print("unexpected args: " + repr(args), file=sys.stderr)
+    sys.exit(2)
+
+Path(__file__).with_name("login.pid").write_text(str(os.getpid()), encoding="utf-8")
+print("Welcome to Codex [v\x1b[90m0.144.0\x1b[0m]", flush=True)
+print("1. Open this link in your browser and sign in to your account", flush=True)
+print("   \x1b[94mhttps://auth.openai.com/codex/device\x1b[0m", flush=True)
+print("2. Enter this one-time code (expires in 15 minutes)", flush=True)
+print("   \x1b[94mTEST1-CODE9\x1b[0m", flush=True)
+
+def b64url(data):
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
+
+home = os.environ.get("CODEX_HOME")
+target = Path(home) if home else Path(__file__).parent / ".test-codex"
+authorized = Path(__file__).with_name("authorized")
+authorized_empty = Path(__file__).with_name("authorized-empty")
+for _ in range(1500):
+    if authorized_empty.exists():
+        sys.exit(0)
+    if authorized.exists():
+        payload = {
+            "email": "user@example.com",
+            "https://api.openai.com/auth": {
+                "chatgpt_plan_type": "pro",
+                "chatgpt_account_id": "00000000-0000-4000-8000-000000000001",
+            },
+        }
+        jwt = b64url(b'{"alg":"none"}') + "." + b64url(json.dumps(payload).encode()) + ".sig"
+        target.mkdir(parents=True, exist_ok=True)
+        (target / "auth.json").write_text(json.dumps({
+            "auth_mode": "chatgpt",
+            "tokens": {
+                "id_token": jwt,
+                "access_token": "at",
+                "refresh_token": "rt",
+                "account_id": "00000000-0000-4000-8000-000000000001",
+            },
+        }), encoding="utf-8")
+        sys.exit(0)
+    time.sleep(0.02)
+sys.exit(3)
+"#,
+        )
+        .unwrap();
+        #[cfg(unix)]
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    async fn poll_status(
+        router: &axum::Router,
+        login_id: &str,
+        want: CodexAuthLoginStatus,
+    ) -> CodexAuthLoginResponse {
+        let status_uri = format!("/api/providers/codex/auth/{login_id}");
+        // Generous budget: under full-suite parallelism the config persist +
+        // bridge reload inside completion can take several seconds.
+        for _ in 0..750 {
+            let response = router
+                .clone()
+                .oneshot(
+                    crate::test_support::authed_request()
+                        .method("GET")
+                        .uri(&status_uri)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let snapshot: CodexAuthLoginResponse =
+                serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                    .unwrap();
+            if snapshot.status == want {
+                return snapshot;
+            }
+            assert!(
+                !snapshot.status.is_terminal(),
+                "session settled at {:?} while waiting for {want:?}: {:?}",
+                snapshot.status,
+                snapshot.error
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let response = router
+            .clone()
+            .oneshot(
+                crate::test_support::authed_request()
+                    .method("GET")
+                    .uri(&status_uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let last = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        panic!(
+            "auth session never reached {want:?}; last snapshot: {}",
+            String::from_utf8_lossy(&last)
+        );
+    }
+
+    async fn start_auth(router: &axum::Router, body: &str) -> (StatusCode, CodexAuthLoginResponse) {
+        let response = router
+            .clone()
+            .oneshot(
+                crate::test_support::authed_request()
+                    .method("POST")
+                    .uri("/api/providers/codex/auth/start")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_owned()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let value: CodexAuthLoginResponse =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        (status, value)
+    }
+
+    #[tokio::test]
+    async fn managed_codex_auth_reports_device_code_then_commits_account_without_selecting_it() {
+        let dir = tempdir().unwrap();
+        let fake_codex = write_fake_codex(dir.path());
+        let config = crate::test_support::with_gateway_auth(GaryxConfig::default());
+        let state = crate::server::AppStateBuilder::new(config)
+            .with_config_path(dir.path().join("config.yaml"))
+            .build();
+        state
+            .ops
+            .codex_auth_sessions
+            .set_codex_bin_override_for_test(fake_codex)
+            .await;
+        let router = crate::route_graph::build_router(state.clone());
+
+        let (status, start) = start_auth(&router, r#"{"managed_account_name":"Work"}"#).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(start.status, CodexAuthLoginStatus::WaitingForAuthorization);
+        assert_eq!(
+            start.url.as_deref(),
+            Some("https://auth.openai.com/codex/device")
+        );
+        assert_eq!(start.user_code.as_deref(), Some("TEST1-CODE9"));
+        let account_id = start.account_id.clone().expect("managed account id");
+        let account_dir = dir.path().join("provider-accounts/codex").join(&account_id);
+        assert!(account_dir.is_dir());
+        assert!(
+            state
+                .config_snapshot()
+                .provider_accounts
+                .codex
+                .accounts
+                .is_empty(),
+            "account must not commit before the CLI succeeds"
+        );
+
+        fs::write(dir.path().join("authorized"), "ok").unwrap();
+        let succeeded =
+            poll_status(&router, &start.login_id, CodexAuthLoginStatus::Succeeded).await;
+        assert_eq!(succeeded.exit_code, Some(0));
+        assert_eq!(
+            succeeded
+                .identity
+                .as_ref()
+                .and_then(|value| value.get("email"))
+                .and_then(Value::as_str),
+            Some("user@example.com")
+        );
+        assert!(account_dir.join("auth.json").is_file());
+
+        let config = state.config_snapshot();
+        let account = config
+            .provider_accounts
+            .codex
+            .account(&account_id)
+            .expect("committed account");
+        assert_eq!(account.name, "Work");
+        assert_eq!(account.email.as_deref(), Some("user@example.com"));
+        assert_eq!(account.plan.as_deref(), Some("pro"));
+        // Adding an account never changes the active selection.
+        assert!(config.provider_accounts.codex.active_account_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn cancelling_codex_auth_kills_child_and_removes_uncommitted_home() {
+        let dir = tempdir().unwrap();
+        let fake_codex = write_fake_codex(dir.path());
+        let login_pid_path = dir.path().join("login.pid");
+        let config = crate::test_support::with_gateway_auth(GaryxConfig::default());
+        let state = crate::server::AppStateBuilder::new(config)
+            .with_config_path(dir.path().join("config.yaml"))
+            .build();
+        state
+            .ops
+            .codex_auth_sessions
+            .set_codex_bin_override_for_test(fake_codex)
+            .await;
+        let router = crate::route_graph::build_router(state.clone());
+
+        let (status, start) = start_auth(&router, r#"{"managed_account_name":"Cancelled"}"#).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let account_id = start.account_id.as_deref().expect("managed account id");
+        let login_pid = fs::read_to_string(&login_pid_path)
+            .unwrap()
+            .trim()
+            .parse::<libc::pid_t>()
+            .unwrap();
+        let account_dir = dir.path().join("provider-accounts/codex").join(account_id);
+        assert!(account_dir.is_dir());
+
+        let auth_uri = format!("/api/providers/codex/auth/{}", start.login_id);
+        let cancel_response = router
+            .clone()
+            .oneshot(
+                crate::test_support::authed_request()
+                    .method("DELETE")
+                    .uri(&auth_uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(cancel_response.status(), StatusCode::OK);
+        let cancelled: CodexAuthLoginResponse = serde_json::from_slice(
+            &to_bytes(cancel_response.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(cancelled.status, CodexAuthLoginStatus::Failed);
+        assert_eq!(
+            cancelled.error.as_deref(),
+            Some("Codex sign-in was cancelled.")
+        );
+
+        for _ in 0..100 {
+            if !account_dir.exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(!account_dir.exists(), "cancelled profile should be removed");
+        assert!(
+            state
+                .config_snapshot()
+                .provider_accounts
+                .codex
+                .accounts
+                .is_empty()
+        );
+        assert_child_reaped(login_pid).await;
+
+        let status_response = router
+            .oneshot(
+                crate::test_support::authed_request()
+                    .method("GET")
+                    .uri(auth_uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(status_response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn codex_auth_exit_zero_without_auth_json_fails_and_cleans_up() {
+        let dir = tempdir().unwrap();
+        let fake_codex = write_fake_codex(dir.path());
+        let config = crate::test_support::with_gateway_auth(GaryxConfig::default());
+        let state = crate::server::AppStateBuilder::new(config)
+            .with_config_path(dir.path().join("config.yaml"))
+            .build();
+        state
+            .ops
+            .codex_auth_sessions
+            .set_codex_bin_override_for_test(fake_codex)
+            .await;
+        let router = crate::route_graph::build_router(state.clone());
+
+        let (status, start) = start_auth(&router, r#"{"managed_account_name":"Keyring"}"#).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let account_id = start.account_id.clone().expect("managed account id");
+        let account_dir = dir.path().join("provider-accounts/codex").join(&account_id);
+
+        fs::write(dir.path().join("authorized-empty"), "ok").unwrap();
+        let failed = poll_status(&router, &start.login_id, CodexAuthLoginStatus::Failed).await;
+        assert!(
+            failed
+                .error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("not readable after login"),
+            "{:?}",
+            failed.error
+        );
+
+        for _ in 0..100 {
+            if !account_dir.exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(!account_dir.exists(), "failed profile should be removed");
+        assert!(
+            state
+                .config_snapshot()
+                .provider_accounts
+                .codex
+                .accounts
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn ambiguous_codex_auth_target_is_rejected() {
+        let dir = tempdir().unwrap();
+        let config = crate::test_support::with_gateway_auth(GaryxConfig::default());
+        let state = crate::server::AppStateBuilder::new(config)
+            .with_config_path(dir.path().join("config.yaml"))
+            .build();
+        let router = crate::route_graph::build_router(state);
+
+        let response = router
+            .oneshot(
+                crate::test_support::authed_request()
+                    .method("POST")
+                    .uri("/api/providers/codex/auth/start")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"managed_account_name":"Work","account_id":"00000000-0000-4000-8000-000000000001"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn device_output_parsing_matches_real_codex_output() {
+        // Lines captured from codex-cli 0.144.0 `codex login --device-auth`.
+        let url_line = strip_ansi("   \u{1b}[94mhttps://auth.openai.com/codex/device\u{1b}[0m");
+        assert_eq!(
+            extract_url(&url_line).as_deref(),
+            Some("https://auth.openai.com/codex/device")
+        );
+        let code_line = strip_ansi("   \u{1b}[94mSAIW-E7TI9\u{1b}[0m");
+        assert_eq!(extract_user_code(&code_line).as_deref(), Some("SAIW-E7TI9"));
+
+        // Banner/step lines must not be misread as codes.
+        for line in [
+            "Welcome to Codex [v0.144.0]",
+            "1. Open this link in your browser and sign in to your account",
+            "2. Enter this one-time code (expires in 15 minutes)",
+            "",
+        ] {
+            assert_eq!(extract_user_code(&strip_ansi(line)), None, "{line:?}");
+        }
+    }
+
+    async fn assert_child_reaped(pid: libc::pid_t) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let result = unsafe { libc::kill(pid, 0) };
+            if result != 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+                return;
+            }
+            if Instant::now() >= deadline {
+                let mut status = 0;
+                let wait_result = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+                if wait_result == 0 {
+                    unsafe {
+                        libc::kill(pid, libc::SIGKILL);
+                        libc::waitpid(pid, &mut status, 0);
+                    }
+                }
+                panic!("codex login child {pid} was not reaped; waitpid returned {wait_result}");
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
     }
 }

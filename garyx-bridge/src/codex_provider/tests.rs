@@ -707,7 +707,7 @@ fn test_resolve_runtime_codex_env_merges_provider_env() {
         }),
     )]);
 
-    let env = resolve_runtime_codex_env(&config, &metadata);
+    let env = resolve_runtime_codex_env(&config.env, &metadata);
     assert_eq!(
         env.get("OPENAI_API_KEY").map(String::as_str),
         Some("from-provider")
@@ -737,7 +737,7 @@ fn test_resolve_runtime_codex_env_applies_provider_env_for_traex() {
         }),
     )]);
 
-    let env = resolve_runtime_codex_env(&config, &metadata);
+    let env = resolve_runtime_codex_env(&config.env, &metadata);
     assert_eq!(
         env.get("TRAE_FROM_CONFIG").map(String::as_str),
         Some("keep")
@@ -762,7 +762,7 @@ fn test_resolve_runtime_codex_env_keeps_blank_provider_api_key_override() {
         }),
     )]);
 
-    let env = resolve_runtime_codex_env(&config, &metadata);
+    let env = resolve_runtime_codex_env(&config.env, &metadata);
     assert_eq!(env.get("OPENAI_API_KEY").map(String::as_str), Some(""));
 }
 
@@ -784,7 +784,7 @@ fn test_resolve_runtime_codex_env_exports_task_cli_env() {
         ),
     ]);
 
-    let env = resolve_runtime_codex_env(&config, &metadata);
+    let env = resolve_runtime_codex_env(&config.env, &metadata);
 
     assert_eq!(
         env.get("GARYX_THREAD_ID").map(String::as_str),
@@ -825,6 +825,95 @@ fn test_codex_client_reuse_replaces_idle_client_when_env_changes() {
 #[test]
 fn test_codex_client_idle_ttl_is_three_minutes() {
     assert_eq!(CODEX_CLIENT_IDLE_TTL, Duration::from_secs(180));
+}
+
+#[test]
+fn test_managed_codex_selection_owns_identity_env_keys() {
+    // Launch env carries the provider-owned managed selection.
+    let launch_env = HashMap::from([
+        ("CODEX_HOME".to_owned(), "/managed/home".to_owned()),
+        (
+            "OPENAI_BASE_URL".to_owned(),
+            "https://example.test".to_owned(),
+        ),
+    ]);
+    // Stale thread metadata tries to pin an older identity and an env-var
+    // auth override, both of which must lose to the selection.
+    let metadata = HashMap::from([(
+        "provider_env".to_owned(),
+        json!({
+            "CODEX_HOME": "/stale/home",
+            "OPENAI_API_KEY": "sk-stale",
+            "OPENAI_ORG_ID": "org_123",
+        }),
+    )]);
+
+    let env = resolve_runtime_codex_env(&launch_env, &metadata);
+    assert_eq!(
+        env.get("CODEX_HOME").map(String::as_str),
+        Some("/managed/home")
+    );
+    assert_eq!(env.get("OPENAI_API_KEY"), None);
+    assert_eq!(
+        env.get("OPENAI_ORG_ID").map(String::as_str),
+        Some("org_123")
+    );
+    assert_eq!(
+        env.get("OPENAI_BASE_URL").map(String::as_str),
+        Some("https://example.test")
+    );
+}
+
+#[test]
+fn test_system_default_codex_selection_keeps_api_key_overrides() {
+    let launch_env = HashMap::from([("OPENAI_API_KEY".to_owned(), "sk-config".to_owned())]);
+    let metadata = HashMap::from([(
+        "provider_env".to_owned(),
+        json!({ "CODEX_HOME": "/stale/home" }),
+    )]);
+
+    let env = resolve_runtime_codex_env(&launch_env, &metadata);
+    // System default: no injected home, stale metadata identity removed, and
+    // API-key workflows untouched.
+    assert_eq!(env.get("CODEX_HOME"), None);
+    assert_eq!(
+        env.get("OPENAI_API_KEY").map(String::as_str),
+        Some("sk-config")
+    );
+}
+
+#[test]
+fn test_update_launch_environment_changes_next_run_env_only() {
+    let provider = CodexAgentProvider::new(CodexAppServerConfig::default());
+    let before = {
+        let launch_env = provider.launch_env.read().unwrap().clone();
+        resolve_runtime_codex_env(&launch_env, &HashMap::new())
+    };
+    assert_eq!(before.get("CODEX_HOME"), None);
+
+    provider.update_launch_environment(&HashMap::from([(
+        "CODEX_HOME".to_owned(),
+        "/managed/home".to_owned(),
+    )]));
+    let after = {
+        let launch_env = provider.launch_env.read().unwrap().clone();
+        resolve_runtime_codex_env(&launch_env, &HashMap::new())
+    };
+    assert_eq!(
+        after.get("CODEX_HOME").map(String::as_str),
+        Some("/managed/home")
+    );
+
+    // A busy slot keeps the env it started with even though the desired env
+    // changed — this is the run-start snapshot contract.
+    assert_eq!(
+        decide_codex_client_reuse(&before, &after, 1),
+        CodexClientReuseDecision::Reuse
+    );
+    assert_eq!(
+        decide_codex_client_reuse(&before, &after, 0),
+        CodexClientReuseDecision::ReplaceIdle
+    );
 }
 
 #[test]
