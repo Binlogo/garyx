@@ -5,6 +5,11 @@ import type {
   DesktopClaudeCodeAccount,
   DesktopClaudeCodeAccountSelection,
   DesktopClaudeCodeAccounts,
+  DesktopCodexAccount,
+  DesktopCodexAccountSelection,
+  DesktopCodexAccounts,
+  DesktopCodexAuthSession,
+  DesktopCodexAuthStatus,
   DesktopCodingUsage,
   DesktopModelUsage,
   DesktopProviderModelOption,
@@ -17,6 +22,7 @@ import type {
   DesktopUsageWindow,
   ListProviderRecentSessionsInput,
   StartDesktopClaudeAuthInput,
+  StartDesktopCodexAuthInput,
 } from "@shared/contracts";
 import {
   GatewayContractError,
@@ -68,6 +74,23 @@ interface ClaudeAuthPayload {
   status?: unknown;
   url?: unknown;
   auth_status?: unknown;
+  error?: unknown;
+  exit_code?: unknown;
+}
+
+interface CodexAccountsPayload {
+  active_account_id?: unknown;
+  accounts?: unknown;
+  refreshed_at?: unknown;
+}
+
+interface CodexAuthPayload {
+  login_id?: unknown;
+  account_id?: unknown;
+  status?: unknown;
+  url?: unknown;
+  user_code?: unknown;
+  identity?: unknown;
   error?: unknown;
   exit_code?: unknown;
 }
@@ -708,6 +731,220 @@ export async function cancelClaudeCodeAuth(
     { method: "DELETE", signal: AbortSignal.timeout(15000) },
   );
   return mapClaudeAuthSession(payload);
+}
+
+function mapCodexAccount(value: unknown, index: number): DesktopCodexAccount {
+  const path = `Codex accounts.accounts[${index}]`;
+  const record = requireContractRecord(value, path);
+  return {
+    id: optionalContractString(record, "id", path),
+    name: requireContractNonEmptyString(
+      requireContractField(record, "name", path),
+      `${path}.name`,
+    ),
+    systemDefault: requireContractBoolean(
+      requireContractField(record, "system_default", path),
+      `${path}.system_default`,
+    ),
+    selected: requireContractBoolean(
+      requireContractField(record, "selected", path),
+      `${path}.selected`,
+    ),
+    email: optionalContractString(record, "email", path),
+    plan: optionalContractString(record, "plan", path),
+    chatgptAccountId: optionalContractString(record, "chatgpt_account_id", path),
+    usage: mapProviderUsage(
+      requireContractField(record, "usage", path),
+      `${path}.usage`,
+    ),
+  };
+}
+
+function mapCodexAccounts(value: unknown): DesktopCodexAccounts {
+  const path = "Codex accounts";
+  const record = requireContractRecord(value, path);
+  return {
+    activeAccountId: optionalContractString(record, "active_account_id", path),
+    accounts: requireContractArray(
+      requireContractField(record, "accounts", path),
+      `${path}.accounts`,
+    ).map(mapCodexAccount),
+    refreshedAt: requireContractNonEmptyString(
+      requireContractField(record, "refreshed_at", path),
+      `${path}.refreshed_at`,
+    ),
+  };
+}
+
+/// The Codex login is a device-auth flow: there is no code-submit step, so
+/// the session carries the verification `userCode` to display plus the final
+/// `identity` record instead of Claude's `authStatus` document.
+function mapCodexAuthSession(value: unknown): DesktopCodexAuthSession {
+  const path = "Codex auth session";
+  const record = requireContractRecord(value, path);
+  const rawStatus = requireContractNonEmptyString(
+    requireContractField(record, "status", path),
+    `${path}.status`,
+  );
+  const statuses: DesktopCodexAuthStatus[] = [
+    "starting",
+    "waiting_for_authorization",
+    "succeeded",
+    "failed",
+  ];
+  if (!statuses.includes(rawStatus as DesktopCodexAuthStatus)) {
+    throw new GatewayContractError(`${path}.status`, "must be a known auth status");
+  }
+  const identity = hasContractField(record, "identity") && record.identity !== null
+    ? requireContractRecord(record.identity, `${path}.identity`)
+    : null;
+  return {
+    loginId: requireContractNonEmptyString(
+      requireContractField(record, "login_id", path),
+      `${path}.login_id`,
+    ),
+    accountId: optionalContractString(record, "account_id", path),
+    status: rawStatus as DesktopCodexAuthStatus,
+    authorizationUrl: optionalContractString(record, "url", path),
+    userCode: optionalContractString(record, "user_code", path),
+    identity,
+    error: optionalContractString(record, "error", path),
+    exitCode:
+      hasContractField(record, "exit_code") && record.exit_code !== null
+        ? requireContractInteger(record.exit_code, `${path}.exit_code`)
+        : null,
+  };
+}
+
+export async function listCodexAccounts(
+  settings: DesktopSettings,
+): Promise<DesktopCodexAccounts> {
+  const payload = await requestJson<CodexAccountsPayload>(
+    settings,
+    "/api/providers/codex/accounts",
+    "readRetryable",
+    { signal: AbortSignal.timeout(30000) },
+  );
+  return mapCodexAccounts(payload);
+}
+
+/// Unlike the Claude selection payload, the Codex selection never carries a
+/// `session_reconcile` document; the recovery summary is the whole result.
+export async function selectCodexAccount(
+  settings: DesktopSettings,
+  accountId: string | null,
+): Promise<DesktopCodexAccountSelection> {
+  const payload = await requestJson<unknown>(
+    settings,
+    "/api/providers/codex/accounts/active",
+    "mutationSingleAttempt",
+    {
+      method: "PUT",
+      signal: AbortSignal.timeout(15000),
+      body: JSON.stringify({ account_id: accountId }),
+    },
+  );
+  const path = "Codex account selection";
+  const record = requireContractRecord(payload, path);
+  const recovery = hasContractField(record, "recovery")
+    ? requireContractRecord(record.recovery, `${path}.recovery`)
+    : {};
+  return {
+    activeAccountId: optionalContractString(record, "active_account_id", path),
+    selectionChanged: hasContractField(record, "selection_changed")
+      ? requireContractBoolean(record.selection_changed, `${path}.selection_changed`)
+      : true,
+    recovery: {
+      matchedThreads: hasContractField(recovery, "matched_threads")
+        ? requireContractInteger(recovery.matched_threads, `${path}.recovery.matched_threads`)
+        : 0,
+      expeditedThreads: hasContractField(recovery, "expedited_threads")
+        ? requireContractInteger(recovery.expedited_threads, `${path}.recovery.expedited_threads`)
+        : 0,
+      alreadyClaimedThreads: hasContractField(recovery, "already_claimed_threads")
+        ? requireContractInteger(
+          recovery.already_claimed_threads,
+          `${path}.recovery.already_claimed_threads`,
+        )
+        : 0,
+    },
+    recoveryWarning: optionalContractString(record, "recovery_warning", path),
+  };
+}
+
+export async function renameCodexAccount(
+  settings: DesktopSettings,
+  accountId: string,
+  name: string,
+): Promise<void> {
+  await requestJson<unknown>(
+    settings,
+    `/api/providers/codex/accounts/${encodeURIComponent(accountId)}`,
+    "mutationSingleAttempt",
+    {
+      method: "PATCH",
+      signal: AbortSignal.timeout(15000),
+      body: JSON.stringify({ name }),
+    },
+  );
+}
+
+export async function deleteCodexAccount(
+  settings: DesktopSettings,
+  accountId: string,
+): Promise<void> {
+  await requestJson<unknown>(
+    settings,
+    `/api/providers/codex/accounts/${encodeURIComponent(accountId)}`,
+    "mutationSingleAttempt",
+    { method: "DELETE", signal: AbortSignal.timeout(15000) },
+  );
+}
+
+export async function startCodexAuth(
+  settings: DesktopSettings,
+  input: StartDesktopCodexAuthInput,
+): Promise<DesktopCodexAuthSession> {
+  const payload = await requestJson<CodexAuthPayload>(
+    settings,
+    "/api/providers/codex/auth/start",
+    "mutationSingleAttempt",
+    {
+      method: "POST",
+      signal: AbortSignal.timeout(45000),
+      body: JSON.stringify({
+        managed_account_name: input.managedAccountName || null,
+        account_id: input.accountId || null,
+      }),
+    },
+  );
+  return mapCodexAuthSession(payload);
+}
+
+export async function getCodexAuth(
+  settings: DesktopSettings,
+  loginId: string,
+): Promise<DesktopCodexAuthSession> {
+  const payload = await requestJson<CodexAuthPayload>(
+    settings,
+    `/api/providers/codex/auth/${encodeURIComponent(loginId)}`,
+    "readRetryable",
+    { signal: AbortSignal.timeout(15000) },
+  );
+  return mapCodexAuthSession(payload);
+}
+
+export async function cancelCodexAuth(
+  settings: DesktopSettings,
+  loginId: string,
+): Promise<DesktopCodexAuthSession> {
+  const payload = await requestJson<CodexAuthPayload>(
+    settings,
+    `/api/providers/codex/auth/${encodeURIComponent(loginId)}`,
+    "mutationSingleAttempt",
+    { method: "DELETE", signal: AbortSignal.timeout(15000) },
+  );
+  return mapCodexAuthSession(payload);
 }
 
 function mapProviderRecentSession(

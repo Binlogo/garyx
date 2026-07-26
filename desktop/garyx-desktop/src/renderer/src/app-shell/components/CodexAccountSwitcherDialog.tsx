@@ -1,8 +1,8 @@
 import { Plus } from "lucide-react";
 
 import type {
-  DesktopClaudeCodeAccount,
-  DesktopClaudeCodeAccounts,
+  DesktopCodexAccount,
+  DesktopCodexAccounts,
 } from "@shared/contracts";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -24,28 +24,27 @@ import {
   unavailableUsageText,
 } from "./provider-account-quota";
 
-type ClaudeAccountSwitcherDialogProps = {
+type CodexAccountSwitcherDialogProps = {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  accounts: DesktopClaudeCodeAccounts | null;
+  accounts: DesktopCodexAccounts | null;
   loading: boolean;
   error: string | null;
   mutationId: string | null;
-  onSelect: (account: DesktopClaudeCodeAccount) => void | Promise<unknown>;
+  onSelect: (account: DesktopCodexAccount) => void | Promise<unknown>;
   onAdd?: () => void;
-  onReauthenticate?: (account: DesktopClaudeCodeAccount) => void;
-  onRename?: (account: DesktopClaudeCodeAccount) => void;
-  onDelete?: (account: DesktopClaudeCodeAccount) => void;
+  onReauthenticate?: (account: DesktopCodexAccount) => void;
+  onRename?: (account: DesktopCodexAccount) => void;
+  onDelete?: (account: DesktopCodexAccount) => void;
   description?: string;
 };
 
 /**
- * Shared, app-centered Claude account selector. Provider Settings supplies
- * management callbacks; transcript recovery intentionally supplies selection
- * only, keeping the in-thread action focused while preserving identical quota
- * evidence for each candidate account.
+ * App-centered Codex account selector, structurally identical to the Claude
+ * switcher: every candidate shows its own quota evidence before selection,
+ * and management actions stay per-row.
  */
-export function ClaudeAccountSwitcherDialog({
+export function CodexAccountSwitcherDialog({
   open,
   onOpenChange,
   accounts,
@@ -58,15 +57,15 @@ export function ClaudeAccountSwitcherDialog({
   onRename,
   onDelete,
   description,
-}: ClaudeAccountSwitcherDialogProps) {
+}: CodexAccountSwitcherDialogProps) {
   const { t } = useI18n();
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="provider-account-dialog" size="form">
         <DialogHeader>
-          <DialogTitle>{t("Claude Code accounts")}</DialogTitle>
+          <DialogTitle>{t("Codex accounts")}</DialogTitle>
           <DialogDescription>
-            {description || t("Choose the account for new Claude Code runs.")}
+            {description || t("Choose the account for new Codex runs.")}
           </DialogDescription>
         </DialogHeader>
         <div className="provider-account-dialog-body">
@@ -96,7 +95,7 @@ export function ClaudeAccountSwitcherDialog({
                       checked={account.selected}
                       className="provider-account-radio"
                       disabled={Boolean(mutationId)}
-                      name="claude-code-account"
+                      name="codex-account"
                       onChange={() => {
                         if (!account.selected) void onSelect(account);
                       }}
@@ -116,9 +115,8 @@ export function ClaudeAccountSwitcherDialog({
                           </div>
                           <span>
                             {account.email
-                              || account.organization
                               || (account.systemDefault
-                                ? t("This Mac’s default Claude Code login")
+                                ? t("This Mac’s default Codex login")
                                 : t("Added to Garyx"))}
                           </span>
                         </div>
@@ -180,7 +178,7 @@ export function ClaudeAccountSwitcherDialog({
           <DialogFooter>
             <Button onClick={onAdd} type="button">
               <Plus aria-hidden size={14} strokeWidth={2} />
-              {t("Add Claude account")}
+              {t("Add Codex account")}
             </Button>
           </DialogFooter>
         ) : null}

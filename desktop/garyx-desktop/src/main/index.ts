@@ -129,6 +129,7 @@ import {
   createSlashCommand,
   bindRemoteChannelEndpoint,
   cancelClaudeCodeAuth,
+  cancelCodexAuth,
   checkConnection,
   deleteCapsule,
   deleteCustomAgent,
@@ -151,6 +152,7 @@ import {
   fetchThreadSummaries,
   getCodingUsage,
   getClaudeCodeAuth,
+  getCodexAuth,
   getCapsule,
   getCapsuleHtml,
   getWorkspaceGitStatus,
@@ -163,6 +165,7 @@ import {
   listCustomAgents,
   listProviderModels,
   listClaudeCodeAccounts,
+  listCodexAccounts,
   listWorkspaceDirectories,
   listWorkspaceFiles,
   listMcpServers,
@@ -175,12 +178,14 @@ import {
   saveGatewaySettings,
   saveSkillFile,
   selectClaudeCodeAccount,
+  selectCodexAccount,
   retryThreadQuotaRecovery,
   setDefaultCustomAgent,
   setRemoteThreadFavorite,
   sendStreamingInput,
   stopTask,
   startClaudeCodeAuth,
+  startCodexAuth,
   submitClaudeCodeAuth,
   toggleMcpServer,
   toggleCustomAgent,
@@ -193,6 +198,8 @@ import {
   updateTaskStatus,
   renameClaudeCodeAccount,
   deleteClaudeCodeAccount,
+  renameCodexAccount,
+  deleteCodexAccount,
   assignTask,
   assertRecentThreadGatewayScope,
   assertThreadSummaryGatewayScope,
@@ -968,6 +975,41 @@ function registerIpcHandlers(): void {
   ipcMain.handle("garyx:cancel-claude-code-auth", async (_event, input) => {
     const settings = await resolveSettings();
     return cancelClaudeCodeAuth(settings, input.loginId);
+  });
+
+  ipcMain.handle("garyx:list-codex-accounts", async () => {
+    const settings = await resolveSettings();
+    return listCodexAccounts(settings);
+  });
+
+  ipcMain.handle("garyx:select-codex-account", async (_event, input) => {
+    const settings = await resolveSettings();
+    return selectCodexAccount(settings, input.accountId);
+  });
+
+  ipcMain.handle("garyx:rename-codex-account", async (_event, input) => {
+    const settings = await resolveSettings();
+    await renameCodexAccount(settings, input.accountId, input.name);
+  });
+
+  ipcMain.handle("garyx:delete-codex-account", async (_event, input) => {
+    const settings = await resolveSettings();
+    await deleteCodexAccount(settings, input.accountId);
+  });
+
+  ipcMain.handle("garyx:start-codex-auth", async (_event, input) => {
+    const settings = await resolveSettings();
+    return startCodexAuth(settings, input);
+  });
+
+  ipcMain.handle("garyx:get-codex-auth", async (_event, input) => {
+    const settings = await resolveSettings();
+    return getCodexAuth(settings, input.loginId);
+  });
+
+  ipcMain.handle("garyx:cancel-codex-auth", async (_event, input) => {
+    const settings = await resolveSettings();
+    return cancelCodexAuth(settings, input.loginId);
   });
 
   ipcMain.handle(

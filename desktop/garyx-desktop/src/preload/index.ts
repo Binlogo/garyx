@@ -172,6 +172,20 @@ const api: GaryxDesktopApi = {
     ipcRenderer.invoke("garyx:get-claude-code-auth", input),
   cancelClaudeCodeAuth: (input) =>
     ipcRenderer.invoke("garyx:cancel-claude-code-auth", input),
+  listCodexAccounts: () =>
+    ipcRenderer.invoke("garyx:list-codex-accounts"),
+  selectCodexAccount: (input) =>
+    ipcRenderer.invoke("garyx:select-codex-account", input),
+  renameCodexAccount: (input) =>
+    ipcRenderer.invoke("garyx:rename-codex-account", input),
+  deleteCodexAccount: (input) =>
+    ipcRenderer.invoke("garyx:delete-codex-account", input),
+  startCodexAuth: (input) =>
+    ipcRenderer.invoke("garyx:start-codex-auth", input),
+  getCodexAuth: (input) =>
+    ipcRenderer.invoke("garyx:get-codex-auth", input),
+  cancelCodexAuth: (input) =>
+    ipcRenderer.invoke("garyx:cancel-codex-auth", input),
   createCustomAgent: (input) =>
     ipcRenderer.invoke("garyx:create-custom-agent", input),
   updateCustomAgent: (input) =>

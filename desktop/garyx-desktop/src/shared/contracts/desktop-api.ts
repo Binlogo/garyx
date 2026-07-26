@@ -87,12 +87,16 @@ import type {
   DesktopClaudeAuthSession,
   DesktopClaudeCodeAccountSelection,
   DesktopClaudeCodeAccounts,
+  DesktopCodexAccountSelection,
+  DesktopCodexAccounts,
+  DesktopCodexAuthSession,
   DesktopCodingUsage,
   DesktopProviderModels,
   DesktopProviderRecentSession,
   DesktopQuotaRecoveryRetryResult,
   ListProviderRecentSessionsInput,
   StartDesktopClaudeAuthInput,
+  StartDesktopCodexAuthInput,
 } from "./provider.ts";
 import type {
   SaveImageInput,
@@ -332,6 +336,21 @@ export interface GaryxDesktopApi {
   cancelClaudeCodeAuth: (input: {
     loginId: string;
   }) => Promise<DesktopClaudeAuthSession>;
+  listCodexAccounts: () => Promise<DesktopCodexAccounts>;
+  selectCodexAccount: (
+    input: { accountId: string | null },
+  ) => Promise<DesktopCodexAccountSelection>;
+  renameCodexAccount: (input: { accountId: string; name: string }) => Promise<void>;
+  deleteCodexAccount: (input: { accountId: string }) => Promise<void>;
+  startCodexAuth: (
+    input: StartDesktopCodexAuthInput,
+  ) => Promise<DesktopCodexAuthSession>;
+  getCodexAuth: (input: {
+    loginId: string;
+  }) => Promise<DesktopCodexAuthSession>;
+  cancelCodexAuth: (input: {
+    loginId: string;
+  }) => Promise<DesktopCodexAuthSession>;
   createCustomAgent: (
     input: CreateCustomAgentInput,
   ) => Promise<DesktopCustomAgent>;

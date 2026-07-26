@@ -7,6 +7,9 @@ import type {
   DesktopClaudeAuthSession,
   DesktopClaudeCodeAccount,
   DesktopClaudeCodeAccounts,
+  DesktopCodexAccount,
+  DesktopCodexAccounts,
+  DesktopCodexAuthSession,
   DesktopCodingUsage,
   DesktopProviderModels,
   DesktopProviderUsage,
@@ -35,6 +38,7 @@ import {
 } from '@/components/ui/select';
 import { ProviderAgentIcon } from '../app-shell/components/ProviderAgentIcon';
 import { ClaudeAccountSwitcherDialog } from '../app-shell/components/ClaudeAccountSwitcherDialog';
+import { CodexAccountSwitcherDialog } from '../app-shell/components/CodexAccountSwitcherDialog';
 import { useI18n, type Translate } from '../i18n';
 import { shouldRequestProviderModelCatalog } from '../provider-model-catalog';
 import {
@@ -105,7 +109,7 @@ function isHttpUrl(value: string): boolean {
 async function openExternalAuthUrl(value: string): Promise<void> {
   const url = value.trim();
   if (!isHttpUrl(url)) {
-    throw new Error('Claude returned an invalid authorization URL.');
+    throw new Error('The provider returned an invalid authorization URL.');
   }
   await window.garyxDesktop.openExternalUrl({ url });
 }
@@ -164,6 +168,25 @@ export function ProviderSettingsPanel({
   const [renameAccount, setRenameAccount] = useState<DesktopClaudeCodeAccount | null>(null);
   const [renameValue, setRenameValue] = useState('');
   const [deleteAccount, setDeleteAccount] = useState<DesktopClaudeCodeAccount | null>(null);
+  const [codexAccounts, setCodexAccounts] = useState<DesktopCodexAccounts | null>(null);
+  const [codexAccountsLoading, setCodexAccountsLoading] = useState(false);
+  const [codexAccountsError, setCodexAccountsError] = useState<string | null>(null);
+  const [codexSwitcherOpen, setCodexSwitcherOpen] = useState(false);
+  const [codexMutationId, setCodexMutationId] = useState<string | null>(null);
+  const [codexRecoveryNotice, setCodexRecoveryNotice] = useState<string | null>(null);
+  const [codexLoginDialog, setCodexLoginDialog] = useState<{
+    mode: 'new' | 'reauth';
+    account: DesktopCodexAccount | null;
+  } | null>(null);
+  const [codexLoginAccountName, setCodexLoginAccountName] = useState('');
+  const [codexLoginSession, setCodexLoginSession] = useState<DesktopCodexAuthSession | null>(null);
+  const [codexLoginBusy, setCodexLoginBusy] = useState(false);
+  const [codexLoginError, setCodexLoginError] = useState<string | null>(null);
+  const [codexUserCodeCopied, setCodexUserCodeCopied] = useState(false);
+  const [codexRenameAccount, setCodexRenameAccount] = useState<DesktopCodexAccount | null>(null);
+  const [codexRenameValue, setCodexRenameValue] = useState('');
+  const [codexDeleteAccount, setCodexDeleteAccount] = useState<DesktopCodexAccount | null>(null);
+  const codexLoginFlowIdRef = useRef(0);
   const openedLoginIdsRef = useRef(new Set<string>());
   const loginFlowIdRef = useRef(0);
   const loginCodeInputRef = useRef<HTMLInputElement | null>(null);
@@ -258,6 +281,18 @@ export function ProviderSettingsPanel({
     }
   }
 
+  async function refreshCodexAccounts() {
+    setCodexAccountsLoading(true);
+    setCodexAccountsError(null);
+    try {
+      setCodexAccounts(await window.garyxDesktop.listCodexAccounts());
+    } catch (error) {
+      setCodexAccountsError(error instanceof Error ? error.message : t('Failed to load accounts.'));
+    } finally {
+      setCodexAccountsLoading(false);
+    }
+  }
+
   useEffect(() => {
     for (const providerType of PROVIDER_MODEL_TYPES) {
       ensureProviderModels(providerType);
@@ -278,6 +313,7 @@ export function ProviderSettingsPanel({
   useEffect(() => {
     void refreshCodingUsage();
     void refreshClaudeAccounts();
+    void refreshCodexAccounts();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [t]);
 
@@ -286,6 +322,12 @@ export function ProviderSettingsPanel({
     const timer = window.setTimeout(() => setAccountRecoveryNotice(null), 5_000);
     return () => window.clearTimeout(timer);
   }, [accountRecoveryNotice]);
+
+  useEffect(() => {
+    if (!codexRecoveryNotice) return;
+    const timer = window.setTimeout(() => setCodexRecoveryNotice(null), 5_000);
+    return () => window.clearTimeout(timer);
+  }, [codexRecoveryNotice]);
 
   useEffect(() => {
     if (!loginSession || loginSession.status === 'succeeded' || loginSession.status === 'failed') {
@@ -344,6 +386,55 @@ export function ProviderSettingsPanel({
     window.addEventListener('focus', refocus);
     return () => window.removeEventListener('focus', refocus);
   }, [loginSession?.loginId, loginSession?.status]);
+
+  useEffect(() => {
+    if (!codexLoginSession || codexLoginSession.status === 'succeeded' || codexLoginSession.status === 'failed') {
+      return;
+    }
+    const flowId = codexLoginFlowIdRef.current;
+    const timer = window.setInterval(() => {
+      void window.garyxDesktop.getCodexAuth({ loginId: codexLoginSession.loginId })
+        .then((session) => {
+          if (codexLoginFlowIdRef.current === flowId) setCodexLoginSession(session);
+        })
+        .catch((error) => {
+          if (codexLoginFlowIdRef.current === flowId) {
+            setCodexLoginError(error instanceof Error ? error.message : t('Failed to check sign-in.'));
+          }
+        });
+    }, 800);
+    return () => window.clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [codexLoginSession?.loginId, codexLoginSession?.status]);
+
+  useEffect(() => {
+    if (codexLoginSession?.status === 'failed') {
+      setCodexLoginError(codexLoginSession.error || t('Codex sign-in failed.'));
+      return;
+    }
+    if (codexLoginSession?.status !== 'succeeded') {
+      return;
+    }
+    const flowId = codexLoginFlowIdRef.current;
+    void Promise.all([refreshCodexAccounts(), refreshCodingUsage()]).then(() => {
+      if (codexLoginFlowIdRef.current !== flowId) return;
+      setCodexLoginDialog(null);
+      setCodexLoginSession(null);
+      setCodexSwitcherOpen(true);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [codexLoginSession?.loginId, codexLoginSession?.status]);
+
+  useEffect(() => {
+    if (!codexLoginSession?.authorizationUrl
+      || openedLoginIdsRef.current.has(codexLoginSession.loginId)) {
+      return;
+    }
+    openedLoginIdsRef.current.add(codexLoginSession.loginId);
+    void openExternalAuthUrl(codexLoginSession.authorizationUrl).catch((error) => {
+      setCodexLoginError(error instanceof Error ? error.message : t('Could not open the browser. Use the link below.'));
+    });
+  }, [codexLoginSession?.authorizationUrl, codexLoginSession?.loginId, t]);
 
   useEffect(() => {
     if (!providerConfigRow || !activeProviderModels) {
@@ -734,6 +825,137 @@ export function ProviderSettingsPanel({
     }
   }
 
+  function selectedCodexAccount(): DesktopCodexAccount | null {
+    return codexAccounts?.accounts.find((account) => account.selected) || null;
+  }
+
+  async function handleSelectCodexAccount(account: DesktopCodexAccount) {
+    const mutationKey = account.id || 'system';
+    setCodexMutationId(mutationKey);
+    setCodexAccountsError(null);
+    try {
+      const result = await window.garyxDesktop.selectCodexAccount({ accountId: account.id });
+      await Promise.all([refreshCodexAccounts(), refreshCodingUsage()]);
+      if (!result.selectionChanged) {
+        setCodexRecoveryNotice(null);
+      } else if (result.recoveryWarning) {
+        setCodexRecoveryNotice(t('Account switched. Retry the paused threads manually.'));
+      } else if (result.recovery.matchedThreads > 0) {
+        setCodexRecoveryNotice(t('Resuming {count} paused threads…', {
+          count: result.recovery.matchedThreads,
+        }));
+      } else {
+        setCodexRecoveryNotice(t('Account switched.'));
+      }
+      setCodexSwitcherOpen(false);
+    } catch (error) {
+      setCodexAccountsError(error instanceof Error ? error.message : t('Failed to switch account.'));
+    } finally {
+      setCodexMutationId(null);
+    }
+  }
+
+  function openCodexLoginDialog(mode: 'new' | 'reauth', account: DesktopCodexAccount | null = null) {
+    codexLoginFlowIdRef.current += 1;
+    setCodexSwitcherOpen(false);
+    setCodexLoginDialog({ mode, account });
+    setCodexLoginAccountName(mode === 'new' ? '' : account?.name || '');
+    setCodexLoginSession(null);
+    setCodexLoginError(null);
+    setCodexLoginBusy(false);
+    setCodexUserCodeCopied(false);
+  }
+
+  function closeCodexLoginDialog() {
+    const session = codexLoginSession;
+    codexLoginFlowIdRef.current += 1;
+    setCodexLoginDialog(null);
+    setCodexLoginSession(null);
+    setCodexLoginError(null);
+    setCodexLoginBusy(false);
+    setCodexUserCodeCopied(false);
+    if (session && session.status !== 'succeeded' && session.status !== 'failed') {
+      void window.garyxDesktop.cancelCodexAuth({ loginId: session.loginId }).catch(() => {
+        // The dialog is already closed; the gateway reaps the device-auth CLI
+        // and cleans uncommitted homes itself, so cancellation is best effort.
+      });
+    }
+  }
+
+  async function handleStartCodexLogin() {
+    if (!codexLoginDialog || codexLoginBusy) return;
+    const name = codexLoginAccountName.trim();
+    if (codexLoginDialog.mode === 'new' && !name) {
+      setCodexLoginError(t('Give this account a name first.'));
+      return;
+    }
+    setCodexLoginBusy(true);
+    setCodexLoginError(null);
+    const flowId = codexLoginFlowIdRef.current;
+    try {
+      const session = await window.garyxDesktop.startCodexAuth({
+        managedAccountName: codexLoginDialog.mode === 'new' ? name : null,
+        accountId: codexLoginDialog.mode === 'reauth' ? codexLoginDialog.account?.id || null : null,
+      });
+      if (codexLoginFlowIdRef.current !== flowId) {
+        void window.garyxDesktop.cancelCodexAuth({ loginId: session.loginId }).catch(() => {});
+        return;
+      }
+      setCodexLoginSession(session);
+      if (session.status === 'failed') {
+        setCodexLoginError(session.error || t('Codex sign-in failed.'));
+      }
+    } catch (error) {
+      if (codexLoginFlowIdRef.current === flowId) {
+        setCodexLoginError(error instanceof Error ? error.message : t('Could not start Codex sign-in.'));
+      }
+    } finally {
+      if (codexLoginFlowIdRef.current === flowId) setCodexLoginBusy(false);
+    }
+  }
+
+  function handleCopyCodexUserCode() {
+    const code = codexLoginSession?.userCode;
+    if (!code) return;
+    void navigator.clipboard.writeText(code).then(() => {
+      setCodexUserCodeCopied(true);
+      window.setTimeout(() => setCodexUserCodeCopied(false), 2_000);
+    }).catch(() => {
+      // Selection stays possible; the code is rendered as text.
+    });
+  }
+
+  async function handleRenameCodexAccount() {
+    if (!codexRenameAccount?.id || !codexRenameValue.trim() || codexMutationId) return;
+    setCodexMutationId(codexRenameAccount.id);
+    try {
+      await window.garyxDesktop.renameCodexAccount({
+        accountId: codexRenameAccount.id,
+        name: codexRenameValue.trim(),
+      });
+      await refreshCodexAccounts();
+      setCodexRenameAccount(null);
+    } catch (error) {
+      setCodexAccountsError(error instanceof Error ? error.message : t('Failed to rename account.'));
+    } finally {
+      setCodexMutationId(null);
+    }
+  }
+
+  async function handleDeleteCodexAccount() {
+    if (!codexDeleteAccount?.id || codexMutationId) return;
+    setCodexMutationId(codexDeleteAccount.id);
+    try {
+      await window.garyxDesktop.deleteCodexAccount({ accountId: codexDeleteAccount.id });
+      await Promise.all([refreshCodexAccounts(), refreshCodingUsage()]);
+      setCodexDeleteAccount(null);
+    } catch (error) {
+      setCodexAccountsError(error instanceof Error ? error.message : t('Failed to delete account.'));
+    } finally {
+      setCodexMutationId(null);
+    }
+  }
+
   function renderProviderUsageSummary(usage: DesktopProviderUsage | null): ReactNode {
     if (!usage) {
       return (
@@ -781,9 +1003,11 @@ export function ProviderSettingsPanel({
   function renderProviderCard(row: FixedModelProviderRow): ReactNode {
     const details = providerRowDetails(row);
     const claudeAccount = row.key === 'claude_code' ? selectedClaudeAccount() : null;
+    const codexAccount = row.key === 'codex_app_server' ? selectedCodexAccount() : null;
     const usage = row.usageProviderId
       ? codingUsageByProviderId[row.usageProviderId]
         || (row.key === 'claude_code' ? claudeAccount?.usage : null)
+        || (row.key === 'codex_app_server' ? codexAccount?.usage : null)
         || null
       : null;
     const providerDescription = row.key === 'claude_code'
@@ -801,6 +1025,17 @@ export function ProviderSettingsPanel({
       : claudeAccount?.email
         || claudeAccount?.organization
         || t('Uses this Mac’s Claude Code login');
+    const codexSelectionUnavailable = Boolean(
+      row.key === 'codex_app_server' && codexAccounts?.activeAccountId && !codexAccount,
+    );
+    const codexAccountName = codexSelectionUnavailable
+      ? t('Account unavailable')
+      : codexAccount?.name
+        || (codexAccountsLoading ? t('Loading…') : t('System default'));
+    const codexAccountDetail = codexSelectionUnavailable
+      ? t('Choose another account before starting Codex.')
+      : codexAccount?.email
+        || t('Uses this Mac’s Codex login');
     const quotaDescription = usage?.plan
       ? usage.stale
         ? `${usage.plan} · ${t('stale')}`
@@ -858,6 +1093,37 @@ export function ProviderSettingsPanel({
               )}
               description={`${claudeAccountName} · ${claudeAccountDetail}${accountRecoveryNotice
                 ? ` · ${accountRecoveryNotice}`
+                : ''}`}
+              label={t('Current account')}
+            />
+          ) : null}
+          {row.key === 'codex_app_server' ? (
+            <SettingsControlRow
+              className="provider-account-row"
+              control={(
+                <div className="provider-account-actions">
+                  <Button
+                    aria-label={t('Switch account')}
+                    onClick={() => setCodexSwitcherOpen(true)}
+                    size="sm"
+                    type="button"
+                    variant="outline"
+                  >
+                    {t('Switch account')}
+                  </Button>
+                  <Button
+                    aria-label={t('Add account')}
+                    onClick={() => openCodexLoginDialog('new')}
+                    size="sm"
+                    type="button"
+                  >
+                    <Plus aria-hidden size={13} strokeWidth={2} />
+                    {t('Add account')}
+                  </Button>
+                </div>
+              )}
+              description={`${codexAccountName} · ${codexAccountDetail}${codexRecoveryNotice
+                ? ` · ${codexRecoveryNotice}`
                 : ''}`}
               label={t('Current account')}
             />
@@ -1006,6 +1272,161 @@ export function ProviderSettingsPanel({
         onSelect={handleSelectClaudeAccount}
         open={accountSwitcherOpen}
       />
+
+      <CodexAccountSwitcherDialog
+        accounts={codexAccounts}
+        error={codexAccountsError}
+        loading={codexAccountsLoading}
+        mutationId={codexMutationId}
+        onAdd={() => openCodexLoginDialog('new')}
+        onDelete={setCodexDeleteAccount}
+        onOpenChange={setCodexSwitcherOpen}
+        onReauthenticate={(account) => openCodexLoginDialog('reauth', account)}
+        onRename={(account) => {
+          setCodexRenameAccount(account);
+          setCodexRenameValue(account.name);
+        }}
+        onSelect={handleSelectCodexAccount}
+        open={codexSwitcherOpen}
+      />
+
+      <Dialog
+        open={Boolean(codexLoginDialog)}
+        onOpenChange={(open) => {
+          if (!open) closeCodexLoginDialog();
+        }}
+      >
+        <DialogContent
+          className="provider-login-dialog"
+          scroll="content"
+          showCloseButton={!codexLoginBusy}
+          size="form"
+        >
+          <DialogHeader>
+            <DialogTitle>
+              {codexLoginDialog?.mode === 'new' ? t('Add Codex account') : t('Sign in to Codex')}
+            </DialogTitle>
+            <DialogDescription>
+              {codexLoginSession
+                ? t('Enter the one-time code in your browser to finish signing in.')
+                : codexLoginDialog?.mode === 'new'
+                  ? t('Sign in to add another Codex account to Garyx.')
+                  : t('Sign in again to refresh this Codex account.')}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="provider-login-body">
+            {!codexLoginSession && codexLoginDialog?.mode === 'new' ? (
+              <div className="commands-field">
+                <Label htmlFor="provider-codex-account-name">{t('Account name')}</Label>
+                <Input
+                  autoFocus
+                  id="provider-codex-account-name"
+                  onChange={(event) => setCodexLoginAccountName(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter') void handleStartCodexLogin();
+                  }}
+                  placeholder={t('Work, Personal…')}
+                  value={codexLoginAccountName}
+                />
+              </div>
+            ) : null}
+            {!codexLoginSession && codexLoginDialog?.mode === 'reauth' ? (
+              <div className="provider-login-account-summary">
+                <div>
+                  <strong>{codexLoginDialog.account?.name || t('System default')}</strong>
+                  <span>{codexLoginDialog.account?.email || t('Codex account')}</span>
+                </div>
+              </div>
+            ) : null}
+            {codexLoginSession ? (
+              <>
+                <div className="provider-browser-opened">
+                  <span className="provider-browser-status-dot" aria-hidden />
+                  <strong>{t('Browser opened')}</strong>
+                  <span>{t('Enter the code there, then return to Garyx.')}</span>
+                </div>
+                {codexLoginSession.userCode ? (
+                  <div className="provider-device-code" data-copied={codexUserCodeCopied || undefined}>
+                    <span className="provider-device-code-value">{codexLoginSession.userCode}</span>
+                    <Button
+                      onClick={handleCopyCodexUserCode}
+                      size="sm"
+                      type="button"
+                      variant="outline"
+                    >
+                      {codexUserCodeCopied ? t('Copied') : t('Copy code')}
+                    </Button>
+                  </div>
+                ) : null}
+                {codexLoginSession.authorizationUrl ? (
+                  <a
+                    className="provider-auth-link"
+                    href={codexLoginSession.authorizationUrl}
+                    onClick={(event) => {
+                      event.preventDefault();
+                      void openExternalAuthUrl(codexLoginSession.authorizationUrl || '');
+                    }}
+                    rel="noreferrer"
+                    target="_blank"
+                  >
+                    {codexLoginSession.authorizationUrl}
+                  </a>
+                ) : null}
+                <div className="provider-device-wait">
+                  {t('Waiting for authorization… This dialog closes automatically once Codex confirms.')}
+                </div>
+              </>
+            ) : null}
+            {codexLoginError ? <div className="provider-account-error">{codexLoginError}</div> : null}
+          </div>
+          <DialogFooter>
+            <Button disabled={codexLoginBusy} onClick={closeCodexLoginDialog} type="button" variant="outline">
+              {t('Cancel')}
+            </Button>
+            {!codexLoginSession ? (
+              <Button disabled={codexLoginBusy} onClick={() => { void handleStartCodexLogin(); }} type="button">
+                {codexLoginBusy ? t('Starting…') : t('Sign in with ChatGPT')}
+              </Button>
+            ) : null}
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={Boolean(codexRenameAccount)} onOpenChange={(open) => { if (!open) setCodexRenameAccount(null); }}>
+        <DialogContent size="narrow">
+          <DialogHeader>
+            <DialogTitle>{t('Rename account')}</DialogTitle>
+            <DialogDescription>{t('This name is only shown inside Garyx.')}</DialogDescription>
+          </DialogHeader>
+          <Input
+            autoFocus
+            onChange={(event) => setCodexRenameValue(event.target.value)}
+            onKeyDown={(event) => { if (event.key === 'Enter') void handleRenameCodexAccount(); }}
+            value={codexRenameValue}
+          />
+          <DialogFooter>
+            <Button onClick={() => setCodexRenameAccount(null)} type="button" variant="outline">{t('Cancel')}</Button>
+            <Button onClick={() => { void handleRenameCodexAccount(); }} type="button">{t('Save')}</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={Boolean(codexDeleteAccount)} onOpenChange={(open) => { if (!open) setCodexDeleteAccount(null); }}>
+        <DialogContent size="narrow">
+          <DialogHeader>
+            <DialogTitle>{t('Delete {name}?', { name: codexDeleteAccount?.name || t('account') })}</DialogTitle>
+            <DialogDescription>
+              {t('This removes the managed Codex sign-in from this Mac. Shared Codex config and sessions stay in place. This cannot be undone.')}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button onClick={() => setCodexDeleteAccount(null)} type="button" variant="outline">{t('Cancel')}</Button>
+            <Button onClick={() => { void handleDeleteCodexAccount(); }} type="button" variant="destructive">
+              {t('Delete account')}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Dialog
         open={Boolean(loginDialog)}
