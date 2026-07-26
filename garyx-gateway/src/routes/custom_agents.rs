@@ -177,6 +177,25 @@ pub async fn set_default_custom_agent(
     }
 }
 
+pub(super) async fn resolve_claude_catalog_scope(
+    state: &AppState,
+    config: &garyx_models::config::GaryxConfig,
+) -> crate::provider_models::ClaudeCatalogScope {
+    let account_id = config
+        .provider_accounts
+        .claude_code
+        .active_account_id
+        .clone();
+    let config_dir =
+        crate::provider_accounts::validated_active_claude_config_dir(state, config).await;
+    match account_id {
+        Some(account_id) => {
+            crate::provider_models::ClaudeCatalogScope::managed(account_id, config_dir)
+        }
+        None => crate::provider_models::ClaudeCatalogScope::system(),
+    }
+}
+
 pub async fn list_provider_models(
     State(state): State<Arc<AppState>>,
     Path(provider_type): Path<String>,
@@ -190,8 +209,18 @@ pub async fn list_provider_models(
     };
 
     let config = state.config_snapshot();
-    let response =
-        crate::provider_models::list_provider_models(config.as_ref(), provider_type).await;
+    let claude_catalog_scope = match provider_type {
+        ProviderType::ClaudeCode => {
+            resolve_claude_catalog_scope(state.as_ref(), config.as_ref()).await
+        }
+        _ => crate::provider_models::ClaudeCatalogScope::system(),
+    };
+    let response = crate::provider_models::list_provider_models(
+        config.as_ref(),
+        provider_type,
+        claude_catalog_scope,
+    )
+    .await;
     (StatusCode::OK, Json(response)).into_response()
 }
 

@@ -93,15 +93,18 @@ fn model_option(
     id: &str,
     label: &str,
     description: &str,
-    default_reasoning_effort: &str,
     supported_reasoning_efforts: Vec<ProviderReasoningEffortOption>,
 ) -> ProviderModelOption {
+    let default_reasoning_effort = supported_reasoning_efforts
+        .iter()
+        .find(|effort| effort.recommended)
+        .map(|effort| effort.id.clone());
     ProviderModelOption {
         id: id.to_owned(),
         label: label.to_owned(),
         description: Some(description.to_owned()),
         recommended: false,
-        default_reasoning_effort: Some(default_reasoning_effort.to_owned()),
+        default_reasoning_effort,
         supported_reasoning_efforts,
         service_tiers: Vec::new(),
     }
@@ -131,40 +134,77 @@ pub(super) fn common_reasoning_efforts(
         .collect()
 }
 
-/// Mirrors the Claude Code CLI model picker and its supported `--effort`
-/// values.
+/// Current public Claude catalog used only when live discovery is unavailable.
 pub(super) fn claude_code_models() -> Vec<ProviderModelOption> {
-    let haiku_efforts = reasoning_efforts("high", &["low", "medium", "high"]);
-    let sonnet_efforts = reasoning_efforts("high", &["low", "medium", "high", "max"]);
+    let standard_efforts = reasoning_efforts("high", &["low", "medium", "high"]);
+    let extended_efforts = reasoning_efforts("high", &["low", "medium", "high", "max"]);
     let deep_efforts = reasoning_efforts("high", &["low", "medium", "high", "xhigh", "max"]);
     vec![
         model_option(
+            "claude-opus-5",
+            "Claude Opus 5",
+            "Most capable Claude model for the hardest and longest-running work.",
+            deep_efforts.clone(),
+        ),
+        model_option(
+            "claude-sonnet-5",
+            "Claude Sonnet 5",
+            "Frontier Claude model for everyday complex work.",
+            deep_efforts.clone(),
+        ),
+        model_option(
             "claude-fable-5",
-            "Fable 5",
-            "Newest model for complex, long-running work.",
-            "high",
+            "Claude Fable 5",
+            "Claude model for complex, long-running work.",
             deep_efforts.clone(),
         ),
         model_option(
             "claude-opus-4-8",
             "Claude Opus 4.8",
-            "Most capable for the hardest and longest-running tasks.",
-            "high",
-            deep_efforts,
+            "Highly capable model for hard, long-running tasks.",
+            deep_efforts.clone(),
+        ),
+        model_option(
+            "claude-opus-4-7",
+            "Claude Opus 4.7",
+            "Highly capable model for hard, long-running tasks.",
+            deep_efforts.clone(),
         ),
         model_option(
             "claude-sonnet-4-6",
             "Claude Sonnet 4.6",
             "Best for everyday, complex tasks.",
-            "high",
-            sonnet_efforts,
+            extended_efforts.clone(),
+        ),
+        model_option(
+            "claude-opus-4-6",
+            "Claude Opus 4.6",
+            "Capable model for complex tasks.",
+            extended_efforts,
+        ),
+        model_option(
+            "claude-opus-4-5",
+            "Claude Opus 4.5",
+            "Claude model for complex tasks.",
+            standard_efforts,
         ),
         model_option(
             "claude-haiku-4-5",
             "Claude Haiku 4.5",
             "Fastest for quick answers.",
-            "high",
-            haiku_efforts,
+            Vec::new(),
+        ),
+        model_option(
+            "claude-sonnet-4-5",
+            "Claude Sonnet 4.5",
+            "Claude model for everyday tasks.",
+            Vec::new(),
+        ),
+        model_option(
+            "claude-opus-4-1",
+            "Claude Opus 4.1",
+            "Earlier Claude model for complex tasks.",
+            Vec::new(),
         ),
     ]
 }

@@ -4,15 +4,41 @@ pub(super) const CLAUDE_MODELS_BASE_URL: &str = "https://api.anthropic.com";
 
 pub(super) const CLAUDE_MODELS_TIMEOUT: Duration = Duration::from_secs(5);
 
-pub(super) async fn fetch_claude_code_models() -> Result<ProviderModelDiscovery, String> {
+pub(super) const CLAUDE_EFFORT_CAPABILITY_FLOOR_ERROR: &str =
+    "Claude model catalog response carried no effort capability metadata";
+
+pub(super) async fn fetch_claude_code_models(
+    scope: &ClaudeCatalogScope,
+) -> Result<ProviderModelDiscovery, String> {
     #[cfg(test)]
     if std::env::var_os("GARYX_ALLOW_REAL_CLAUDE_MODEL_FETCH").is_none() {
         return Err("Claude model catalog fetch disabled in tests".to_owned());
     }
 
-    let token = crate::claude_oauth::read_oauth_token().await?;
-    fetch_claude_code_models_from_endpoint(CLAUDE_MODELS_BASE_URL, &token, CLAUDE_MODELS_TIMEOUT)
-        .await
+    fetch_claude_code_models_for_scope_from_endpoint(
+        scope,
+        CLAUDE_MODELS_BASE_URL,
+        CLAUDE_MODELS_TIMEOUT,
+    )
+    .await
+}
+
+pub(super) async fn fetch_claude_code_models_for_scope_from_endpoint(
+    scope: &ClaudeCatalogScope,
+    base_url: &str,
+    request_timeout: Duration,
+) -> Result<ProviderModelDiscovery, String> {
+    let token = match scope.managed_config_dir()? {
+        Some(config_dir) => {
+            crate::claude_oauth::read_stored_oauth_token_and_subscription_for_config_dir(Some(
+                config_dir,
+            ))
+            .await?
+            .0
+        }
+        None => crate::claude_oauth::read_oauth_token().await?,
+    };
+    fetch_claude_code_models_from_endpoint(base_url, &token, request_timeout).await
 }
 
 pub(super) async fn fetch_claude_code_models_from_endpoint(
@@ -65,7 +91,11 @@ pub(super) async fn fetch_claude_code_models_from_endpoint(
         .json::<Value>()
         .await
         .map_err(|error| format!("Claude model catalog response was invalid: {error}"))?;
-    Ok(parse_claude_code_models_response(&value))
+    let parsed = parse_claude_code_models_response(&value);
+    if !parsed.discovery.models.is_empty() && !parsed.effort_aware {
+        return Err(CLAUDE_EFFORT_CAPABILITY_FLOOR_ERROR.to_owned());
+    }
+    Ok(parsed.discovery)
 }
 
 #[derive(Debug)]
@@ -75,12 +105,24 @@ pub(super) struct ClaudeApiModelOption {
     model: ProviderModelOption,
 }
 
-pub(super) fn parse_claude_code_models_response(value: &Value) -> ProviderModelDiscovery {
+#[derive(Debug)]
+pub(super) struct ParsedClaudeCodeModelsResponse {
+    pub(super) discovery: ProviderModelDiscovery,
+    pub(super) effort_aware: bool,
+}
+
+pub(super) fn parse_claude_code_models_response(value: &Value) -> ParsedClaudeCodeModelsResponse {
     let entries = value
         .get("data")
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
+    let effort_aware = entries.iter().any(|entry| {
+        entry
+            .get("capabilities")
+            .and_then(|capabilities| capabilities.get("effort"))
+            .is_some_and(Value::is_object)
+    });
     let mut seen = HashSet::new();
     let mut models = Vec::new();
     for (index, entry) in entries.into_iter().enumerate() {
@@ -136,13 +178,16 @@ pub(super) fn parse_claude_code_models_response(value: &Value) -> ProviderModelD
         .map(|entry| entry.model)
         .collect::<Vec<_>>();
     let reasoning_efforts = common_reasoning_efforts(&models);
-    ProviderModelDiscovery {
-        models,
-        default_model: None,
-        reasoning_efforts,
-        service_tiers: Vec::new(),
-        source: "claude_code_api",
-        error: None,
+    ParsedClaudeCodeModelsResponse {
+        discovery: ProviderModelDiscovery {
+            models,
+            default_model: None,
+            reasoning_efforts,
+            service_tiers: Vec::new(),
+            source: "claude_code_api",
+            error: None,
+        },
+        effort_aware,
     }
 }
 

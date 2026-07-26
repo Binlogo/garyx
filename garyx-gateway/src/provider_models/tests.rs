@@ -2,6 +2,34 @@ use super::*;
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+fn rerun_current_test_with_isolated_default_token(
+    child_marker: &'static str,
+) -> Option<std::process::Output> {
+    if std::env::var_os(child_marker).is_some() {
+        return None;
+    }
+
+    let isolated_home = tempfile::tempdir().expect("isolated home");
+    let test_name = std::thread::current()
+        .name()
+        .expect("test thread name")
+        .to_owned();
+    Some(
+        std::process::Command::new(std::env::current_exe().expect("current test executable"))
+            .arg("--exact")
+            .arg(test_name)
+            .arg("--nocapture")
+            .env(child_marker, "1")
+            .env("HOME", isolated_home.path())
+            .env_remove("USERPROFILE")
+            .env("CLAUDE_CODE_OAUTH_TOKEN", "synthetic-default-token")
+            .env_remove("ANTHROPIC_AUTH_TOKEN")
+            .env_remove("CLAUDE_OAUTH_TOKEN")
+            .output()
+            .expect("managed-scope child test"),
+    )
+}
+
 #[test]
 fn maps_codex_presets_with_model_specific_reasoning() {
     let discovery = codex_builtin_models(None);
@@ -46,7 +74,12 @@ async fn claude_code_catalog_ignores_empty_configured_provider_default_reasoning
         }),
     );
 
-    let response = list_provider_models(&config, ProviderType::ClaudeCode).await;
+    let response = list_provider_models(
+        &config,
+        ProviderType::ClaudeCode,
+        ClaudeCatalogScope::system(),
+    )
+    .await;
     let payload = serde_json::to_value(response).expect("provider models response");
 
     assert_eq!(payload["default_model"], "claude-opus-4-8");
@@ -55,8 +88,12 @@ async fn claude_code_catalog_ignores_empty_configured_provider_default_reasoning
 
 #[tokio::test]
 async fn antigravity_model_catalog_defaults_to_claude_opus() {
-    let response =
-        list_provider_models(&GaryxConfig::default(), ProviderType::AntigravityCli).await;
+    let response = list_provider_models(
+        &GaryxConfig::default(),
+        ProviderType::AntigravityCli,
+        ClaudeCatalogScope::system(),
+    )
+    .await;
 
     assert_eq!(response.provider_type, ProviderType::AntigravityCli);
     assert!(response.supports_model_selection);
@@ -93,7 +130,12 @@ async fn grok_catalog_uses_acp_source_and_configured_defaults() {
         }),
     );
 
-    let response = list_provider_models(&config, ProviderType::GrokBuild).await;
+    let response = list_provider_models(
+        &config,
+        ProviderType::GrokBuild,
+        ClaudeCatalogScope::system(),
+    )
+    .await;
 
     assert_eq!(response.provider_type, ProviderType::GrokBuild);
     assert_eq!(response.source, "grok_acp");
@@ -105,7 +147,12 @@ async fn grok_catalog_uses_acp_source_and_configured_defaults() {
 
 #[tokio::test]
 async fn claude_code_model_catalog_supports_selection_and_reasoning() {
-    let response = list_provider_models(&GaryxConfig::default(), ProviderType::ClaudeCode).await;
+    let response = list_provider_models(
+        &GaryxConfig::default(),
+        ProviderType::ClaudeCode,
+        ClaudeCatalogScope::system(),
+    )
+    .await;
 
     assert_eq!(response.provider_type, ProviderType::ClaudeCode);
     assert!(response.supports_model_selection);
@@ -114,53 +161,82 @@ async fn claude_code_model_catalog_supports_selection_and_reasoning() {
     // The CLI's account default is unknowable, so no default is claimed and
     // the model-less effort list is the intersection every model supports.
     assert_eq!(response.default_model, None);
+    let expected: &[(&str, &str, &[&str])] = &[
+        (
+            "claude-opus-5",
+            "Claude Opus 5",
+            &["low", "medium", "high", "xhigh", "max"],
+        ),
+        (
+            "claude-sonnet-5",
+            "Claude Sonnet 5",
+            &["low", "medium", "high", "xhigh", "max"],
+        ),
+        (
+            "claude-fable-5",
+            "Claude Fable 5",
+            &["low", "medium", "high", "xhigh", "max"],
+        ),
+        (
+            "claude-opus-4-8",
+            "Claude Opus 4.8",
+            &["low", "medium", "high", "xhigh", "max"],
+        ),
+        (
+            "claude-opus-4-7",
+            "Claude Opus 4.7",
+            &["low", "medium", "high", "xhigh", "max"],
+        ),
+        (
+            "claude-sonnet-4-6",
+            "Claude Sonnet 4.6",
+            &["low", "medium", "high", "max"],
+        ),
+        (
+            "claude-opus-4-6",
+            "Claude Opus 4.6",
+            &["low", "medium", "high", "max"],
+        ),
+        (
+            "claude-opus-4-5",
+            "Claude Opus 4.5",
+            &["low", "medium", "high"],
+        ),
+        ("claude-haiku-4-5", "Claude Haiku 4.5", &[]),
+        ("claude-sonnet-4-5", "Claude Sonnet 4.5", &[]),
+        ("claude-opus-4-1", "Claude Opus 4.1", &[]),
+    ];
+    assert_eq!(response.models.len(), expected.len());
+    for (model, (expected_id, expected_label, expected_efforts)) in
+        response.models.iter().zip(expected)
+    {
+        assert_eq!(&model.id, expected_id);
+        assert_eq!(&model.label, expected_label);
+        assert_eq!(
+            model
+                .supported_reasoning_efforts
+                .iter()
+                .map(|effort| effort.id.as_str())
+                .collect::<Vec<_>>(),
+            *expected_efforts
+        );
+        assert_eq!(
+            model.default_reasoning_effort.as_deref(),
+            (!expected_efforts.is_empty()).then_some("high")
+        );
+    }
     assert_eq!(
         response
             .reasoning_efforts
             .iter()
             .map(|effort| effort.id.as_str())
             .collect::<Vec<_>>(),
-        vec!["low", "medium", "high"]
-    );
-    assert_eq!(
-        response
-            .models
-            .iter()
-            .map(|m| m.id.as_str())
-            .collect::<Vec<_>>(),
-        vec![
-            "claude-fable-5",
-            "claude-opus-4-8",
-            "claude-sonnet-4-6",
-            "claude-haiku-4-5",
-        ]
-    );
-    for deep_model in ["claude-fable-5", "claude-opus-4-8"] {
-        assert_eq!(
-            response
-                .models
-                .iter()
-                .find(|model| model.id == deep_model)
-                .expect("deep model")
-                .supported_reasoning_efforts
-                .iter()
-                .map(|effort| effort.id.as_str())
-                .collect::<Vec<_>>(),
-            vec!["low", "medium", "high", "xhigh", "max"]
-        );
-    }
-    assert_eq!(
-        response
-            .models
-            .iter()
-            .find(|model| model.id == "claude-haiku-4-5")
-            .expect("haiku model")
-            .supported_reasoning_efforts
+        common_reasoning_efforts(&response.models)
             .iter()
             .map(|effort| effort.id.as_str())
-            .collect::<Vec<_>>(),
-        vec!["low", "medium", "high"]
+            .collect::<Vec<_>>()
     );
+    assert!(response.reasoning_efforts.is_empty());
     assert!(!response.supports_service_tier_selection);
 }
 
@@ -349,6 +425,382 @@ async fn claude_code_dynamic_catalog_maps_models_and_efforts() {
 }
 
 #[tokio::test]
+async fn claude_code_effort_blind_catalog_degrades_without_replacing_last_good_cache() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [
+                {
+                    "id": "claude-effort-blind",
+                    "display_name": "Claude Effort Blind",
+                    "created_at": "2026-07-01T00:00:00Z",
+                    "capabilities": {
+                        "batch": { "supported": true }
+                    }
+                }
+            ]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let effort_blind_result = fetch_claude_code_models_from_endpoint(
+        &server.uri(),
+        "synthetic-managed-token",
+        Duration::from_secs(5),
+    )
+    .await;
+
+    clear_provider_model_discovery_cache_for_tests();
+    let cache_key = "test_claude_effort_floor";
+    let last_good = ProviderModelDiscovery {
+        models: vec![ProviderModelOption {
+            id: "claude-last-good".to_owned(),
+            label: "Claude Last Good".to_owned(),
+            description: None,
+            recommended: false,
+            default_reasoning_effort: Some("high".to_owned()),
+            supported_reasoning_efforts: reasoning_efforts("high", &["low", "medium", "high"]),
+            service_tiers: Vec::new(),
+        }],
+        default_model: None,
+        reasoning_efforts: reasoning_efforts("high", &["low", "medium", "high"]),
+        service_tiers: Vec::new(),
+        source: "claude_code_api",
+        error: None,
+    };
+    let stored = discover_or_fallback(cache_key, Ok(last_good), |error| {
+        claude_code_builtin_models(Some(error))
+    });
+    assert_eq!(stored.models[0].id, "claude-last-good");
+    let degraded = discover_or_fallback(cache_key, effort_blind_result, |error| {
+        claude_code_builtin_models(Some(error))
+    });
+    let cached_after_degradation = cached_discovery(cache_key).expect("last-good cache");
+    let blocked_retry = discover_or_fallback(
+        cache_key,
+        Err("healthy payload blocked".to_owned()),
+        |error| claude_code_builtin_models(Some(error)),
+    );
+
+    assert_eq!(degraded.models[0].id, "claude-last-good");
+    assert_eq!(degraded.source, "claude_code_api");
+    assert_eq!(
+        degraded.error.as_deref(),
+        Some("Claude model catalog response carried no effort capability metadata")
+    );
+    assert_eq!(cached_after_degradation.models[0].id, "claude-last-good");
+    assert_eq!(blocked_retry.models[0].id, "claude-last-good");
+}
+
+#[test]
+fn claude_code_effort_floor_without_stale_uses_capable_builtin_catalog() {
+    clear_provider_model_discovery_cache_for_tests();
+
+    let discovery = discover_or_fallback(
+        "test_claude_effort_floor_without_stale",
+        Err(CLAUDE_EFFORT_CAPABILITY_FLOOR_ERROR.to_owned()),
+        |error| claude_code_builtin_models(Some(error)),
+    );
+
+    assert_eq!(discovery.source, "claude_code_builtin");
+    assert_eq!(
+        discovery.error.as_deref(),
+        Some(CLAUDE_EFFORT_CAPABILITY_FLOOR_ERROR)
+    );
+    assert!(provider_supports_reasoning_effort_selection(
+        &discovery.models
+    ));
+}
+
+#[tokio::test]
+async fn claude_code_explicitly_unsupported_effort_remains_authoritative() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [{
+                "id": "claude-explicit-no-effort",
+                "display_name": "Claude Explicit No Effort",
+                "capabilities": {
+                    "effort": { "supported": false }
+                }
+            }]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let discovery = fetch_claude_code_models_from_endpoint(
+        &server.uri(),
+        "synthetic-managed-token",
+        Duration::from_secs(5),
+    )
+    .await
+    .expect("explicit effort withdrawal is still an effort-aware catalog");
+
+    assert_eq!(discovery.source, "claude_code_api");
+    assert_eq!(discovery.models[0].id, "claude-explicit-no-effort");
+    assert!(discovery.models[0].supported_reasoning_efforts.is_empty());
+}
+
+#[test]
+fn claude_code_catalog_cache_does_not_bleed_across_active_accounts() {
+    clear_provider_model_discovery_cache_for_tests();
+    let account_a_scope = ClaudeCatalogScope::managed(
+        "account-a".to_owned(),
+        Some(std::path::PathBuf::from(
+            "/Users/test/.garyx/provider-accounts/claude-code/account-a",
+        )),
+    );
+    assert_eq!(account_a_scope.cache_key(), "claude_code:account-a");
+    assert_eq!(
+        ClaudeCatalogScope::system().cache_key(),
+        "claude_code:system"
+    );
+    let account_a_discovery = ProviderModelDiscovery {
+        models: vec![ProviderModelOption {
+            id: "claude-account-a-only".to_owned(),
+            label: "Claude Account A Only".to_owned(),
+            description: None,
+            recommended: false,
+            default_reasoning_effort: Some("high".to_owned()),
+            supported_reasoning_efforts: reasoning_efforts("high", &["high"]),
+            service_tiers: Vec::new(),
+        }],
+        default_model: None,
+        reasoning_efforts: reasoning_efforts("high", &["high"]),
+        service_tiers: Vec::new(),
+        source: "claude_code_api",
+        error: None,
+    };
+    discover_or_fallback(
+        &account_a_scope.cache_key(),
+        Ok(account_a_discovery),
+        |error| claude_code_builtin_models(Some(error)),
+    );
+
+    let account_b_scope = ClaudeCatalogScope::managed(
+        "account-b".to_owned(),
+        Some(std::path::PathBuf::from(
+            "/Users/test/.garyx/provider-accounts/claude-code/account-b",
+        )),
+    );
+    let account_b_discovery = discover_or_fallback(
+        &account_b_scope.cache_key(),
+        Err("account B catalog unavailable".to_owned()),
+        |error| claude_code_builtin_models(Some(error)),
+    );
+
+    assert!(
+        account_b_discovery
+            .models
+            .iter()
+            .all(|model| model.id != "claude-account-a-only"),
+        "account B must not reuse account A's cached catalog"
+    );
+    assert_eq!(account_b_discovery.source, "claude_code_builtin");
+    assert_eq!(
+        account_b_discovery.error.as_deref(),
+        Some("account B catalog unavailable")
+    );
+    assert_eq!(
+        cached_discovery(&account_a_scope.cache_key())
+            .expect("account A cache")
+            .models[0]
+            .id,
+        "claude-account-a-only"
+    );
+}
+
+#[tokio::test]
+async fn claude_code_system_scope_keeps_the_default_credential_chain() {
+    const CHILD_MARKER: &str = "GARYX_TEST_SYSTEM_CATALOG_DEFAULT_CHAIN_CHILD";
+    if let Some(output) = rerun_current_test_with_isolated_default_token(CHILD_MARKER) {
+        assert!(
+            output.status.success(),
+            "system credential child failed:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [{
+                "id": "claude-system-model",
+                "display_name": "Claude System Model",
+                "capabilities": {
+                    "effort": {
+                        "supported": true,
+                        "high": { "supported": true }
+                    }
+                }
+            }]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let discovery = fetch_claude_code_models_for_scope_from_endpoint(
+        &ClaudeCatalogScope::system(),
+        &server.uri(),
+        Duration::from_secs(5),
+    )
+    .await
+    .expect("system catalog credentials");
+    let requests = server
+        .received_requests()
+        .await
+        .expect("received request log");
+
+    assert_eq!(discovery.source, "claude_code_api");
+    assert_eq!(discovery.models[0].id, "claude-system-model");
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].headers.contains_key("authorization"));
+}
+
+#[tokio::test]
+async fn claude_code_managed_scope_uses_its_credential_file_for_catalog_fetch() {
+    const CHILD_MARKER: &str = "GARYX_TEST_MANAGED_CATALOG_FILE_CHILD";
+    if let Some(output) = rerun_current_test_with_isolated_default_token(CHILD_MARKER) {
+        assert!(
+            output.status.success(),
+            "managed credential child failed:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+
+    let managed_dir = tempfile::tempdir().expect("managed config dir");
+    std::fs::write(
+        managed_dir.path().join(".credentials.json"),
+        json!({
+            "claudeAiOauth": {
+                "accessToken": "synthetic-managed-token",
+                "subscriptionType": "max"
+            }
+        })
+        .to_string(),
+    )
+    .expect("managed credentials");
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .and(header("authorization", "Bearer synthetic-managed-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [{
+                "id": "claude-managed-model",
+                "capabilities": {
+                    "effort": {
+                        "supported": true,
+                        "high": { "supported": true }
+                    }
+                }
+            }]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let scope = ClaudeCatalogScope::managed(
+        "managed-file-account".to_owned(),
+        Some(managed_dir.path().to_path_buf()),
+    );
+
+    let discovery = fetch_claude_code_models_for_scope_from_endpoint(
+        &scope,
+        &server.uri(),
+        Duration::from_secs(5),
+    )
+    .await
+    .expect("managed catalog credentials must be used");
+
+    assert_eq!(discovery.models[0].id, "claude-managed-model");
+}
+
+#[tokio::test]
+async fn claude_code_managed_scope_never_falls_back_to_default_credentials() {
+    const CHILD_MARKER: &str = "GARYX_TEST_MANAGED_CATALOG_NO_FALLBACK_CHILD";
+    if let Some(output) = rerun_current_test_with_isolated_default_token(CHILD_MARKER) {
+        assert!(
+            output.status.success(),
+            "managed no-fallback child failed:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+
+    let managed_root = tempfile::tempdir().expect("managed root");
+    let missing_config_dir = managed_root.path().join("missing-managed-account");
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [{
+                "id": "claude-default-chain-model",
+                "capabilities": {
+                    "effort": {
+                        "supported": true,
+                        "high": { "supported": true }
+                    }
+                }
+            }]
+        })))
+        .expect(0)
+        .mount(&server)
+        .await;
+    let scope = ClaudeCatalogScope::managed(
+        "missing-managed-account".to_owned(),
+        Some(missing_config_dir),
+    );
+
+    let result = fetch_claude_code_models_for_scope_from_endpoint(
+        &scope,
+        &server.uri(),
+        Duration::from_secs(5),
+    )
+    .await;
+
+    assert!(
+        result.is_err(),
+        "managed scope must fail instead of borrowing default credentials"
+    );
+}
+
+#[tokio::test]
+async fn claude_code_empty_catalog_keeps_the_existing_no_models_fallback() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "data": [] })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let result = fetch_claude_code_models_from_endpoint(
+        &server.uri(),
+        "synthetic-managed-token",
+        Duration::from_secs(5),
+    )
+    .await;
+
+    clear_provider_model_discovery_cache_for_tests();
+    let discovery = discover_or_fallback("test_claude_empty_models", result, |error| {
+        claude_code_builtin_models(Some(error))
+    });
+
+    assert_eq!(discovery.source, "claude_code_builtin");
+    assert_eq!(
+        discovery.error.as_deref(),
+        Some("claude_code_api returned no models")
+    );
+}
+
+#[tokio::test]
 async fn claude_code_dynamic_catalog_non_200_and_timeout_are_errors() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -440,6 +892,50 @@ fn discover_or_fallback_prefers_stale_success_before_builtin_preset() {
     assert_eq!(stale.error.as_deref(), Some("network down"));
 }
 
+#[test]
+fn discovery_cache_owns_unchanged_non_claude_provider_keys() {
+    clear_provider_model_discovery_cache_for_tests();
+    let cases = [
+        ("codex_app_server".to_owned(), "codex-cache-model"),
+        ("traex".to_owned(), "traex-cache-model"),
+        ("grok_acp".to_owned(), "grok-cache-model"),
+    ];
+
+    for (cache_key, model_id) in &cases {
+        let discovery = ProviderModelDiscovery {
+            models: vec![ProviderModelOption {
+                id: (*model_id).to_owned(),
+                label: (*model_id).to_owned(),
+                description: None,
+                recommended: false,
+                default_reasoning_effort: None,
+                supported_reasoning_efforts: Vec::new(),
+                service_tiers: Vec::new(),
+            }],
+            default_model: None,
+            reasoning_efforts: Vec::new(),
+            service_tiers: Vec::new(),
+            source: "test_dynamic",
+            error: None,
+        };
+        store_discovery(cache_key, discovery);
+    }
+    drop(cases);
+
+    assert_eq!(
+        cached_discovery("codex_app_server").unwrap().models[0].id,
+        "codex-cache-model"
+    );
+    assert_eq!(
+        cached_discovery("traex").unwrap().models[0].id,
+        "traex-cache-model"
+    );
+    assert_eq!(
+        cached_discovery("grok_acp").unwrap().models[0].id,
+        "grok-cache-model"
+    );
+}
+
 #[tokio::test]
 async fn claude_code_catalog_uses_configured_provider_default_model() {
     let mut config = GaryxConfig::default();
@@ -452,7 +948,12 @@ async fn claude_code_catalog_uses_configured_provider_default_model() {
         }),
     );
 
-    let response = list_provider_models(&config, ProviderType::ClaudeCode).await;
+    let response = list_provider_models(
+        &config,
+        ProviderType::ClaudeCode,
+        ClaudeCatalogScope::system(),
+    )
+    .await;
 
     assert_eq!(response.default_model.as_deref(), Some("claude-opus-4-8"));
 }
@@ -469,7 +970,12 @@ async fn claude_code_catalog_exposes_configured_provider_default_reasoning_effor
         }),
     );
 
-    let response = list_provider_models(&config, ProviderType::ClaudeCode).await;
+    let response = list_provider_models(
+        &config,
+        ProviderType::ClaudeCode,
+        ClaudeCatalogScope::system(),
+    )
+    .await;
     let payload = serde_json::to_value(response).expect("provider models response");
 
     assert_eq!(payload["default_reasoning_effort"], "max");
@@ -477,8 +983,12 @@ async fn claude_code_catalog_exposes_configured_provider_default_reasoning_effor
 
 #[tokio::test]
 async fn codex_app_server_model_catalog_supports_selection_and_reasoning() {
-    let response =
-        list_provider_models(&GaryxConfig::default(), ProviderType::CodexAppServer).await;
+    let response = list_provider_models(
+        &GaryxConfig::default(),
+        ProviderType::CodexAppServer,
+        ClaudeCatalogScope::system(),
+    )
+    .await;
 
     assert_eq!(response.provider_type, ProviderType::CodexAppServer);
     assert!(response.supports_model_selection);
@@ -500,7 +1010,12 @@ async fn codex_app_server_catalog_uses_configured_provider_default_model() {
         }),
     );
 
-    let response = list_provider_models(&config, ProviderType::CodexAppServer).await;
+    let response = list_provider_models(
+        &config,
+        ProviderType::CodexAppServer,
+        ClaudeCatalogScope::system(),
+    )
+    .await;
 
     assert_eq!(response.default_model.as_deref(), Some("gpt-5.4"));
 }
@@ -653,7 +1168,12 @@ async fn traex_app_server_real_discovery_lists_models() {
     if std::env::var_os("GARYX_ALLOW_REAL_APP_SERVER_MODEL_FETCH").is_none() {
         return;
     }
-    let response = list_provider_models(&GaryxConfig::default(), ProviderType::Traex).await;
+    let response = list_provider_models(
+        &GaryxConfig::default(),
+        ProviderType::Traex,
+        ClaudeCatalogScope::system(),
+    )
+    .await;
     assert_eq!(response.provider_type, ProviderType::Traex);
     assert_eq!(response.source, "traex_app_server");
     assert!(
@@ -672,8 +1192,12 @@ async fn codex_app_server_real_discovery_lists_models_with_reasoning() {
     if std::env::var_os("GARYX_ALLOW_REAL_APP_SERVER_MODEL_FETCH").is_none() {
         return;
     }
-    let response =
-        list_provider_models(&GaryxConfig::default(), ProviderType::CodexAppServer).await;
+    let response = list_provider_models(
+        &GaryxConfig::default(),
+        ProviderType::CodexAppServer,
+        ClaudeCatalogScope::system(),
+    )
+    .await;
     assert_eq!(response.provider_type, ProviderType::CodexAppServer);
     assert_eq!(response.source, "codex_app_server");
     assert!(!response.models.is_empty());

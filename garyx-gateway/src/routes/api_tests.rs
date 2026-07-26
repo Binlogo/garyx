@@ -1240,6 +1240,29 @@ async fn test_provider_models_reports_claude_code_catalog() {
 }
 
 #[tokio::test]
+async fn test_provider_models_resolves_invalid_managed_account_to_quarantine_scope() {
+    let temp = tempdir().expect("temp dir");
+    let mut config = GaryxConfig::default();
+    config.provider_accounts.claude_code.active_account_id =
+        Some("missing-managed-account".to_owned());
+    let state = crate::server::AppStateBuilder::new(config.clone())
+        .with_config_path(temp.path().join("garyx.json"))
+        .build();
+
+    let scope = super::custom_agents::resolve_claude_catalog_scope(state.as_ref(), &config).await;
+
+    assert_eq!(scope.cache_key(), "claude_code:missing-managed-account");
+    assert_eq!(
+        scope.config_dir(),
+        Some(
+            temp.path()
+                .join(".invalid-claude-account-selection")
+                .as_path()
+        )
+    );
+}
+
+#[tokio::test]
 async fn test_provider_models_rejects_unknown_provider() {
     let state = test_state();
     let router = api_router(state);
