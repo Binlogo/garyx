@@ -240,9 +240,9 @@ public enum GaryxThreadModelOverridePresentation {
     ///
     /// Advertised ids are normalized before use: a blank id would otherwise
     /// produce a second row that the server trims back to the empty string, so
-    /// a concrete-looking row would silently clear the cell. Rows exist only
-    /// when at least one advertised option survives normalization — a picker
-    /// offering only "follow default" has nothing to choose.
+    /// a concrete-looking row would silently clear the cell. A current value is
+    /// a row in its own right even when the catalog advertises nothing; only a
+    /// picker with neither advertised choices nor a current value stays hidden.
     private static func pickerOptions(
         advertised: [GaryxProviderModelOption],
         current: String?,
@@ -257,12 +257,13 @@ public enum GaryxThreadModelOverridePresentation {
             }
             advertisedOptions.append(GaryxRuntimePickerOption(id: id, label: option.label))
         }
-        guard !advertisedOptions.isEmpty else {
+        let current = normalized(current)
+        guard !advertisedOptions.isEmpty || current != nil else {
             return []
         }
         var options = [GaryxRuntimePickerOption(id: "", label: defaultRowLabel)]
         options.append(contentsOf: advertisedOptions)
-        if let current = normalized(current), seen.insert(current).inserted {
+        if let current, seen.insert(current).inserted {
             options.append(
                 GaryxRuntimePickerOption(id: current, label: label(current) ?? current)
             )
@@ -270,7 +271,8 @@ public enum GaryxThreadModelOverridePresentation {
         return options
     }
 
-    /// Drops a thinking level the current model selection does not support.
+    /// Drops a thinking level only when a non-empty advertised list proves the
+    /// current model does not support it. An empty list is non-authoritative.
     public static func sanitizedReasoningEffort(
         providerModels: GaryxProviderModels?,
         model: String?,
@@ -280,6 +282,9 @@ public enum GaryxThreadModelOverridePresentation {
             return nil
         }
         let options = reasoningEffortOptions(providerModels: providerModels, model: model)
+        guard !options.isEmpty else {
+            return effort
+        }
         return options.contains(where: { $0.id == effort }) ? effort : nil
     }
 
@@ -300,7 +305,8 @@ public enum GaryxThreadModelOverridePresentation {
         return providerModels.serviceTiers
     }
 
-    /// Drops a service tier the current model selection does not support.
+    /// Drops a service tier only when a non-empty advertised list proves the
+    /// current model does not support it. An empty list is non-authoritative.
     public static func sanitizedServiceTier(
         providerModels: GaryxProviderModels?,
         model: String?,
@@ -310,6 +316,9 @@ public enum GaryxThreadModelOverridePresentation {
             return nil
         }
         let options = serviceTierOptions(providerModels: providerModels, model: model)
+        guard !options.isEmpty else {
+            return tier
+        }
         return options.contains(where: { $0.id == tier }) ? tier : nil
     }
 

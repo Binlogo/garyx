@@ -1,0 +1,30 @@
+{
+  "provider_type": "claude_code",
+  "supports_model_selection": true,
+  "models": [
+    {
+      "id": "claude-opus-4-1",
+      "label": "Claude Opus 4.1",
+      "recommended": false,
+      "supported_reasoning_efforts": []
+    },
+    {
+      "id": "claude-sonnet-4-6",
+      "label": "Claude Sonnet 4.6",
+      "recommended": true,
+      "supported_reasoning_efforts": []
+    },
+    {
+      "id": "claude-haiku-4-5",
+      "label": "Claude Haiku 4.5",
+      "recommended": false,
+      "supported_reasoning_efforts": []
+    }
+  ],
+  "supports_reasoning_effort_selection": false,
+  "reasoning_efforts": [],
+  "supports_service_tier_selection": false,
+  "service_tiers": [],
+  "default_model": null,
+  "source": "claude_code_discovery"
+}

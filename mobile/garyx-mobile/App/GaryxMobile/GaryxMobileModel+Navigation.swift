@@ -1063,7 +1063,7 @@ extension GaryxMobileModel {
         """)?.bots ?? []
         channelPlugins = []
         botStatusesById = [:]
-        providerModelsByType = [:]
+        providerModelCatalog.reset()
         skillEditorLoadRequestId = nil
         skillFileLoadRequestId = nil
         selectedSkillEditor = nil

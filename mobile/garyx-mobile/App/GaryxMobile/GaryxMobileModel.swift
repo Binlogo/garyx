@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 import os
 import SwiftUI
@@ -395,7 +396,14 @@ final class GaryxMobileModel: ObservableObject {
     }
     @Published var gatewaySettingsDocument: [String: GaryxJSONValue] = [:]
     @Published var isSavingBotSettings = false
-    @Published var providerModelsByType: [String: GaryxProviderModels] = [:]
+    /// Provider catalogs have one stale-while-refresh owner. This computed
+    /// projection keeps existing call sites synchronous while the nested store
+    /// owns snapshots, single-flight requests, and gateway reset fencing.
+    let providerModelCatalog = GaryxProviderModelCatalogStore()
+    var providerModelsByType: [String: GaryxProviderModels] {
+        providerModelCatalog.modelsByProvider
+    }
+    var providerModelCatalogObservation: AnyCancellable?
     @Published var codingUsage: GaryxCodingUsage?
     @Published var claudeCodeAccounts: GaryxClaudeCodeAccounts?
     @Published var isLoadingClaudeCodeAccounts = false
@@ -708,6 +716,10 @@ final class GaryxMobileModel: ObservableObject {
         }
         productionRouteStore.routeAdmissionAccepted = { [weak self] _ in
             self?.collapseNavigationDrawerForAdmittedRoute()
+        }
+        providerModelCatalogObservation = providerModelCatalog.objectWillChange.sink {
+            [weak self] _ in
+            self?.objectWillChange.send()
         }
         refreshHomeObservationSnapshot()
         refreshShellChromeSnapshot()

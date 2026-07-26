@@ -36,7 +36,6 @@ import {
 import { ProviderAgentIcon } from '../app-shell/components/ProviderAgentIcon';
 import { ClaudeAccountSwitcherDialog } from '../app-shell/components/ClaudeAccountSwitcherDialog';
 import { useI18n, type Translate } from '../i18n';
-import { shouldRequestProviderModelCatalog } from '../provider-model-catalog';
 import {
   clampUsagePercent,
   formatUsageDuration,
@@ -118,12 +117,20 @@ type ProviderSettingsPanelProps = {
   gatewayDraft?: any;
   onMutateGatewayDraft?: DraftMutator;
   onSaveGatewaySettings?: (options?: GatewaySettingsSaveOptions) => Promise<boolean>;
+  providerCatalogScope?: string;
+  providerModelsByType?: Partial<Record<DesktopApiProviderType, DesktopProviderModels>>;
+  providerModelsRefreshing?: Partial<Record<DesktopApiProviderType, boolean>>;
+  refreshProviderModels?: (providerType: DesktopApiProviderType) => Promise<boolean>;
 };
 
 export function ProviderSettingsPanel({
   gatewayDraft,
   onMutateGatewayDraft = () => {},
   onSaveGatewaySettings = async () => true,
+  providerCatalogScope = '',
+  providerModelsByType = {},
+  providerModelsRefreshing = {},
+  refreshProviderModels = async () => false,
 }: ProviderSettingsPanelProps) {
   const { t } = useI18n();
   const [providerConfigKey, setProviderConfigKey] = useState<FixedModelProviderKey | null>(null);
@@ -131,18 +138,6 @@ export function ProviderSettingsPanel({
     emptyModelProviderConfigDraft(),
   );
   const [providerConfigSaving, setProviderConfigSaving] = useState(false);
-  const [providerModelsByType, setProviderModelsByType] = useState<
-    Partial<Record<DesktopApiProviderType, DesktopProviderModels>>
-  >({});
-  const [providerModelsLoading, setProviderModelsLoading] = useState<
-    Partial<Record<DesktopApiProviderType, boolean>>
-  >({});
-  const providerModelRequestsRef = useRef<
-    Partial<Record<DesktopApiProviderType, Promise<void>>>
-  >({});
-  const providerModelAttemptedRef = useRef<
-    Partial<Record<DesktopApiProviderType, boolean>>
-  >({});
   const [codingUsage, setCodingUsage] = useState<DesktopCodingUsage | null>(null);
   const [codingUsageLoading, setCodingUsageLoading] = useState(false);
   const [codingUsageError, setCodingUsageError] = useState<string | null>(null);
@@ -172,7 +167,7 @@ export function ProviderSettingsPanel({
     ? providerModelsByType[providerConfigRow.providerType] || null
     : null;
   const activeProviderModelsLoading = providerConfigRow
-    ? providerModelsLoading[providerConfigRow.providerType] === true
+    ? providerModelsRefreshing[providerConfigRow.providerType] === true
     : false;
   const activeProviderModelOptions = providerModelOptionsWithCurrent(
     activeProviderModels,
@@ -199,39 +194,6 @@ export function ProviderSettingsPanel({
     }
     return map;
   }, [codingUsage]);
-
-  function ensureProviderModels(
-    providerType: DesktopApiProviderType,
-    options: { retry?: boolean } = {},
-  ) {
-    if (!shouldRequestProviderModelCatalog({
-      catalogs: providerModelsByType,
-      requests: providerModelRequestsRef.current,
-      attempted: providerModelAttemptedRef.current,
-    }, providerType, options)) {
-      return;
-    }
-    providerModelAttemptedRef.current[providerType] = true;
-    setProviderModelsLoading((current) => ({
-      ...current,
-      [providerType]: true,
-    }));
-    const request = window.garyxDesktop.listProviderModels(providerType).then((models) => {
-      setProviderModelsByType((current) => ({
-        ...current,
-        [providerType]: models,
-      }));
-    }).catch(() => {
-      // The dialog keeps the raw model input fallback if catalog loading fails.
-    }).finally(() => {
-      delete providerModelRequestsRef.current[providerType];
-      setProviderModelsLoading((current) => ({
-        ...current,
-        [providerType]: false,
-      }));
-    });
-    providerModelRequestsRef.current[providerType] = request;
-  }
 
   async function refreshCodingUsage() {
     setCodingUsageLoading(true);
@@ -260,20 +222,16 @@ export function ProviderSettingsPanel({
 
   useEffect(() => {
     for (const providerType of PROVIDER_MODEL_TYPES) {
-      ensureProviderModels(providerType);
+      void refreshProviderModels(providerType);
     }
-    // Prefetch once when the provider panel mounts so Configure dropdowns are
-    // backed by the gateway catalog instead of the current-value fallback.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [providerCatalogScope, refreshProviderModels]);
 
   useEffect(() => {
     if (!providerConfigRow) {
       return;
     }
-    ensureProviderModels(providerConfigRow.providerType, { retry: true });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [providerConfigRow?.providerType]);
+    void refreshProviderModels(providerConfigRow.providerType);
+  }, [providerConfigRow?.providerType, refreshProviderModels]);
 
   useEffect(() => {
     void refreshCodingUsage();
@@ -957,7 +915,7 @@ export function ProviderSettingsPanel({
   function openProviderConfigDialog(key: FixedModelProviderKey) {
     const row = fixedModelProviderRow(key);
     const draft = modelProviderDraftFromState(key, gatewayDraft);
-    ensureProviderModels(row.providerType, { retry: true });
+    void refreshProviderModels(row.providerType);
     setProviderConfigDraft(applyProviderCatalogDefaults(draft, providerModelsByType[row.providerType]));
     setProviderConfigKey(key);
   }

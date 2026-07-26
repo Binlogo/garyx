@@ -295,10 +295,7 @@ struct GaryxThreadRuntimeSettingsPanel: View {
             }
         }
         .task(id: providerType) {
-            guard !providerType.isEmpty,
-                  model.providerModelsByType[providerType] == nil else {
-                return
-            }
+            guard !providerType.isEmpty else { return }
             await model.loadProviderModels(providerType: providerType)
         }
     }

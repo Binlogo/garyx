@@ -423,7 +423,7 @@ extension GaryxMobileModel {
     func ensureNewThreadProviderModelsLoaded() async {
         guard let target = newThreadAgentTarget else { return }
         let providerType = target.providerType.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !providerType.isEmpty, providerModelsByType[providerType] == nil else { return }
+        guard !providerType.isEmpty else { return }
         await loadProviderModels(providerType: providerType)
     }
 
@@ -857,20 +857,18 @@ extension GaryxMobileModel {
         let provider = providerType.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !provider.isEmpty else { return }
         let observedGeneration = runtimeGeneration ?? gatewayRequestToken
-        do {
-            let models = try await client().providerModels(providerType: provider)
-            guard observedGeneration == gatewayRequestToken,
-                  isCurrentRemoteStateScopedRequest(remoteStateRefreshRequestId) else {
-                return
+        guard let gatewayClient = try? client() else { return }
+        await providerModelCatalog.refresh(
+            providerType: provider,
+            canCommit: { [weak self] in
+                guard let self else { return false }
+                return observedGeneration == self.gatewayRequestToken
+                    && self.isCurrentRemoteStateScopedRequest(remoteStateRefreshRequestId)
+            },
+            load: {
+                try await gatewayClient.providerModels(providerType: provider)
             }
-            providerModelsByType[provider] = models
-        } catch {
-            guard observedGeneration == gatewayRequestToken,
-                  isCurrentRemoteStateScopedRequest(remoteStateRefreshRequestId) else {
-                return
-            }
-            lastError = displayMessage(for: error)
-        }
+        )
     }
 
     /// Fetches the authoritative gateway settings document before opening a
@@ -916,7 +914,6 @@ extension GaryxMobileModel {
                 reasoningEffort: nextReasoningEffort,
                 serviceTier: request.serviceTier
             )
-            providerModelsByType.removeValue(forKey: provider.providerType)
             await loadProviderModels(providerType: provider.providerType, runtimeGeneration: runtimeGeneration)
             await refreshRemoteState()
             return true
@@ -1281,7 +1278,7 @@ extension GaryxMobileModel {
         remoteStateRefreshRequestId: UUID? = nil
     ) async {
         let providerTypes = Set(agents.map(\.providerType).filter { !$0.isEmpty })
-        for providerType in providerTypes where providerModelsByType[providerType] == nil {
+        for providerType in providerTypes {
             guard isCurrentRemoteStateScopedRequest(remoteStateRefreshRequestId) else { return }
             await loadProviderModels(
                 providerType: providerType,

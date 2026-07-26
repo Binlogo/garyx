@@ -4,6 +4,7 @@ import { Pencil, Plus, RefreshCw, Server, Trash } from 'lucide-react';
 
 import {
   DEFAULT_DESKTOP_SETTINGS,
+  type DesktopApiProviderType,
   type ConnectionStatus,
   type DesktopCustomAgent,
   type DesktopFollowUpBehavior,
@@ -11,6 +12,7 @@ import {
   type DesktopGatewayProfile,
   type DesktopSettings,
   type DesktopMcpServer,
+  type DesktopProviderModels,
   type DesktopSkillInfo,
   type DesktopUpdateStatus,
   type GatewayConfigDocument,
@@ -104,6 +106,10 @@ type GatewaySettingsPanelProps = {
     patch: GatewayConfigDocument,
     options?: GatewaySettingsSaveOptions,
   ) => Promise<boolean>;
+  providerCatalogScope?: string;
+  providerModelsByType?: Partial<Record<DesktopApiProviderType, DesktopProviderModels>>;
+  providerModelsRefreshing?: Partial<Record<DesktopApiProviderType, boolean>>;
+  refreshProviderModels?: (providerType: DesktopApiProviderType) => Promise<boolean>;
   onAddGatewayProfile?: (input: {
     label?: string;
     gatewayUrl: string;
@@ -438,6 +444,10 @@ export function GatewaySettingsPanel({
   onLocalSettingsChange = noop,
   onSaveLocalSettingsNow = noopAsyncBoolean,
   onSaveGatewaySettings = noopAsyncBoolean,
+  providerCatalogScope = '',
+  providerModelsByType = {},
+  providerModelsRefreshing = {},
+  refreshProviderModels = async () => false,
   gatewayProfiles = [],
   onAddGatewayProfile = noopAsync,
   onUpdateGatewayProfile = noopAsync,
@@ -912,6 +922,10 @@ export function GatewaySettingsPanel({
           gatewayDraft={gatewayDraft}
           onMutateGatewayDraft={onMutateGatewayDraft}
           onSaveGatewaySettings={onSaveGatewaySettings}
+          providerCatalogScope={providerCatalogScope}
+          providerModelsByType={providerModelsByType}
+          providerModelsRefreshing={providerModelsRefreshing}
+          refreshProviderModels={refreshProviderModels}
         />
       );
       break;

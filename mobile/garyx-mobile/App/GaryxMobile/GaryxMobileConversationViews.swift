@@ -1592,11 +1592,7 @@ private struct GaryxThreadRuntimeHeaderControl: View {
         .anchorPreference(key: GaryxThreadRuntimeChromeAnchorKey.self, value: .bounds) { $0 }
         .layoutPriority(1)
         .task(id: providerType) {
-            guard preparesRuntimeModels,
-                  !providerType.isEmpty,
-                  model.providerModelsByType[providerType] == nil else {
-                return
-            }
+            guard preparesRuntimeModels, !providerType.isEmpty else { return }
             await model.loadProviderModels(providerType: providerType)
         }
     }
