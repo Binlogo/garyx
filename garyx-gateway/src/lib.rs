@@ -7,6 +7,8 @@ mod channel_catalog;
 pub mod chat;
 mod claude_oauth;
 pub mod coding_usage;
+mod codex_provider_accounts;
+mod codex_provider_auth;
 pub mod commands;
 mod composition;
 mod conversation_admission;

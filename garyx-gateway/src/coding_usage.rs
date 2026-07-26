@@ -24,17 +24,21 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+use base64::{
+    Engine as _,
+    engine::general_purpose::{STANDARD as BASE64, URL_SAFE_NO_PAD},
+};
 use chrono::{DateTime, Utc};
 use garyx_models::{
     ProviderType,
     config::{AgentProviderConfig, GaryxConfig},
 };
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 use tokio::time::timeout;
 
 use crate::claude_oauth;
+use crate::codex_provider_accounts;
 use crate::provider_accounts;
 use crate::server::AppState;
 
@@ -69,6 +73,10 @@ const FRESH_TTL: Duration = Duration::from_secs(20);
 /// one-minute Claude reading is fresh enough for selection while avoiding a
 /// burst of usage and token-refresh calls for every stored profile.
 const CLAUDE_FRESH_TTL: Duration = Duration::from_secs(60);
+/// Same account-switcher rationale as Claude, and a failed direct read may
+/// spawn a short-lived app-server, which must not run more than once a minute
+/// per account.
+const CODEX_FRESH_TTL: Duration = Duration::from_secs(60);
 
 const USAGE_ERROR_CREDENTIALS: &str = "credentials_unavailable";
 const USAGE_ERROR_REAUTH_REQUIRED: &str = "reauth_required";
@@ -284,9 +292,17 @@ pub async fn get_coding_usage(State(state): State<Arc<AppState>>) -> impl IntoRe
     } else {
         "system"
     };
+    let active_codex_account_id = config.provider_accounts.codex.active_account_id.clone();
+    let codex_home_dir =
+        codex_provider_accounts::validated_active_codex_home(&state, config.as_ref()).await;
+    let codex_cache_identity = if codex_home_dir.is_some() {
+        active_codex_account_id.as_deref().unwrap_or("system")
+    } else {
+        "system"
+    };
     let (claude, codex, antigravity) = tokio::join!(
         resolve_claude_usage_for_config_dir(claude_config_dir.as_deref(), claude_cache_identity),
-        resolve_provider(PROVIDER_CODEX, "Codex", fetch_codex_usage()),
+        resolve_codex_usage_for_home(codex_home_dir.as_deref(), codex_cache_identity),
         resolve_provider(
             PROVIDER_ANTIGRAVITY,
             "Antigravity",
@@ -531,7 +547,7 @@ async fn resolve_claude_usage_for_config_dir_with(
         return value;
     }
 
-    let fetch_lock = claude_fetch_lock(&cache_key).await;
+    let fetch_lock = usage_fetch_lock(&cache_key).await;
     let _fetch_guard = fetch_lock.lock().await;
     if let Some((age, fresh_for, value)) = cached(&cache_key)
         && age < fresh_for
@@ -663,10 +679,92 @@ fn parse_claude_scoped_limit(limit: &Value) -> Option<ScopedUsageLimit> {
 // Codex
 // ---------------------------------------------------------------------------
 
-async fn fetch_codex_usage() -> Result<ProviderUsage, String> {
-    let auth = read_codex_chatgpt_auth()?;
+pub(crate) fn unavailable_codex_usage(error: String) -> ProviderUsage {
+    ProviderUsage::unavailable(PROVIDER_CODEX, "Codex", error)
+}
 
-    let client = http_client()?;
+/// Resolve one Codex profile's quota without sharing cache entries with any
+/// other profile. Used by the account switcher and by the active-provider
+/// aggregate endpoint. `home == None` reads the ambient system Codex home.
+pub(crate) async fn resolve_codex_usage_for_home(
+    home: Option<&Path>,
+    cache_identity: &str,
+) -> ProviderUsage {
+    let cache_key = format!("{PROVIDER_CODEX}:{cache_identity}");
+    if let Some((age, fresh_for, value)) = cached(&cache_key)
+        && age < fresh_for
+    {
+        return value;
+    }
+
+    let fetch_lock = usage_fetch_lock(&cache_key).await;
+    let _fetch_guard = fetch_lock.lock().await;
+    if let Some((age, fresh_for, value)) = cached(&cache_key)
+        && age < fresh_for
+    {
+        return value;
+    }
+
+    match fetch_codex_usage_for_home(home).await {
+        Ok(value) => {
+            store_for(cache_key, value.clone(), CODEX_FRESH_TTL);
+            value
+        }
+        Err(error) => {
+            let failure_ttl = error
+                .retry_after_seconds
+                .map(Duration::from_secs)
+                .unwrap_or(CODEX_FRESH_TTL)
+                .max(CODEX_FRESH_TTL)
+                .min(Duration::from_secs(15 * 60));
+            let mut value = cached(&cache_key)
+                .map(|(_, _, value)| value)
+                .unwrap_or_else(|| unavailable_codex_usage(error.message.clone()));
+            value.stale = value.available;
+            value.error = Some(error.message);
+            value.error_code = Some(error.code);
+            value.retry_after_seconds = error.retry_after_seconds;
+            store_for(cache_key, value.clone(), failure_ttl);
+            value
+        }
+    }
+}
+
+pub(crate) fn invalidate_codex_usage_cache(cache_identity: &str) {
+    if let Ok(mut guard) = cache().lock() {
+        guard.remove(&format!("{PROVIDER_CODEX}:{cache_identity}"));
+    }
+}
+
+/// Fetch one Codex home's quota. Token custody stays with the Codex CLI: the
+/// stored access token is used directly while locally unexpired, and a stale
+/// or rejected token falls back to a short-lived `codex app-server`
+/// `account/rateLimits/read` call in that home, which refreshes and persists
+/// rotated credentials itself. Garyx never writes Codex credentials.
+async fn fetch_codex_usage_for_home(home: Option<&Path>) -> Result<ProviderUsage, UsageFetchError> {
+    let home_dir = match home {
+        Some(path) => path.to_path_buf(),
+        None => codex_home().ok_or_else(|| {
+            UsageFetchError::new(USAGE_ERROR_CREDENTIALS, "Codex home directory is unset")
+        })?,
+    };
+    let auth = read_codex_chatgpt_auth_at(&home_dir)
+        .map_err(|error| UsageFetchError::new(USAGE_ERROR_CREDENTIALS, error))?;
+    if !codex_access_token_locally_valid(&auth.access_token, Utc::now().timestamp()) {
+        return fetch_codex_usage_via_app_server(&home_dir).await;
+    }
+    match request_codex_usage(&auth).await {
+        Ok(value) => parse_codex_usage(&value)
+            .map_err(|error| UsageFetchError::new(USAGE_ERROR_INVALID_RESPONSE, error)),
+        Err(error) if error.code == USAGE_ERROR_REAUTH_REQUIRED => {
+            fetch_codex_usage_via_app_server(&home_dir).await
+        }
+        Err(error) => Err(error),
+    }
+}
+
+async fn request_codex_usage(auth: &CodexChatgptAuth) -> Result<Value, UsageFetchError> {
+    let client = http_client().map_err(|error| UsageFetchError::new(USAGE_ERROR_NETWORK, error))?;
     let mut request = client
         .get(CODEX_USAGE_URL)
         .bearer_auth(&auth.access_token)
@@ -678,21 +776,227 @@ async fn fetch_codex_usage() -> Result<ProviderUsage, String> {
         request = request.header("ChatGPT-Account-ID", account_id);
     }
 
-    let response = request
-        .send()
-        .await
-        .map_err(|error| format!("Codex usage request failed: {error}"))?;
+    let response = request.send().await.map_err(|error| {
+        UsageFetchError::new(USAGE_ERROR_NETWORK, format!("Codex usage request failed: {error}"))
+    })?;
     let status = response.status();
-    let text = response
-        .text()
-        .await
-        .map_err(|error| format!("Codex usage response unreadable: {error}"))?;
+    let headers = response.headers().clone();
+    let text = response.text().await.map_err(|error| {
+        UsageFetchError::new(
+            USAGE_ERROR_INVALID_RESPONSE,
+            format!("Codex usage response unreadable: {error}"),
+        )
+    })?;
     if !status.is_success() {
-        return Err(format!("Codex usage request returned HTTP {status}"));
+        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            return Err(UsageFetchError::new(
+                USAGE_ERROR_RATE_LIMITED,
+                "Codex usage is temporarily rate limited.",
+            )
+            .with_retry_after(retry_after_seconds(&headers)));
+        }
+        if matches!(status.as_u16(), 401 | 403) {
+            return Err(UsageFetchError::new(
+                USAGE_ERROR_REAUTH_REQUIRED,
+                "Codex credentials were rejected; sign in again.",
+            ));
+        }
+        return Err(UsageFetchError::new(
+            USAGE_ERROR_UPSTREAM,
+            format!("Codex usage request returned HTTP {status}"),
+        ));
     }
-    let value: Value = serde_json::from_str(&text)
-        .map_err(|error| format!("Codex usage response was not JSON: {error}"))?;
-    parse_codex_usage(&value)
+    serde_json::from_str(&text).map_err(|error| {
+        UsageFetchError::new(
+            USAGE_ERROR_INVALID_RESPONSE,
+            format!("Codex usage response was not JSON: {error}"),
+        )
+    })
+}
+
+/// Whether the stored access token's JWT `exp` is still in the future (with
+/// one minute of skew). An undecodable token is treated as valid so the usage
+/// request itself decides.
+fn codex_access_token_locally_valid(access_token: &str, now_epoch_seconds: i64) -> bool {
+    let Some(payload) = access_token
+        .split('.')
+        .nth(1)
+        .and_then(|payload| URL_SAFE_NO_PAD.decode(payload.trim()).ok())
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+    else {
+        return true;
+    };
+    match payload.get("exp").and_then(Value::as_i64) {
+        Some(exp) => now_epoch_seconds + 60 < exp,
+        None => true,
+    }
+}
+
+/// Read rate limits through a short-lived `codex app-server` in the given
+/// home. Codex owns the token refresh (and persists any rotated refresh token
+/// into that home's `auth.json`) as a side effect of serving the request.
+async fn fetch_codex_usage_via_app_server(home: &Path) -> Result<ProviderUsage, UsageFetchError> {
+    #[cfg(test)]
+    if std::env::var_os("GARYX_ALLOW_REAL_APP_SERVER_USAGE_FETCH").is_none() {
+        return Err(UsageFetchError::new(
+            USAGE_ERROR_UPSTREAM,
+            "app-server usage fetch disabled in tests",
+        ));
+    }
+
+    use crate::provider_models::process_rpc::{
+        process_error_code, process_error_message, read_process_response, send_process_notification,
+        send_process_request, shutdown_child,
+    };
+    use std::process::Stdio;
+    use tokio::io::{AsyncBufReadExt as _, BufReader};
+
+    let mut child = tokio::process::Command::new("codex")
+        .args(["app-server", "--listen", "stdio://"])
+        .env("CODEX_HOME", home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| {
+            UsageFetchError::new(
+                USAGE_ERROR_UPSTREAM,
+                format!("failed to start `codex app-server`: {error}"),
+            )
+        })?;
+    let mut stdin = child.stdin.take().ok_or_else(|| {
+        UsageFetchError::new(USAGE_ERROR_UPSTREAM, "app-server stdin was unavailable")
+    })?;
+    let stdout = child.stdout.take().ok_or_else(|| {
+        UsageFetchError::new(USAGE_ERROR_UPSTREAM, "app-server stdout was unavailable")
+    })?;
+    let mut lines = BufReader::new(stdout).lines();
+
+    let result = async {
+        send_process_request(
+            &mut stdin,
+            1,
+            "initialize",
+            json!({
+                "clientInfo": {
+                    "name": "garyx-coding-usage",
+                    "version": env!("CARGO_PKG_VERSION"),
+                },
+                "capabilities": { "experimentalApi": true },
+            }),
+        )
+        .await?;
+        let initialize = read_process_response(&mut lines, 1, Duration::from_secs(10)).await?;
+        if let Some(message) = process_error_message(&initialize) {
+            return Err(format!("app-server initialize failed: {message}"));
+        }
+        send_process_notification(&mut stdin, "initialized", json!({})).await?;
+
+        send_process_request(&mut stdin, 2, "account/rateLimits/read", json!({})).await?;
+        let response = read_process_response(&mut lines, 2, Duration::from_secs(20)).await?;
+        if process_error_code(&response) == Some(-32601) {
+            return Err("app-server does not expose account/rateLimits/read".to_owned());
+        }
+        if let Some(message) = process_error_message(&response) {
+            return Err(format!("app-server rate-limit read failed: {message}"));
+        }
+        response
+            .get("result")
+            .cloned()
+            .ok_or_else(|| "app-server rate-limit read returned no result".to_owned())
+    }
+    .await;
+
+    shutdown_child(&mut child).await;
+    let result =
+        result.map_err(|error| UsageFetchError::new(USAGE_ERROR_UPSTREAM, error))?;
+    // Plan type is identity metadata, not part of the snapshot; read it from
+    // the (possibly just-refreshed) id_token in this home.
+    let plan = codex_provider_accounts::read_codex_auth_identity(&home.join("auth.json"))
+        .await
+        .ok()
+        .and_then(|identity| identity.plan);
+    parse_codex_rate_limit_snapshot(&result, plan)
+        .map_err(|error| UsageFetchError::new(USAGE_ERROR_INVALID_RESPONSE, error))
+}
+
+/// Build a [`ProviderUsage`] from an app-server `RateLimitSnapshot`
+/// (`{ rateLimits: { primary, secondary } }` or the snapshot itself), whose
+/// camelCase windows differ from the `wham/usage` HTTP payload.
+fn parse_codex_rate_limit_snapshot(
+    result: &Value,
+    plan: Option<String>,
+) -> Result<ProviderUsage, String> {
+    let snapshot = result.get("rateLimits").unwrap_or(result);
+    let primary = snapshot.get("primary").and_then(parse_codex_snapshot_window);
+    let secondary = snapshot
+        .get("secondary")
+        .and_then(parse_codex_snapshot_window);
+    let mut weekly = None;
+    let mut session = None;
+    for window in [primary, secondary].into_iter().flatten() {
+        let (usage_window, is_weekly) = window;
+        if is_weekly {
+            if weekly.is_none() {
+                weekly = Some(usage_window);
+            }
+        } else if session.is_none() {
+            session = Some(usage_window);
+        }
+    }
+    if weekly.is_none() && session.is_none() {
+        return Err("Codex rate-limit snapshot had no usable windows".to_owned());
+    }
+    let plan = plan.or_else(|| {
+        result
+            .get("planType")
+            .or_else(|| result.get("plan_type"))
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)
+    });
+    Ok(ProviderUsage {
+        id: PROVIDER_CODEX,
+        name: "Codex",
+        available: true,
+        stale: false,
+        plan,
+        weekly,
+        session,
+        scoped_limits: Vec::new(),
+        models: Vec::new(),
+        error: None,
+        error_code: None,
+        retry_after_seconds: None,
+    })
+}
+
+/// Parse one snapshot window into (window, is_weekly). `None` when the numeric
+/// `usedPercent` is absent, mirroring the HTTP parser's refusal to fabricate a
+/// 100%-remaining window.
+fn parse_codex_snapshot_window(window: &Value) -> Option<(UsageWindow, bool)> {
+    let used = window.get("usedPercent").and_then(Value::as_f64)?;
+    let window_minutes = window.get("windowMinutes").and_then(Value::as_i64);
+    let reset_after_seconds = window
+        .get("resetsInSeconds")
+        .and_then(Value::as_i64)
+        .or_else(|| {
+            window
+                .get("resetsAt")
+                .and_then(Value::as_i64)
+                .map(|epoch| epoch - Utc::now().timestamp())
+        });
+    let resets_at = window
+        .get("resetsAt")
+        .and_then(Value::as_i64)
+        .and_then(|epoch| DateTime::<Utc>::from_timestamp(epoch, 0))
+        .map(|dt| dt.to_rfc3339());
+    let is_weekly = window_minutes
+        .map(|minutes| (minutes * 60 - WEEK_SECONDS).abs() <= WINDOW_TOLERANCE_SECONDS)
+        .unwrap_or(false);
+    Some((
+        UsageWindow::from_used_percent(used, resets_at, reset_after_seconds),
+        is_weekly,
+    ))
 }
 
 /// Build a [`ProviderUsage`] from the ChatGPT/Codex `wham/usage` payload.
@@ -774,16 +1078,16 @@ struct CodexChatgptAuth {
     account_id: Option<String>,
 }
 
-/// Read the ChatGPT (subscription) Codex credentials. Unlike provider auth
-/// resolution this intentionally ignores any `OPENAI_API_KEY`, because weekly
-/// quota windows only exist for the ChatGPT-plan login.
-fn read_codex_chatgpt_auth() -> Result<CodexChatgptAuth, String> {
-    let home = codex_home().ok_or_else(|| "Codex home directory is unset".to_string())?;
+/// Read the ChatGPT (subscription) Codex credentials from one Codex home.
+/// Unlike provider auth resolution this intentionally ignores any
+/// `OPENAI_API_KEY`, because weekly quota windows only exist for the
+/// ChatGPT-plan login.
+fn read_codex_chatgpt_auth_at(home: &Path) -> Result<CodexChatgptAuth, String> {
     let auth_path = home.join("auth.json");
     let contents = std::fs::read_to_string(&auth_path)
-        .map_err(|error| format!("Codex auth (~/.codex/auth.json) not readable: {error}"))?;
+        .map_err(|error| format!("Codex auth ({}) not readable: {error}", auth_path.display()))?;
     let value: Value = serde_json::from_str(&contents).map_err(|error| {
-        format!("Codex auth file (~/.codex/auth.json) was not valid JSON: {error}")
+        format!("Codex auth file ({}) was not valid JSON: {error}", auth_path.display())
     })?;
     let tokens = value
         .get("tokens")
@@ -811,14 +1115,7 @@ fn read_codex_chatgpt_auth() -> Result<CodexChatgptAuth, String> {
 }
 
 fn codex_home() -> Option<std::path::PathBuf> {
-    if let Some(dir) = std::env::var("CODEX_HOME")
-        .ok()
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
-    {
-        return Some(std::path::PathBuf::from(dir));
-    }
-    garyx_models::local_paths::home_dir().map(|home| home.join(".codex"))
+    codex_provider_accounts::system_codex_home()
 }
 
 // ---------------------------------------------------------------------------
@@ -1261,15 +1558,15 @@ fn cache() -> &'static Mutex<HashMap<String, CacheEntry>> {
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn claude_fetch_locks() -> &'static tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>
+fn usage_fetch_locks() -> &'static tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>
 {
     static LOCKS: OnceLock<tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> =
         OnceLock::new();
     LOCKS.get_or_init(|| tokio::sync::Mutex::new(HashMap::new()))
 }
 
-async fn claude_fetch_lock(cache_key: &str) -> Arc<tokio::sync::Mutex<()>> {
-    let mut locks = claude_fetch_locks().lock().await;
+async fn usage_fetch_lock(cache_key: &str) -> Arc<tokio::sync::Mutex<()>> {
+    let mut locks = usage_fetch_locks().lock().await;
     locks
         .entry(cache_key.to_owned())
         .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
@@ -2026,7 +2323,7 @@ mod tests {
             }
             Err(error) => println!("claude unavailable: {error}"),
         }
-        match fetch_codex_usage().await {
+        match fetch_codex_usage_for_home(None).await {
             Ok(usage) => {
                 assert!(usage.available);
                 println!(
@@ -2036,7 +2333,7 @@ mod tests {
                     usage.session.as_ref().map(|w| w.remaining_percent),
                 );
             }
-            Err(error) => println!("codex unavailable: {error}"),
+            Err(error) => println!("codex unavailable: {}", error.message),
         }
         match fetch_antigravity_usage_with_timeout(AntigravityUsageConfig {
             antigravity_bin: configured_antigravity_bin(&GaryxConfig::default()),

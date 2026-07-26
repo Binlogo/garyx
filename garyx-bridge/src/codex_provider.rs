@@ -768,11 +768,26 @@ fn normalize_codex_mcp_servers(metadata: &HashMap<String, Value>) -> Option<Valu
     (!normalized.is_empty()).then_some(Value::Object(normalized))
 }
 
+/// Environment variables that outrank `auth.json` inside the Codex CLI. A
+/// managed account selection must strip them or the selection would be a
+/// silent no-op; System default leaves them untouched for API-key workflows.
+const CODEX_AUTH_ENV_OVERRIDES: &[&str] = &["OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_ACCESS_TOKEN"];
+
 fn resolve_runtime_codex_env(
-    config: &CodexAppServerConfig,
+    launch_env: &HashMap<String, String>,
     metadata: &HashMap<String, Value>,
 ) -> HashMap<String, String> {
-    runtime_env_overlay(&config.env, metadata, "provider_env")
+    let mut env = runtime_env_overlay(launch_env, metadata, "provider_env");
+    // Account selection owns Codex identity even if stale thread metadata
+    // still carries an older provider_env value.
+    env.remove("CODEX_HOME");
+    if let Some(home) = launch_env.get("CODEX_HOME") {
+        env.insert("CODEX_HOME".to_owned(), home.clone());
+        for key in CODEX_AUTH_ENV_OVERRIDES {
+            env.remove(*key);
+        }
+    }
+    env
 }
 
 fn build_codex_thread_config(
@@ -1308,6 +1323,11 @@ pub struct CodexAgentProvider {
     /// thread affinity stable), so default-model resolution must read these
     /// instead of the frozen `config` fields.
     model_defaults: std::sync::RwLock<ProviderModelDefaults>,
+    /// Hot-reloadable launch environment (carries the provider-owned
+    /// `CODEX_HOME` account selection). Each run resolves its app-server
+    /// startup env from this map once; a busy client slot keeps the env it
+    /// started with, so in-flight runs never observe a selection change.
+    launch_env: std::sync::RwLock<HashMap<String, String>>,
     clients: CodexClientMap,
     /// Maps Garyx thread IDs to codex thread IDs.
     session_map: Mutex<HashMap<String, String>>,
@@ -1478,9 +1498,11 @@ impl CodexAgentProvider {
             model_reasoning_effort: config.model_reasoning_effort.clone(),
             model_service_tier: config.model_service_tier.clone(),
         });
+        let launch_env = std::sync::RwLock::new(config.env.clone());
         Self {
             config,
             model_defaults,
+            launch_env,
             clients: Arc::new(Mutex::new(HashMap::new())),
             session_map: Mutex::new(HashMap::new()),
             active_runs: Mutex::new(HashMap::new()),
@@ -1561,7 +1583,14 @@ impl CodexAgentProvider {
         &self,
         options: &ProviderRunOptions,
     ) -> Result<Arc<CodexClientSlot>, BridgeError> {
-        let desired_env = resolve_runtime_codex_env(&self.config, &options.metadata);
+        let desired_env = {
+            let launch_env = self
+                .launch_env
+                .read()
+                .expect("codex launch environment lock poisoned")
+                .clone();
+            resolve_runtime_codex_env(&launch_env, &options.metadata)
+        };
         let garyx_thread_id = options.thread_id.clone();
 
         loop {
@@ -2347,6 +2376,13 @@ impl ProviderRuntime for CodexAgentProvider {
             .model_defaults
             .write()
             .expect("codex model defaults lock poisoned") = defaults.clone();
+    }
+
+    fn update_launch_environment(&self, env: &HashMap<String, String>) {
+        *self
+            .launch_env
+            .write()
+            .expect("codex launch environment lock poisoned") = env.clone();
     }
 
     async fn initialize(&mut self) -> Result<(), BridgeError> {

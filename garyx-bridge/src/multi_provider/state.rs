@@ -35,6 +35,10 @@ pub(super) struct Inner {
     /// means Claude's ordinary system profile and therefore no injected
     /// `CLAUDE_CONFIG_DIR`.
     pub(super) claude_config_dir: Arc<RwLock<Option<String>>>,
+    /// Provider-owned Codex identity for future process launches. `None`
+    /// means Codex's ordinary system home and therefore no injected
+    /// `CODEX_HOME`.
+    pub(super) codex_home: Arc<RwLock<Option<String>>>,
     /// Run lifecycle indexes.
     pub(super) run_index: Arc<RwLock<BridgeRunIndex>>,
     /// `run_id -> JoinHandle`
@@ -69,6 +73,7 @@ impl Inner {
             agent_profiles: Arc::new(RwLock::new(AgentProfileState::default())),
             default_provider_configs: Arc::new(RwLock::new(HashMap::new())),
             claude_config_dir: Arc::new(RwLock::new(None)),
+            codex_home: Arc::new(RwLock::new(None)),
             run_index: Arc::new(RwLock::new(BridgeRunIndex::default())),
             active_tasks: Arc::new(Mutex::new(HashMap::new())),
             thread_dispatch_guards: Arc::new(Mutex::new(HashMap::new())),

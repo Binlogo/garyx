@@ -31,7 +31,9 @@ use crate::health::HealthChecker;
 use crate::mcp_metrics::McpToolMetrics;
 use crate::meetings::MeetingService;
 use crate::prompt_attachment_lifecycle::PromptAttachmentLifecycle;
+use crate::codex_provider_accounts;
 use crate::provider_accounts;
+use crate::codex_provider_auth::CodexAuthSessionStore;
 use crate::provider_auth::ClaudeAuthSessionStore;
 use crate::push_notifications::PushNotificationService;
 use crate::routes::RestartTracker;
@@ -81,6 +83,7 @@ pub struct OpsState {
     pub(crate) prompt_attachments: PromptAttachmentLifecycle,
     pub meetings: Arc<MeetingService>,
     pub provider_auth_sessions: Arc<ClaudeAuthSessionStore>,
+    pub codex_auth_sessions: Arc<CodexAuthSessionStore>,
     pub channel_endpoint_snapshot: Mutex<Option<ChannelEndpointSnapshotCache>>,
     pub(crate) endpoint_binding_mutator: Arc<SqlEndpointBindingMutator>,
     pub(crate) lifecycle: Arc<LifecycleService>,
@@ -158,6 +161,11 @@ impl AppState {
         self.integration
             .bridge
             .set_claude_config_dir(config_dir.map(|path| path.to_string_lossy().into_owned()))
+            .await;
+        let codex_home = codex_provider_accounts::validated_active_codex_home(self, config).await;
+        self.integration
+            .bridge
+            .set_codex_home(codex_home.map(|path| path.to_string_lossy().into_owned()))
             .await;
     }
 
@@ -398,6 +406,9 @@ impl AppState {
         let previous_claude_config_dir =
             provider_accounts::validated_active_claude_config_dir(self, previous_config.as_ref())
                 .await;
+        let previous_codex_home =
+            codex_provider_accounts::validated_active_codex_home(self, previous_config.as_ref())
+                .await;
         self.apply_provider_account_selection_to_bridge(&config)
             .await;
         self.integration
@@ -410,6 +421,10 @@ impl AppState {
                 .set_claude_config_dir(
                     previous_claude_config_dir.map(|path| path.to_string_lossy().into_owned()),
                 )
+                .await;
+            self.integration
+                .bridge
+                .set_codex_home(previous_codex_home.map(|path| path.to_string_lossy().into_owned()))
                 .await;
             let _ = self
                 .integration
@@ -566,6 +581,7 @@ impl AppState {
                 prompt_attachments: self.ops.prompt_attachments.clone(),
                 meetings: self.ops.meetings.clone(),
                 provider_auth_sessions: self.ops.provider_auth_sessions.clone(),
+                codex_auth_sessions: self.ops.codex_auth_sessions.clone(),
                 channel_endpoint_snapshot: Mutex::new(None),
                 endpoint_binding_mutator: self.ops.endpoint_binding_mutator.clone(),
                 lifecycle: self.ops.lifecycle.clone(),

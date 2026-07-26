@@ -257,7 +257,7 @@ mod catalog;
 mod claude_code;
 mod codex;
 mod grok;
-mod process_rpc;
+pub(crate) mod process_rpc;
 
 use app_server::*;
 use cache::*;

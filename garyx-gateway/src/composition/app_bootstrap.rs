@@ -31,6 +31,7 @@ use crate::health::HealthChecker;
 use crate::mcp_metrics::McpToolMetrics;
 use crate::meetings::MeetingService;
 use crate::prompt_attachment_lifecycle::PromptAttachmentLifecycle;
+use crate::codex_provider_auth::CodexAuthSessionStore;
 use crate::provider_auth::ClaudeAuthSessionStore;
 use crate::push_notifications::{ApnsTransport, PushNotificationService, ReqwestApnsTransport};
 use crate::recent_thread_projection::{ActiveRunProbe, BridgeActiveRunProbe};
@@ -565,6 +566,7 @@ impl AppStateBuilder {
                 prompt_attachments,
                 meetings,
                 provider_auth_sessions: Arc::new(ClaudeAuthSessionStore::default()),
+                codex_auth_sessions: Arc::new(CodexAuthSessionStore::default()),
                 channel_endpoint_snapshot: Mutex::new(None),
                 endpoint_binding_mutator,
                 lifecycle: lifecycle.clone(),

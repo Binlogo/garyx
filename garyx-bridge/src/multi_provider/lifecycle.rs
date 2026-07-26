@@ -357,6 +357,23 @@ impl MultiProviderBridge {
                     .insert("CLAUDE_CONFIG_DIR".to_owned(), config_dir);
             }
         }
+        if ProviderType::from_slug(&effective_agent_cfg.provider_type)
+            == Some(ProviderType::CodexAppServer)
+        {
+            // Codex account selection owns the identity environment keys, with
+            // the same System-default contract as Claude above. A managed
+            // selection also strips the env-var auth overrides, which would
+            // otherwise silently outrank the managed home's auth.json.
+            effective_agent_cfg.env.remove("CODEX_HOME");
+            if let Some(codex_home) = self.inner.codex_home.read().await.clone() {
+                for key in ["OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_ACCESS_TOKEN"] {
+                    effective_agent_cfg.env.remove(key);
+                }
+                effective_agent_cfg
+                    .env
+                    .insert("CODEX_HOME".to_owned(), codex_home);
+            }
+        }
         let key = compute_provider_key(&effective_agent_cfg, default_workspace);
 
         // Already registered: hot-apply the (possibly reloaded) model

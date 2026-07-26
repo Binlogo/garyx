@@ -1,6 +1,6 @@
 use super::*;
 
-pub(super) async fn send_process_request(
+pub(crate) async fn send_process_request(
     stdin: &mut ChildStdin,
     id: u64,
     method: &str,
@@ -26,7 +26,7 @@ pub(super) async fn send_process_request(
         .map_err(|error| format!("failed to flush provider process request: {error}"))
 }
 
-pub(super) async fn send_process_notification(
+pub(crate) async fn send_process_notification(
     stdin: &mut ChildStdin,
     method: &str,
     params: Value,
@@ -50,7 +50,7 @@ pub(super) async fn send_process_notification(
         .map_err(|error| format!("failed to flush {method} notification: {error}"))
 }
 
-pub(super) async fn read_process_response(
+pub(crate) async fn read_process_response(
     lines: &mut Lines<BufReader<ChildStdout>>,
     expected_id: u64,
     duration: Duration,
@@ -80,19 +80,19 @@ pub(super) async fn read_process_response(
         .map_err(|_| format!("timed out waiting for provider process request {expected_id}"))?
 }
 
-pub(super) async fn shutdown_child(child: &mut Child) {
+pub(crate) async fn shutdown_child(child: &mut Child) {
     let _ = child.kill().await;
     let _ = child.wait().await;
 }
 
-pub(super) fn process_error_code(response: &Value) -> Option<i64> {
+pub(crate) fn process_error_code(response: &Value) -> Option<i64> {
     response
         .get("error")
         .and_then(|error| error.get("code"))
         .and_then(Value::as_i64)
 }
 
-pub(super) fn process_error_message(response: &Value) -> Option<String> {
+pub(crate) fn process_error_message(response: &Value) -> Option<String> {
     let error = response.get("error")?;
     let message = error
         .get("message")
