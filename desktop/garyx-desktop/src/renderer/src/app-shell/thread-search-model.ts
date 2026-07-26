@@ -3,6 +3,7 @@ import type {
   DesktopThreadSummary,
 } from "@shared/contracts";
 import type { RecentFeedFooterKind } from "../recent-conversation-sidebar-model";
+import { compactPathLabel } from "./workspace-helpers.ts";
 
 export const THREAD_SEARCH_DEBOUNCE_MS = 250;
 export const THREAD_SEARCH_PAGE_LIMIT = 30;
@@ -47,6 +48,45 @@ export function threadSearchHighlightedItem<T>(
     return null;
   }
   return rows[highlightedIndex] ?? null;
+}
+
+export type ThreadSearchRowMeta = {
+  text: string;
+  tooltip: string;
+};
+
+/**
+ * Builds the trailing "agent · workspace" segment of a palette result row.
+ *
+ * The one-line row caps this segment, and every absolute workspace path shares
+ * the same long prefix, so truncating the full path would keep only the
+ * characters each row has in common and leave the column with no distinguishing
+ * information. The visible copy therefore uses the workspace's last path
+ * segment while the tooltip keeps the full path.
+ *
+ * Both strings come from this one function so the visible text and its tooltip
+ * cannot drift apart.
+ */
+export function threadSearchRowMeta(
+  thread: Pick<
+    DesktopThreadSummary,
+    "rootWorkspacePath" | "workspacePath" | "workspaceOrigin"
+  >,
+  agentLabel: string,
+  noWorkspaceLabel: string,
+): ThreadSearchRowMeta {
+  const workspacePath =
+    (thread.rootWorkspacePath ?? thread.workspacePath)?.trim() || "";
+  const hasWorkspace =
+    thread.workspaceOrigin !== "implicit" && Boolean(workspacePath);
+  const visibleWorkspace = hasWorkspace
+    ? compactPathLabel(workspacePath)
+    : noWorkspaceLabel;
+  const fullWorkspace = hasWorkspace ? workspacePath : noWorkspaceLabel;
+  return {
+    text: `${agentLabel} · ${visibleWorkspace}`,
+    tooltip: `${agentLabel} · ${fullWorkspace}`,
+  };
 }
 
 export type ThreadSearchHeadStatus =

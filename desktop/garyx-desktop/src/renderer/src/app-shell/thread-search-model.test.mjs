@@ -9,6 +9,7 @@ import {
   threadSearchHighlightedItem,
   threadSearchHighlightForRows,
   threadSearchModel,
+  threadSearchRowMeta,
 } from "./thread-search-model.ts";
 
 function summary(id, title = id) {
@@ -407,4 +408,160 @@ test("palette Enter selection resolves only the highlighted result", () => {
   assert.equal(threadSearchHighlightedItem(rows, -1), null);
   assert.equal(threadSearchHighlightedItem(rows, rows.length), null);
   assert.equal(threadSearchHighlightedItem(rows, 0.5), null);
+});
+
+const NO_WORKSPACE = "No workspace";
+
+function workspaceRow({
+  workspacePath = "/Users/test/repos/project",
+  rootWorkspacePath = undefined,
+  workspaceOrigin = "explicit",
+} = {}) {
+  return { workspacePath, rootWorkspacePath, workspaceOrigin };
+}
+
+test("row meta shows the workspace basename and keeps the full path in the tooltip", () => {
+  const meta = threadSearchRowMeta(
+    workspaceRow({ workspacePath: "/Users/test/repos/project" }),
+    "Gary",
+    NO_WORKSPACE,
+  );
+
+  assert.equal(meta.text, "Gary · project");
+  assert.equal(meta.tooltip, "Gary · /Users/test/repos/project");
+});
+
+test("row meta prefers the root workspace path over the thread workspace path", () => {
+  const meta = threadSearchRowMeta(
+    workspaceRow({
+      rootWorkspacePath: "/Users/test/repos/root-project",
+      workspacePath: "/Users/test/repos/root-project/nested/worktree",
+    }),
+    "Codex",
+    NO_WORKSPACE,
+  );
+
+  assert.equal(meta.text, "Codex · root-project");
+  assert.equal(meta.tooltip, "Codex · /Users/test/repos/root-project");
+});
+
+test("row meta falls back to the thread workspace path when no root path exists", () => {
+  const meta = threadSearchRowMeta(
+    workspaceRow({
+      rootWorkspacePath: null,
+      workspacePath: "/Users/test/.garyx/worktrees/feature-branch",
+    }),
+    "Claude",
+    NO_WORKSPACE,
+  );
+
+  assert.equal(meta.text, "Claude · feature-branch");
+  assert.equal(meta.tooltip, "Claude · /Users/test/.garyx/worktrees/feature-branch");
+});
+
+test("row meta reports no workspace for implicit, missing, and blank paths", () => {
+  // Written as literals rather than through workspaceRow(): a default parameter
+  // would substitute a real path for an explicitly absent one.
+  const cases = [
+    workspaceRow({ workspaceOrigin: "implicit" }),
+    workspaceRow({
+      workspaceOrigin: "implicit",
+      rootWorkspacePath: "/Users/test/repos/project",
+    }),
+    { workspacePath: "", rootWorkspacePath: null, workspaceOrigin: "explicit" },
+    { workspacePath: "   ", rootWorkspacePath: null, workspaceOrigin: "explicit" },
+    { workspacePath: null, rootWorkspacePath: null, workspaceOrigin: "explicit" },
+    {
+      workspacePath: undefined,
+      rootWorkspacePath: undefined,
+      workspaceOrigin: "explicit",
+    },
+  ];
+
+  for (const row of cases) {
+    const meta = threadSearchRowMeta(row, "Gary", NO_WORKSPACE);
+    assert.equal(
+      meta.text,
+      `Gary · ${NO_WORKSPACE}`,
+      `visible text for ${JSON.stringify(row)}`,
+    );
+    assert.equal(
+      meta.tooltip,
+      `Gary · ${NO_WORKSPACE}`,
+      `tooltip for ${JSON.stringify(row)}`,
+    );
+  }
+});
+
+test("row meta never leaks the untranslated helper fallback copy", () => {
+  const rows = [
+    workspaceRow({ workspaceOrigin: "implicit" }),
+    { workspacePath: "", rootWorkspacePath: null, workspaceOrigin: "explicit" },
+    { workspacePath: "   ", rootWorkspacePath: null, workspaceOrigin: "explicit" },
+    { workspacePath: null, rootWorkspacePath: null, workspaceOrigin: "explicit" },
+  ];
+
+  for (const row of rows) {
+    const meta = threadSearchRowMeta(row, "Gary", NO_WORKSPACE);
+    assert.ok(
+      !meta.text.includes("Workspace unavailable"),
+      "visible text must use the injected label, not the helper fallback",
+    );
+    assert.ok(
+      !meta.tooltip.includes("Workspace unavailable"),
+      "tooltip must use the injected label, not the helper fallback",
+    );
+  }
+});
+
+test("row meta handles root, trailing separators, and backslash paths", () => {
+  assert.equal(
+    threadSearchRowMeta(workspaceRow({ workspacePath: "/" }), "Gary", NO_WORKSPACE)
+      .text,
+    "Gary · /",
+  );
+  assert.equal(
+    threadSearchRowMeta(
+      workspaceRow({ workspacePath: "/Users/test/repos/project/" }),
+      "Gary",
+      NO_WORKSPACE,
+    ).text,
+    "Gary · project",
+  );
+  assert.equal(
+    threadSearchRowMeta(
+      workspaceRow({ workspacePath: "/Users/test/repos/project///" }),
+      "Gary",
+      NO_WORKSPACE,
+    ).text,
+    "Gary · project",
+  );
+  assert.equal(
+    threadSearchRowMeta(
+      workspaceRow({ workspacePath: "C:\\Users\\test\\repos\\project" }),
+      "Gary",
+      NO_WORKSPACE,
+    ).text,
+    "Gary · project",
+  );
+  assert.equal(
+    threadSearchRowMeta(
+      workspaceRow({ workspacePath: "  /Users/test/repos/project  " }),
+      "Gary",
+      NO_WORKSPACE,
+    ).tooltip,
+    "Gary · /Users/test/repos/project",
+    "tooltip uses the trimmed path",
+  );
+});
+
+test("row meta keeps a single-segment workspace path intact", () => {
+  const meta = threadSearchRowMeta(
+    workspaceRow({ workspacePath: "/project" }),
+    "Gary",
+    NO_WORKSPACE,
+  );
+
+  assert.equal(meta.text, "Gary · project");
+  assert.equal(meta.tooltip, "Gary · /project");
 });

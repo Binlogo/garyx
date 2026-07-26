@@ -26,9 +26,9 @@ import {
   threadSearchHighlightedItem,
   threadSearchHighlightForRows,
   moveThreadSearchHighlight,
+  threadSearchRowMeta,
   type ThreadSearchPresentation,
 } from "../thread-search-model";
-import { compactPathLabel } from "../workspace-helpers";
 
 const THREAD_SEARCH_NEAR_END_PX = 160;
 
@@ -78,17 +78,11 @@ function ThreadSearchResultRow({
 }: ThreadSearchResultRowProps) {
   const { t } = useI18n();
   const avatar = resolveThreadAvatarIdentity(thread, threadAvatarCatalog);
-  const workspacePath =
-    (thread.rootWorkspacePath ?? thread.workspacePath)?.trim() || "";
-  const hasWorkspace =
-    thread.workspaceOrigin !== "implicit" && Boolean(workspacePath);
-  // The row shows only the workspace's last path segment: every absolute path
-  // here shares the same long prefix, so a truncated full path degrades into
-  // identical text on every row. The full path stays in the tooltip.
-  const workspaceLabel = hasWorkspace
-    ? compactPathLabel(workspacePath)
-    : t("No workspace");
-  const workspaceTooltip = hasWorkspace ? workspacePath : t("No workspace");
+  const rowMeta = threadSearchRowMeta(
+    thread,
+    avatar.label,
+    t("No workspace"),
+  );
   const timeLabel = formatThreadTimestamp(thread.updatedAt);
 
   return (
@@ -124,11 +118,8 @@ function ThreadSearchResultRow({
       <span className="thread-search-result-title" title={thread.title}>
         {thread.title}
       </span>
-      <span
-        className="thread-search-result-meta"
-        title={`${avatar.label} · ${workspaceTooltip}`}
-      >
-        {avatar.label} · {workspaceLabel}
+      <span className="thread-search-result-meta" title={rowMeta.tooltip}>
+        {rowMeta.text}
       </span>
       {timeLabel ? (
         <time
