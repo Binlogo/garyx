@@ -164,7 +164,7 @@ stable.
 Because the simulator is shared by concurrent tasks, every screenshot command
 installed the final local app and then compared the installed code-bearing
 binary with the build output after capture. This build is not dylib-backed, so
-the checked file on both sides was `Gary X`; all 21 checks matched SHA-256
+the checked file on both sides was `Garyx`; all 21 checks matched SHA-256
 `1874960a94b7ed70d329437eea80d34607dacade6038b57cbfc74f0c8521468b`.
 No capture survived a mismatched ownership check.
 

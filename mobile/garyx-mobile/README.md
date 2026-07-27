@@ -1,6 +1,6 @@
-# Gary X Mobile
+# Garyx Mobile
 
-`GaryxMobile.xcodeproj` builds the Gary X iOS app. It uses the existing Garyx
+`GaryxMobile.xcodeproj` builds the Garyx iOS app. It uses the existing Garyx
 gateway directly, with no account binding or separate mobile backend in this
 app.
 

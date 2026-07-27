@@ -681,7 +681,7 @@ Settings view.
 Thread history is persisted through transcript records; backend selection is no
 longer exposed as a gateway setting.
 
-### Gary X Mobile
+### Garyx Mobile
 
 The iOS app is a direct Garyx gateway client. It does not run model providers
 and does not copy provider API keys to the phone. It reuses the desktop app's
@@ -699,7 +699,7 @@ Use the Mac's LAN address in the mobile URL, for example
 `http://192.168.1.20:31337`. `http://127.0.0.1:31337` only works from the iOS
 simulator running on the same Mac.
 
-The desktop app's Desktop Settings view can generate a Gary X Mobile QR/link:
+The desktop app's Desktop Settings view can generate a Garyx Mobile QR/link:
 
 ```text
 garyx://mobile/connect?gatewayUrl=...&gatewayAuthToken=...

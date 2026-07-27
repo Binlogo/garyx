@@ -80,7 +80,7 @@ struct GaryxRecentThreadsWidgetView: View {
                     Text("No recent threads")
                         .garyxRelativePointFont(size: 14, relativeTo: .body, weight: .semibold)
                         .foregroundStyle(.primary)
-                    Text("Open Gary X to refresh")
+                    Text("Open Garyx to refresh")
                         .garyxRelativePointFont(size: 12, relativeTo: .caption, weight: .medium)
                         .foregroundStyle(.secondary)
                 }
@@ -414,8 +414,8 @@ struct GaryxRecentThreadsWidget: Widget {
         StaticConfiguration(kind: kind, provider: GaryxRecentThreadsProvider()) { entry in
             GaryxRecentThreadsWidgetView(entry: entry)
         }
-        .configurationDisplayName("Gary X Recent")
-        .description("Open recent Gary X threads.")
+        .configurationDisplayName("Garyx Recent")
+        .description("Open recent Garyx threads.")
         .supportedFamilies([.systemSmall, .systemMedium, .systemLarge, .systemExtraLarge])
         .contentMarginsDisabled()
     }

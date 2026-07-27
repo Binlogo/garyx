@@ -1,6 +1,6 @@
-# Gary X Mobile Gateway Protocol
+# Garyx Mobile Gateway Protocol
 
-Gary X mobile talks to the managed gateway directly on the same network as the
+Garyx mobile talks to the managed gateway directly on the same network as the
 Mac. The app uses the same `gatewayUrl` / `gatewayAuthToken` concept as the
 desktop app.
 

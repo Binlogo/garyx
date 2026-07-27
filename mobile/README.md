@@ -6,7 +6,7 @@ The phone connects directly to the Garyx gateway on the same LAN, using the
 same `gatewayUrl` / `gatewayAuthToken` concept as the Mac app. Provider API
 keys stay on the Mac/gateway; iOS only stores the gateway token in Keychain.
 
-Use the Mac app's Gary X Mobile QR/link in Desktop Settings, or enter the Mac's
+Use the Mac app's Garyx Mobile QR/link in Desktop Settings, or enter the Mac's
 LAN address manually, for example `http://192.168.1.20:31337`. `127.0.0.1` only
 works from the iOS simulator on the Mac itself.
 

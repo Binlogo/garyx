@@ -1,6 +1,6 @@
-# Gary X Mobile Mac Parity
+# Garyx Mobile Mac Parity
 
-Gary X Mobile is the LAN companion for the Gary X Mac app. It does not copy
+Garyx Mobile is the LAN companion for the Garyx Mac app. It does not copy
 provider secrets, local provider homes, or Electron-only host capabilities to
 iOS. The phone talks to the same gateway API as the Mac app with the gateway
 token, and the Mac/gateway remains the owner of execution, provider keys,
