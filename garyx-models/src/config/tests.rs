@@ -51,6 +51,44 @@ fn provider_accounts_roundtrip_without_persisting_paths() {
 }
 
 #[test]
+fn provider_accounts_default_to_system_codex_profile() {
+    let cfg: GaryxConfig = serde_json::from_value(serde_json::json!({})).unwrap();
+    assert!(cfg.provider_accounts.codex.active_account_id.is_none());
+    assert!(cfg.provider_accounts.codex.accounts.is_empty());
+}
+
+#[test]
+fn codex_provider_accounts_roundtrip_without_persisting_paths() {
+    let cfg: GaryxConfig = serde_json::from_value(serde_json::json!({
+        "provider_accounts": {
+            "codex": {
+                "active_account_id": "work",
+                "accounts": [{
+                    "id": "work",
+                    "name": "Work",
+                    "email": "user@example.com",
+                    "plan": "pro",
+                    "chatgpt_account_id": "00000000-0000-4000-8000-000000000001",
+                    "created_at": "2026-07-26T12:00:00Z",
+                    "updated_at": "2026-07-26T12:00:00Z"
+                }]
+            }
+        }
+    }))
+    .unwrap();
+    let active = cfg
+        .provider_accounts
+        .codex
+        .active_account()
+        .expect("active account");
+    assert_eq!(active.name, "Work");
+    assert_eq!(active.plan.as_deref(), Some("pro"));
+    let value = serde_json::to_value(cfg).unwrap();
+    assert!(value.to_string().contains("active_account_id"));
+    assert!(!value.to_string().contains("codex_home"));
+}
+
+#[test]
 fn test_gateway_defaults() {
     let gw = GatewayConfig::default();
     assert_eq!(gw.port, 31337);

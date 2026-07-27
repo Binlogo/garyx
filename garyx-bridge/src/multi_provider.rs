@@ -227,6 +227,13 @@ impl MultiProviderBridge {
         *self.inner.claude_config_dir.write().await = config_dir;
     }
 
+    /// Select the Codex home directory used by future runs. Busy app-server
+    /// client slots keep the environment they started with; idle slots restart
+    /// with the new selection on their next run.
+    pub async fn set_codex_home(&self, codex_home: Option<String>) {
+        *self.inner.codex_home.write().await = codex_home;
+    }
+
     /// Set the thread store for persisting messages after agent runs.
     pub async fn set_thread_store(&self, store: Arc<dyn ThreadStore>) {
         store

@@ -1058,6 +1058,15 @@ pub struct ProviderRunOptions {
     pub metadata: HashMap<String, Value>,
 }
 
+/// Environment variables that outrank `auth.json` inside the Codex CLI. Every
+/// process launched for a managed Codex account — app-server runs, usage
+/// probes, device-code logins — must explicitly remove these from its spawn
+/// environment (inherited process env included) or the managed selection
+/// would be a silent no-op. System default leaves them untouched for API-key
+/// workflows. See docs/design/codex-multi-account-profiles.md.
+pub const CODEX_AUTH_ENV_OVERRIDES: &[&str] =
+    &["OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_ACCESS_TOKEN"];
+
 /// Provider usage-quota / rate-limit context captured when a run terminates
 /// because the provider's rolling quota was exhausted (e.g. Codex's 5-hour or
 /// weekly ChatGPT-plan window). Sourced from the provider's own structured

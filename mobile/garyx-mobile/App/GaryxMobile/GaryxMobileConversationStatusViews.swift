@@ -233,8 +233,9 @@ struct GaryxUserMessageLoadingBubble: View {
 /// provider's usage quota. The reset wall-clock time and countdown re-derive
 /// every second from the server-provided reset time via
 /// `GaryxRateLimitBannerModel`; when the gateway scheduled an auto-resend the
-/// card says when it fires. Claude Code also exposes the provider-owned
-/// account selector so a healthy account can resume all quota-paused threads.
+/// card says when it fires. Claude Code and Codex also expose the
+/// provider-owned account selector so a healthy account can resume all
+/// quota-paused threads.
 struct GaryxRateLimitBanner: View {
     let rateLimit: GaryxRenderRateLimit
     /// Makes the same durable SQL recovery generation due immediately. The
@@ -261,17 +262,39 @@ struct GaryxRateLimitBanner: View {
             recoveryFeedback = nil
         }
         .garyxSheet(isPresented: $showsAccountSwitcher) {
-            GaryxClaudeCodeAccountsSheet(selectionOnly: true) { result in
-                if !result.selectionChanged {
-                    recoveryNotice = nil
-                } else if result.recoveryWarning != nil {
-                    recoveryNotice = "Account switched. Retry paused threads manually."
-                } else if result.recovery.matchedThreads > 0 {
-                    recoveryNotice = "Resuming \(result.recovery.matchedThreads) paused threads…"
-                } else {
-                    recoveryNotice = "Account switched."
+            if isCodex {
+                GaryxCodexAccountsSheet(selectionOnly: true) { result in
+                    applySelectionNotice(
+                        selectionChanged: result.selectionChanged,
+                        recoveryWarning: result.recoveryWarning,
+                        matchedThreads: result.recovery.matchedThreads
+                    )
+                }
+            } else {
+                GaryxClaudeCodeAccountsSheet(selectionOnly: true) { result in
+                    applySelectionNotice(
+                        selectionChanged: result.selectionChanged,
+                        recoveryWarning: result.recoveryWarning,
+                        matchedThreads: result.recovery.matchedThreads
+                    )
                 }
             }
+        }
+    }
+
+    private func applySelectionNotice(
+        selectionChanged: Bool,
+        recoveryWarning: String?,
+        matchedThreads: Int
+    ) {
+        if !selectionChanged {
+            recoveryNotice = nil
+        } else if recoveryWarning != nil {
+            recoveryNotice = "Account switched. Retry paused threads manually."
+        } else if matchedThreads > 0 {
+            recoveryNotice = "Resuming \(matchedThreads) paused threads…"
+        } else {
+            recoveryNotice = "Account switched."
         }
     }
 
@@ -315,18 +338,24 @@ struct GaryxRateLimitBanner: View {
                 continueButton
             }
 
-            if isClaudeCode {
+            if supportsAccountSwitch {
                 Divider()
                     .overlay(Color(.separator).opacity(0.55))
 
                 Button {
                     recoveryNotice = nil
                     showsAccountSwitcher = true
-                    Task { await mobileModel.loadClaudeCodeAccounts() }
+                    Task {
+                        if isCodex {
+                            await mobileModel.loadCodexAccounts()
+                        } else {
+                            await mobileModel.loadClaudeCodeAccounts()
+                        }
+                    }
                 } label: {
                     HStack(spacing: 12) {
                         VStack(alignment: .leading, spacing: 2) {
-                            Text("Claude Code account")
+                            Text("\(providerPresentation.displayName) account")
                                 .font(GaryxFont.caption())
                                 .foregroundStyle(.secondary)
                             Text(selectedAccountName)
@@ -349,11 +378,15 @@ struct GaryxRateLimitBanner: View {
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(GaryxPressableRowStyle())
-                .disabled(mobileModel.isMutatingClaudeCodeAccount)
+                .disabled(
+                    isCodex
+                        ? mobileModel.isMutatingCodexAccount
+                        : mobileModel.isMutatingClaudeCodeAccount
+                )
 
                 Text(
                     recoveryNotice
-                        ?? "Switching accounts resumes every Claude thread paused by quota."
+                        ?? "Switching accounts resumes every \(isCodex ? "Codex" : "Claude") thread paused by quota."
                 )
                 .font(GaryxFont.caption())
                 .foregroundStyle(.secondary)
@@ -430,6 +463,14 @@ struct GaryxRateLimitBanner: View {
         providerPresentation.kind == .claude
     }
 
+    private var isCodex: Bool {
+        providerPresentation.kind == .codex
+    }
+
+    private var supportsAccountSwitch: Bool {
+        isClaudeCode || isCodex
+    }
+
     private var providerPresentation: GaryxProviderPresentation {
         GaryxProviderPresentation.make(providerType: rateLimit.provider ?? "")
     }
@@ -444,6 +485,12 @@ struct GaryxRateLimitBanner: View {
     }
 
     private var selectedAccountName: String {
+        if isCodex {
+            if let account = mobileModel.codexAccounts?.selectedAccount {
+                return account.name
+            }
+            return mobileModel.isLoadingCodexAccounts ? "Loading account…" : "Choose account"
+        }
         if let account = mobileModel.claudeCodeAccounts?.selectedAccount {
             return account.name
         }

@@ -142,6 +142,52 @@ export interface StartDesktopClaudeAuthInput {
   accountId?: string | null;
 }
 
+export interface DesktopCodexAccount {
+  id: string | null;
+  name: string;
+  systemDefault: boolean;
+  selected: boolean;
+  email?: string | null;
+  plan?: string | null;
+  chatgptAccountId?: string | null;
+  usage: DesktopProviderUsage;
+}
+
+export interface DesktopCodexAccounts {
+  activeAccountId: string | null;
+  accounts: DesktopCodexAccount[];
+  refreshedAt: string;
+}
+
+export interface DesktopCodexAccountSelection {
+  activeAccountId: string | null;
+  selectionChanged: boolean;
+  recovery: DesktopQuotaRecoverySummary;
+  recoveryWarning?: string | null;
+}
+
+export type DesktopCodexAuthStatus =
+  | "starting"
+  | "waiting_for_authorization"
+  | "succeeded"
+  | "failed";
+
+export interface DesktopCodexAuthSession {
+  loginId: string;
+  accountId: string | null;
+  status: DesktopCodexAuthStatus;
+  authorizationUrl: string | null;
+  userCode: string | null;
+  identity: Record<string, unknown> | null;
+  error: string | null;
+  exitCode: number | null;
+}
+
+export interface StartDesktopCodexAuthInput {
+  managedAccountName?: string | null;
+  accountId?: string | null;
+}
+
 export type DesktopThreadProviderType = DesktopApiProviderType;
 
 export type DesktopSessionProviderHint = "claude" | "codex";

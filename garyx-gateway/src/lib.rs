@@ -6,6 +6,8 @@ pub mod capsules;
 mod channel_catalog;
 pub mod chat;
 mod claude_oauth;
+mod codex_provider_accounts;
+mod codex_provider_auth;
 pub mod coding_usage;
 pub mod commands;
 mod composition;

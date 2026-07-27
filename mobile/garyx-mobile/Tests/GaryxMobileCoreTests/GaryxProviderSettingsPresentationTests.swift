@@ -13,7 +13,7 @@ final class GaryxProviderSettingsPresentationTests: XCTestCase {
     func testAuthSectionPerProviderType() {
         let expected: [String: GaryxProviderSettingsPresentation.AuthSection] = [
             "claude_code": .claudeCode,
-            "codex_app_server": .managedOAuth,
+            "codex_app_server": .codex,
             "antigravity": .managedOAuth,
             "traex": .managedOAuth,
             "grok_build": .managedCLI,

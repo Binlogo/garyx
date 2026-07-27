@@ -1053,6 +1053,8 @@ pub struct DesktopConfig {}
 pub struct ProviderAccountsConfig {
     #[serde(default)]
     pub claude_code: ClaudeCodeAccountsConfig,
+    #[serde(default)]
+    pub codex: CodexAccountsConfig,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
@@ -1082,6 +1084,57 @@ impl ClaudeCodeAccountsConfig {
             .as_deref()
             .and_then(|account_id| self.account(account_id))
     }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct CodexAccountsConfig {
+    /// `None` selects Codex's ordinary system profile (`~/.codex`, or the
+    /// Gateway's ambient `CODEX_HOME`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_account_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub accounts: Vec<CodexManagedAccount>,
+}
+
+impl CodexAccountsConfig {
+    pub fn account(&self, account_id: &str) -> Option<&CodexManagedAccount> {
+        self.accounts
+            .iter()
+            .find(|account| account.id == account_id)
+    }
+
+    pub fn account_mut(&mut self, account_id: &str) -> Option<&mut CodexManagedAccount> {
+        self.accounts
+            .iter_mut()
+            .find(|account| account.id == account_id)
+    }
+
+    pub fn active_account(&self) -> Option<&CodexManagedAccount> {
+        self.active_account_id
+            .as_deref()
+            .and_then(|account_id| self.account(account_id))
+    }
+}
+
+/// Non-secret display metadata for a Garyx-managed Codex (ChatGPT) profile.
+/// The managed `CODEX_HOME` directory is derived from `id`; clients never
+/// provide or persist an arbitrary filesystem path, and credentials stay in
+/// the Codex CLI's own `auth.json` inside that directory.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct CodexManagedAccount {
+    pub id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    /// ChatGPT plan type decoded from the login `id_token`, e.g. `pro`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<String>,
+    /// ChatGPT account UUID decoded from the login tokens; display/debug
+    /// identity only, never used to derive filesystem paths.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chatgpt_account_id: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
 }
 
 /// Non-secret display metadata for a Garyx-managed Claude Code profile.

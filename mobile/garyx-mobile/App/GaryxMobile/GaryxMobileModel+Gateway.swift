@@ -270,6 +270,12 @@ extension GaryxMobileModel {
         isMutatingClaudeCodeAccount = false
         claudeCodeAccountsLoadGeneration = nil
         claudeCodeAccountMutationGeneration = nil
+        codexAccounts = nil
+        isLoadingCodexAccounts = false
+        codexAccountsError = nil
+        isMutatingCodexAccount = false
+        codexAccountsLoadGeneration = nil
+        codexAccountMutationGeneration = nil
         selectedWorkspacePath = ""
         selectedWorkspaceDirectory = ""
         draftWorkspacePath = ""

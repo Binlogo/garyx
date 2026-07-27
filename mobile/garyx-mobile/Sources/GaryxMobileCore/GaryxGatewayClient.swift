@@ -853,6 +853,50 @@ public final class GaryxGatewayClient {
         try await delete("/api/providers/claude_code/auth/\(loginId.urlPathEncoded)")
     }
 
+    public func codexAccounts() async throws -> GaryxCodexAccounts {
+        try await get("/api/providers/codex/accounts")
+    }
+
+    public func selectCodexAccount(
+        accountId: String?
+    ) async throws -> GaryxCodexAccountSelection {
+        try await put(
+            "/api/providers/codex/accounts/active",
+            body: GaryxCodexAccountSelectionRequest(accountId: accountId)
+        )
+    }
+
+    public func renameCodexAccount(accountId: String, name: String) async throws {
+        let _: GaryxJSONValue = try await patch(
+            "/api/providers/codex/accounts/\(accountId.urlPathEncoded)",
+            body: GaryxCodexAccountRenameRequest(name: name)
+        )
+    }
+
+    public func deleteCodexAccount(accountId: String) async throws {
+        let _: GaryxJSONValue = try await delete(
+            "/api/providers/codex/accounts/\(accountId.urlPathEncoded)"
+        )
+    }
+
+    public func startCodexAuth(
+        _ request: GaryxCodexAuthStartRequest = GaryxCodexAuthStartRequest()
+    ) async throws -> GaryxCodexAuthSession {
+        try await post(
+            "/api/providers/codex/auth/start",
+            body: request,
+            timeoutInterval: 35
+        )
+    }
+
+    public func codexAuth(loginId: String) async throws -> GaryxCodexAuthSession {
+        try await get("/api/providers/codex/auth/\(loginId.urlPathEncoded)")
+    }
+
+    public func cancelCodexAuth(loginId: String) async throws -> GaryxCodexAuthSession {
+        try await delete("/api/providers/codex/auth/\(loginId.urlPathEncoded)")
+    }
+
     public func generateAvatar(prompt: String, timeoutSecs: Int = 600) async throws -> GaryxGeneratedAvatar {
         try await post(
             "/api/tools/image",

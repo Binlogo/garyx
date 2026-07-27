@@ -14,6 +14,9 @@ public enum GaryxProviderSettingsPresentation {
         /// Claude Code: login-entry row driving the OAuth sheet (and the
         /// auth-flow reset when the sheet closes).
         case claudeCode
+        /// Codex: login-entry row driving the device-code sheet (and the
+        /// auth-flow reset when the sheet closes).
+        case codex
         /// CLI/OAuth providers: read-only "Managed on the Mac app" row.
         case managedOAuth
         /// Grok Build: read-only ordinary CLI authentication row.
@@ -23,6 +26,9 @@ public enum GaryxProviderSettingsPresentation {
     public static func authSection(for provider: GaryxModelProviderDefault) -> AuthSection {
         if provider.providerType == "claude_code" {
             return .claudeCode
+        }
+        if provider.providerType == "codex_app_server" {
+            return .codex
         }
         if provider.providerType == "grok_build" {
             return .managedCLI

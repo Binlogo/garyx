@@ -325,6 +325,32 @@
   background: var(--color-token-text-primary);
 }
 
+/* Codex device-code login: the one-time code is the primary artifact the
+   user carries to the browser, so it reads as a large monospace token. */
+.provider-device-code {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--color-token-border-secondary);
+  border-radius: 8px;
+}
+
+.provider-device-code-value {
+  color: var(--color-token-text-primary);
+  font-family: var(--message-code-font);
+  font-size: 18px;
+  font-weight: var(--font-weight-medium);
+  letter-spacing: 0.08em;
+  user-select: all;
+}
+
+.provider-device-wait {
+  color: var(--color-token-text-secondary);
+  font-size: 12px;
+}
+
 .provider-auth-link {
   display: block;
   overflow: hidden;

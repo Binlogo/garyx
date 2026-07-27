@@ -21,6 +21,7 @@ use tracing::warn;
 use crate::agent_identity::GatewayThreadCreator;
 use crate::app_state::{AppState, IntegrationState, OpsState, RuntimeState, ThreadState};
 use crate::automation::CronService;
+use crate::codex_provider_auth::CodexAuthSessionStore;
 use crate::composition::runtime_config_projection::RuntimeConfigProjection;
 use crate::conversation_admission::ConversationAdmissionService;
 use crate::custom_agents::CustomAgentStore;
@@ -565,6 +566,7 @@ impl AppStateBuilder {
                 prompt_attachments,
                 meetings,
                 provider_auth_sessions: Arc::new(ClaudeAuthSessionStore::default()),
+                codex_auth_sessions: Arc::new(CodexAuthSessionStore::default()),
                 channel_endpoint_snapshot: Mutex::new(None),
                 endpoint_binding_mutator,
                 lifecycle: lifecycle.clone(),

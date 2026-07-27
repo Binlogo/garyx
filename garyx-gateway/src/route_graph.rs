@@ -6,9 +6,10 @@ use tower_http::limit::RequestBodyLimitLayer;
 
 use crate::server::AppState;
 use crate::{
-    automation, capsules, chat, coding_usage, commands, create_dispatch, dashboard, gateway_auth,
-    mcp, mcp_config, meetings, provider_accounts, provider_auth, push_notifications, quota_resend,
-    restart_wake, routes, tasks, tool_image, workspace_files, workspaces,
+    automation, capsules, chat, codex_provider_accounts, codex_provider_auth, coding_usage,
+    commands, create_dispatch, dashboard, gateway_auth, mcp, mcp_config, meetings,
+    provider_accounts, provider_auth, push_notifications, quota_resend, restart_wake, routes,
+    tasks, tool_image, workspace_files, workspaces,
 };
 
 pub fn build_router(state: Arc<AppState>) -> Router {
@@ -463,6 +464,28 @@ fn operations_routes() -> Router<Arc<AppState>> {
             "/api/providers/claude_code/accounts/{account_id}",
             axum::routing::patch(provider_accounts::rename_claude_code_account)
                 .delete(provider_accounts::delete_claude_code_account),
+        )
+        .route(
+            "/api/providers/codex/auth/start",
+            axum::routing::post(codex_provider_auth::start_codex_auth),
+        )
+        .route(
+            "/api/providers/codex/auth/{login_id}",
+            axum::routing::get(codex_provider_auth::get_codex_auth)
+                .delete(codex_provider_auth::cancel_codex_auth),
+        )
+        .route(
+            "/api/providers/codex/accounts",
+            axum::routing::get(codex_provider_accounts::list_codex_accounts),
+        )
+        .route(
+            "/api/providers/codex/accounts/active",
+            axum::routing::put(codex_provider_accounts::select_codex_account),
+        )
+        .route(
+            "/api/providers/codex/accounts/{account_id}",
+            axum::routing::patch(codex_provider_accounts::rename_codex_account)
+                .delete(codex_provider_accounts::delete_codex_account),
         )
         .route("/api/restart", axum::routing::post(routes::restart))
         .route("/api/send", axum::routing::post(routes::send_message))

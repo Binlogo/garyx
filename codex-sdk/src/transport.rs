@@ -56,6 +56,7 @@ pub struct CodexTransport {
     codex_bin: String,
     extra_args: Vec<String>,
     env: HashMap<String, String>,
+    env_removals: Vec<String>,
     startup_timeout: Duration,
     request_timeout: Duration,
 
@@ -85,6 +86,7 @@ impl CodexTransport {
             codex_bin: codex_bin.to_owned(),
             extra_args: extra_args.iter().map(|s| (*s).to_owned()).collect(),
             env: HashMap::new(),
+            env_removals: Vec::new(),
             startup_timeout: Duration::from_secs(300),
             request_timeout: Duration::from_secs(300),
             child: Mutex::new(None),
@@ -117,6 +119,17 @@ impl CodexTransport {
     /// Override environment variables for the spawned process.
     pub fn with_env(mut self, env: HashMap<String, String>) -> Self {
         self.env = env;
+        self
+    }
+
+    /// Variables to remove from the spawned process environment before the
+    /// `env` overlay applies. `Command::envs` only overlays on top of the
+    /// inherited process environment, so callers that must guarantee a
+    /// variable's absence (e.g. auth overrides that would outrank a managed
+    /// account's `auth.json`) declare it here. An explicit `env` entry for
+    /// the same key still wins.
+    pub fn with_env_removals(mut self, env_removals: Vec<String>) -> Self {
+        self.env_removals = env_removals;
         self
     }
 
@@ -155,6 +168,11 @@ impl CodexTransport {
         let mut cmd = Command::new(&self.codex_bin);
         cmd.args(["app-server", "--listen", "stdio://"]);
         cmd.args(&self.extra_args);
+        // Removals first: they clear inherited variables, while explicit env
+        // entries below still win for keys present in both.
+        for key in &self.env_removals {
+            cmd.env_remove(key);
+        }
         if !self.env.is_empty() {
             cmd.envs(&self.env);
         }
