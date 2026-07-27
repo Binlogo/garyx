@@ -453,7 +453,7 @@ pub async fn delete_codex_account(
     let account_id = require_account_id(&account_id)?;
     let account_dir = validate_owned_account_dir(&state, &account_id).await?;
     let removed_id = account_id.clone();
-    mutate_config(&state, move |config| {
+    let selection_changed = mutate_config(&state, move |config| {
         let accounts = &mut config.provider_accounts.codex;
         let Some(index) = accounts
             .accounts
@@ -465,11 +465,20 @@ pub async fn delete_codex_account(
         accounts.accounts.remove(index);
         if accounts.active_account_id.as_deref() == Some(removed_id.as_str()) {
             accounts.active_account_id = None;
+            return Ok(true);
         }
-        Ok(())
+        Ok(false)
     })
     .await
     .map_err(map_mutate_error)?;
+    if selection_changed {
+        // Deleting the active account is a real selection change to System
+        // default and must run the ordinary switch side effects — including
+        // the provider-keyed quota recovery wake — exactly like a manual
+        // switch. The receiver is dropped: the spawned task owns the effect
+        // lifetime beyond this request.
+        let _ = spawn_codex_account_switch_effects(state.clone());
+    }
 
     coding_usage::invalidate_codex_usage_cache(&account_id);
     // `remove_dir_all` removes the shared-resource symlinks themselves, never
@@ -1033,6 +1042,113 @@ mod tests {
                 due_at: "2099-01-01T00:01:00Z",
             })
             .unwrap();
+    }
+
+    /// Finding from review #TASK-2763: deleting the active account resets
+    /// the selection to System default — a real selection change that must
+    /// run the ordinary switch side effects, waking quota-paused threads.
+    #[tokio::test]
+    async fn deleting_the_active_account_wakes_quota_recovery() {
+        let temp = tempdir().unwrap();
+        let (state, id, account_dir) = managed_account_state(temp.path());
+        insert_waiting_codex_recovery(&state, "thread::codex-delete-active");
+
+        let Json(response) =
+            delete_codex_account(State(state.clone()), AxumPath(id.clone()))
+                .await
+                .unwrap();
+        assert_eq!(response["deleted_account_id"], id.as_str());
+        assert!(!account_dir.exists());
+        assert_eq!(
+            state
+                .config_snapshot()
+                .provider_accounts
+                .codex
+                .active_account_id,
+            None
+        );
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if state
+                    .ops
+                    .garyx_db
+                    .active_quota_recovery_job("thread::codex-delete-active")
+                    .unwrap()
+                    .is_some_and(|job| {
+                        job.wake_reason == crate::garyx_db::QuotaRecoveryWakeReason::AccountSwitch
+                    })
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("deleting the active account should wake waiting recoveries");
+    }
+
+    /// Deleting a non-active account is not a selection change and must not
+    /// wake anything. The fixture keeps the selection on a second managed
+    /// account throughout, so no switch effect ever runs.
+    #[tokio::test]
+    async fn deleting_an_inactive_account_does_not_wake_quota_recovery() {
+        let temp = tempdir().unwrap();
+        let (state, active_id, _) = managed_account_state(temp.path());
+        // Reserve a second, non-active managed account to delete.
+        let inactive_id = Uuid::new_v4().to_string();
+        let config_path = temp.path().join("config.json");
+        let inactive_dir = managed_account_dir(Some(&config_path), &inactive_id);
+        std::fs::create_dir_all(&inactive_dir).unwrap();
+        std::fs::write(inactive_dir.join(OWNERSHIP_MARKER), &inactive_id).unwrap();
+        {
+            let inactive_for_config = inactive_id.clone();
+            mutate_config(&state, move |config| {
+                config
+                    .provider_accounts
+                    .codex
+                    .accounts
+                    .push(CodexManagedAccount {
+                        id: inactive_for_config.clone(),
+                        name: "Spare".to_owned(),
+                        email: None,
+                        plan: None,
+                        chatgpt_account_id: None,
+                        created_at: Utc::now().to_rfc3339(),
+                        updated_at: Utc::now().to_rfc3339(),
+                    });
+                Ok::<_, AccountsApiError>(())
+            })
+            .await
+            .map_err(map_mutate_error)
+            .unwrap();
+        }
+        insert_waiting_codex_recovery(&state, "thread::codex-delete-inactive");
+
+        let Json(_) = delete_codex_account(State(state.clone()), AxumPath(inactive_id))
+            .await
+            .unwrap();
+        tokio::task::yield_now().await;
+        assert_eq!(
+            state
+                .config_snapshot()
+                .provider_accounts
+                .codex
+                .active_account_id
+                .as_deref(),
+            Some(active_id.as_str()),
+            "the active selection must be untouched"
+        );
+        let job = state
+            .ops
+            .garyx_db
+            .active_quota_recovery_job("thread::codex-delete-inactive")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            job.wake_reason,
+            crate::garyx_db::QuotaRecoveryWakeReason::QuotaReset
+        );
     }
 
     #[test]

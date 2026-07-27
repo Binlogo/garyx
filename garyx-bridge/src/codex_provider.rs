@@ -768,11 +768,12 @@ fn normalize_codex_mcp_servers(metadata: &HashMap<String, Value>) -> Option<Valu
     (!normalized.is_empty()).then_some(Value::Object(normalized))
 }
 
-/// Environment variables that outrank `auth.json` inside the Codex CLI. A
-/// managed account selection must strip them or the selection would be a
-/// silent no-op; System default leaves them untouched for API-key workflows.
-const CODEX_AUTH_ENV_OVERRIDES: &[&str] =
-    &["OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_ACCESS_TOKEN"];
+/// Environment variables that outrank `auth.json` inside the Codex CLI.
+/// Canonical list lives in `garyx-models` so every managed-account spawn site
+/// (bridge app-server, gateway usage probe, device-code login) strips the
+/// same set — from the overlay map here, and from the inherited process env
+/// at the SDK spawn boundary via `CodexClientConfig::env_removals`.
+const CODEX_AUTH_ENV_OVERRIDES: &[&str] = garyx_models::provider::CODEX_AUTH_ENV_OVERRIDES;
 
 fn resolve_runtime_codex_env(
     launch_env: &HashMap<String, String>,
@@ -1553,6 +1554,19 @@ impl CodexAgentProvider {
             None
         };
 
+        // A managed account selection is exactly "the effective env carries a
+        // bridge-inserted CODEX_HOME" (resolve_runtime_codex_env). Removing
+        // the auth overrides from the overlay map is not enough — the spawned
+        // app-server inherits the Gateway's own process environment, so the
+        // guarantee must be enforced at the spawn boundary too.
+        let env_removals = if env.contains_key("CODEX_HOME") {
+            CODEX_AUTH_ENV_OVERRIDES
+                .iter()
+                .map(|key| (*key).to_owned())
+                .collect()
+        } else {
+            Vec::new()
+        };
         CodexClientConfig {
             codex_bin,
             workspace_dir: self.config.workspace_dir.clone(),
@@ -1563,6 +1577,7 @@ impl CodexAgentProvider {
             request_timeout: Duration::from_secs_f64(self.config.request_timeout_seconds),
             startup_timeout: Duration::from_secs_f64(self.config.startup_timeout_seconds),
             env,
+            env_removals,
             ..CodexClientConfig::default()
         }
     }

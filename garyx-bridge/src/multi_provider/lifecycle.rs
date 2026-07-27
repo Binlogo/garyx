@@ -366,8 +366,8 @@ impl MultiProviderBridge {
             // otherwise silently outrank the managed home's auth.json.
             effective_agent_cfg.env.remove("CODEX_HOME");
             if let Some(codex_home) = self.inner.codex_home.read().await.clone() {
-                for key in ["OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_ACCESS_TOKEN"] {
-                    effective_agent_cfg.env.remove(key);
+                for key in garyx_models::provider::CODEX_AUTH_ENV_OVERRIDES {
+                    effective_agent_cfg.env.remove(*key);
                 }
                 effective_agent_cfg
                     .env

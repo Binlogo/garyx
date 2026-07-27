@@ -95,6 +95,7 @@ impl CodexAuthSession {
                 identity: None,
                 error: None,
                 exit_code: None,
+                finalizing: false,
             }),
             cancellation: CancellationToken::new(),
         }
@@ -114,7 +115,7 @@ impl CodexAuthSession {
 
     async fn cancel(&self) -> CodexAuthLoginResponse {
         self.update(|state| {
-            if !state.status.is_terminal() {
+            if !state.status.is_terminal() && !state.finalizing {
                 state.status = CodexAuthLoginStatus::Failed;
                 state.error = Some("Codex sign-in was cancelled.".to_owned());
             }
@@ -122,6 +123,19 @@ impl CodexAuthSession {
         .await;
         self.cancellation.cancel();
         self.snapshot().await
+    }
+
+    /// Atomically claim the right to commit this login's account. Returns
+    /// false when the session already reached a terminal state (e.g. a cancel
+    /// won the race); the caller must then treat the login as failed and
+    /// clean up the reserved target instead of committing it.
+    async fn try_claim_finalize(&self) -> bool {
+        let mut state = self.state.lock().await;
+        if state.status.is_terminal() {
+            return false;
+        }
+        state.finalizing = true;
+        true
     }
 }
 
@@ -133,6 +147,11 @@ struct CodexAuthSessionState {
     identity: Option<Value>,
     error: Option<String>,
     exit_code: Option<i32>,
+    /// Claimed under the state lock by `finalize_success` just before the
+    /// account commit. A cancel that arrives after the claim is too late and
+    /// must not flip the session to Failed — the commit is going to land, and
+    /// a "cancelled" response over a committed account would strand it.
+    finalizing: bool,
 }
 
 impl CodexAuthSessionState {
@@ -209,6 +228,18 @@ pub async fn start_codex_auth(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    if target.codex_home.is_some() {
+        // A managed login must produce the managed home's auth.json;
+        // inherited auth overrides would outrank it inside the CLI.
+        for key in garyx_models::provider::CODEX_AUTH_ENV_OVERRIDES {
+            command.env_remove(key);
+        }
+    }
+    // The PATH entry is typically a Node launcher that re-execs the real
+    // codex binary. Give the login its own process group so cancellation can
+    // terminate the whole tree instead of orphaning the poller.
+    #[cfg(unix)]
+    command.process_group(0);
     let child = match command.spawn() {
         Ok(child) => child,
         Err(error) => {
@@ -402,9 +433,19 @@ async fn finalize_success(
     app_state: &Arc<AppState>,
     exit_code: Option<i32>,
 ) {
+    // The CLI exiting 0 races DELETE: a cancel that already marked the
+    // session terminal must win, and its reserved target must not be
+    // committed. Claiming under the state lock makes the decision atomic —
+    // after the claim a late cancel is a no-op instead.
+    if !session.try_claim_finalize().await {
+        codex_provider_accounts::cleanup_failed_codex_auth_target(app_state, &session.target)
+            .await;
+        return;
+    }
     let Some(auth_json_path) = session.target.auth_json_path(app_state) else {
         session
             .update(|state| {
+                state.finalizing = false;
                 state.exit_code = exit_code;
                 state.status = CodexAuthLoginStatus::Failed;
                 state.error = Some("Could not resolve the Codex home directory.".to_owned());
@@ -420,6 +461,7 @@ async fn finalize_success(
         Err(error) => {
             session
                 .update(|state| {
+                    state.finalizing = false;
                     state.exit_code = exit_code;
                     state.status = CodexAuthLoginStatus::Failed;
                     state.error = Some(error);
@@ -433,6 +475,7 @@ async fn finalize_success(
             .await;
     session
         .update(|state| {
+            state.finalizing = false;
             state.exit_code = exit_code;
             match completion {
                 Ok(()) => {
@@ -491,6 +534,17 @@ async fn handle_output_line(
 }
 
 async fn terminate_child(session: &Arc<CodexAuthSession>, child: &mut tokio::process::Child) {
+    // Kill the whole process group (the child is its own group leader, see
+    // spawn): killing only the direct child leaves the launcher's re-exec'd
+    // codex poller orphaned and polling forever.
+    #[cfg(unix)]
+    if let Some(pid) = child.id() {
+        let killed = unsafe { libc::killpg(pid as libc::pid_t, libc::SIGKILL) };
+        if killed != 0 {
+            let error = std::io::Error::last_os_error();
+            tracing::debug!(login_id = %session.login_id, %error, "codex login process group already gone");
+        }
+    }
     if let Err(error) = child.start_kill() {
         tracing::debug!(login_id = %session.login_id, error = %error, "codex login child already finished");
     }
@@ -686,6 +740,18 @@ if args != ["login", "--device-auth"]:
     sys.exit(2)
 
 Path(__file__).with_name("login.pid").write_text(str(os.getpid()), encoding="utf-8")
+
+# Stand-in for the Node launcher's re-exec'd codex poller: a grandchild that
+# only dies with the process group. Normal exits reap it explicitly so only
+# a SIGKILL'd waiting loop leaves it for killpg.
+import subprocess
+grandchild = subprocess.Popen(["sleep", "300"])
+Path(__file__).with_name("grandchild.pid").write_text(str(grandchild.pid), encoding="utf-8")
+
+def finish(code):
+    grandchild.kill()
+    sys.exit(code)
+
 print("Welcome to Codex [v\x1b[90m0.144.0\x1b[0m]", flush=True)
 print("1. Open this link in your browser and sign in to your account", flush=True)
 print("   \x1b[94mhttps://auth.openai.com/codex/device\x1b[0m", flush=True)
@@ -701,7 +767,7 @@ authorized = Path(__file__).with_name("authorized")
 authorized_empty = Path(__file__).with_name("authorized-empty")
 for _ in range(1500):
     if authorized_empty.exists():
-        sys.exit(0)
+        finish(0)
     if authorized.exists():
         payload = {
             "email": "user@example.com",
@@ -721,9 +787,9 @@ for _ in range(1500):
                 "account_id": "00000000-0000-4000-8000-000000000001",
             },
         }), encoding="utf-8")
-        sys.exit(0)
+        finish(0)
     time.sleep(0.02)
-sys.exit(3)
+finish(3)
 "#,
         )
         .unwrap();
@@ -936,6 +1002,14 @@ sys.exit(3)
                 .is_empty()
         );
         assert_child_reaped(login_pid).await;
+        // The launcher's re-exec'd poller dies with the process group; a
+        // direct-child-only kill would orphan it polling for 15 minutes.
+        let grandchild_pid = fs::read_to_string(dir.path().join("grandchild.pid"))
+            .unwrap()
+            .trim()
+            .parse::<libc::pid_t>()
+            .unwrap();
+        assert_process_gone(grandchild_pid).await;
 
         let status_response = router
             .oneshot(
@@ -948,6 +1022,133 @@ sys.exit(3)
             .await
             .unwrap();
         assert_eq!(status_response.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// Write the credentials the fake CLI would have produced, directly in
+    /// Rust: a ChatGPT auth.json whose id_token payload decodes to a plan and
+    /// account id.
+    fn write_valid_auth_json(home: &Path) {
+        use base64::Engine as _;
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let payload = serde_json::json!({
+            "email": "user@example.com",
+            "https://api.openai.com/auth": {
+                "chatgpt_plan_type": "pro",
+                "chatgpt_account_id": "00000000-0000-4000-8000-000000000001",
+            },
+        });
+        let jwt = format!(
+            "{}.{}.sig",
+            URL_SAFE_NO_PAD.encode(b"{\"alg\":\"none\"}"),
+            URL_SAFE_NO_PAD.encode(payload.to_string().as_bytes()),
+        );
+        fs::create_dir_all(home).unwrap();
+        fs::write(
+            home.join("auth.json"),
+            serde_json::json!({
+                "auth_mode": "chatgpt",
+                "tokens": {
+                    "id_token": jwt,
+                    "access_token": "at",
+                    "refresh_token": "rt",
+                    "account_id": "00000000-0000-4000-8000-000000000001",
+                },
+            })
+            .to_string(),
+        )
+        .unwrap();
+    }
+
+    /// Finding from review #TASK-2763: a DELETE that lands before the commit
+    /// claim must win — the CLI may already have exited 0 with a valid
+    /// auth.json, and finalize must still refuse to commit the reserved
+    /// account and must clean it up.
+    #[tokio::test]
+    async fn cancelled_session_never_commits_even_when_the_cli_succeeded() {
+        let dir = tempdir().unwrap();
+        let config = crate::test_support::with_gateway_auth(GaryxConfig::default());
+        let state = crate::server::AppStateBuilder::new(config)
+            .with_config_path(dir.path().join("config.yaml"))
+            .build();
+        let target = codex_provider_accounts::prepare_codex_auth_target(
+            &state,
+            Some("Cancelled"),
+            None,
+        )
+        .await
+        .unwrap();
+        let home = target.codex_home.clone().expect("managed home reserved");
+        write_valid_auth_json(&home);
+        let session = Arc::new(CodexAuthSession::new("login-toctou".to_owned(), target));
+
+        // DELETE landed first...
+        let cancelled = session.cancel().await;
+        assert_eq!(cancelled.status, CodexAuthLoginStatus::Failed);
+
+        // ...then the already-successful child exit reached finalize.
+        finalize_success(&session, &state, Some(0)).await;
+
+        assert_eq!(
+            session.snapshot().await.status,
+            CodexAuthLoginStatus::Failed,
+            "a cancelled session must not flip to Succeeded"
+        );
+        assert!(
+            state
+                .config_snapshot()
+                .provider_accounts
+                .codex
+                .accounts
+                .is_empty(),
+            "a cancelled session must not commit its reserved account"
+        );
+        assert!(!home.exists(), "the reserved profile must be cleaned up");
+    }
+
+    /// The inverse ordering: once finalize claimed the commit, a racing
+    /// cancel is too late and must not flip the session while the account
+    /// commit lands.
+    #[tokio::test]
+    async fn cancel_after_the_finalize_claim_is_a_no_op() {
+        let dir = tempdir().unwrap();
+        let config = crate::test_support::with_gateway_auth(GaryxConfig::default());
+        let state = crate::server::AppStateBuilder::new(config)
+            .with_config_path(dir.path().join("config.yaml"))
+            .build();
+        let target = codex_provider_accounts::prepare_codex_auth_target(
+            &state,
+            Some("Committed"),
+            None,
+        )
+        .await
+        .unwrap();
+        let home = target.codex_home.clone().expect("managed home reserved");
+        let account_id = target.account_id.clone().expect("reserved account id");
+        write_valid_auth_json(&home);
+        let session = Arc::new(CodexAuthSession::new("login-claimed".to_owned(), target));
+
+        assert!(session.try_claim_finalize().await);
+        let raced = session.cancel().await;
+        assert_ne!(
+            raced.status,
+            CodexAuthLoginStatus::Failed,
+            "cancel after the claim must not mark the session failed"
+        );
+
+        finalize_success(&session, &state, Some(0)).await;
+        assert_eq!(
+            session.snapshot().await.status,
+            CodexAuthLoginStatus::Succeeded
+        );
+        assert!(
+            state
+                .config_snapshot()
+                .provider_accounts
+                .codex
+                .account(&account_id)
+                .is_some(),
+            "the claimed commit must land"
+        );
     }
 
     #[tokio::test]
@@ -1043,6 +1244,26 @@ sys.exit(3)
             "",
         ] {
             assert_eq!(extract_user_code(&strip_ansi(line)), None, "{line:?}");
+        }
+    }
+
+    /// Assert a non-direct descendant (the fake launcher's grandchild) is
+    /// gone. It is reparented on its parent's death, so only liveness can be
+    /// probed — there is nothing to reap here.
+    async fn assert_process_gone(pid: libc::pid_t) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let result = unsafe { libc::kill(pid, 0) };
+            if result != 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+                return;
+            }
+            if Instant::now() >= deadline {
+                unsafe {
+                    libc::kill(pid, libc::SIGKILL);
+                }
+                panic!("process {pid} survived the process-group kill");
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
         }
     }
 

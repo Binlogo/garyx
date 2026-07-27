@@ -40,6 +40,9 @@ pub struct CodexClientConfig {
     pub max_overload_retries: u32,
     /// Extra environment variables for the app-server subprocess.
     pub env: HashMap<String, String>,
+    /// Variables removed from the subprocess environment before `env`
+    /// applies; guarantees inherited process env cannot leak them in.
+    pub env_removals: Vec<String>,
 }
 
 impl Default for CodexClientConfig {
@@ -55,6 +58,7 @@ impl Default for CodexClientConfig {
             startup_timeout: Duration::from_secs(300),
             max_overload_retries: 4,
             env: HashMap::new(),
+            env_removals: Vec::new(),
         }
     }
 }
@@ -77,6 +81,7 @@ impl CodexClient {
     pub fn new(config: CodexClientConfig) -> Self {
         let transport = CodexTransport::new(&config.codex_bin, &[])
             .with_env(config.env.clone())
+            .with_env_removals(config.env_removals.clone())
             .with_startup_timeout(config.startup_timeout)
             .with_request_timeout(config.request_timeout);
 

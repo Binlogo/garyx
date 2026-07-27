@@ -108,8 +108,17 @@ and re-asserted (repair-if-missing) whenever the Gateway applies a selection:
 
 Repair never destroys data: a missing entry is re-linked; an entry that has
 become a real file/directory (e.g. Codex atomically rewrote `config.toml`
-through the symlink) is left in place and logged as drift. Symlink targets
-that don't exist yet in `~/.codex` are skipped until they appear.
+through the symlink) is left in place and logged as drift. Missing targets in
+`~/.codex` are handled by kind, and the link is always created — deferring it
+would let Codex materialize a real local file/directory in the managed home,
+a permanent drift the non-destructive repair could never heal:
+
+- Missing shared *directories* (`sessions`, `skills`, …) are created in the
+  system home first, so Codex can write through the link immediately (a
+  dangling directory symlink would break rollout writes).
+- Missing shared *files* (`config.toml`, `mcp.json`) get a dangling symlink,
+  which Codex treats as a missing file; it lights up the moment the user
+  creates the target in the system home.
 
 If Codex is ever configured with `auth_credentials_store_mode = keyring`, the
 file contract breaks; login commit requires `auth.json` to exist in the
@@ -132,6 +141,9 @@ All routes use the existing Gateway authentication.
 - `DELETE /api/providers/codex/accounts/{account_id}` — managed only; config
   state is removed first (active selection resets to System default), then the
   usage cache entry is invalidated and the verified owned directory removed.
+  When the deleted account was the active selection, that reset is a real
+  selection change and runs the ordinary switch side effects, including the
+  provider-keyed quota recovery wake.
   Codex has no Keychain item to clean.
 
 ### Login (device-code)
@@ -165,10 +177,14 @@ waits up to 30s for them and returns
 `{ login_id, account_id?, status, url, user_code }`. The overall session times
 out at 15 minutes (device-code lifetime). Only exit code 0 with a readable
 `auth.json` in the target home finalizes; identity is then decoded from the
-`id_token` and committed inside `mutate_config`. Adding an account never
-changes the active selection. Cancel (DELETE) and every terminal failure kill
-the child and clean an uncommitted reserved directory after ownership
-validation.
+`id_token` and committed inside `mutate_config`, and the commit is claimed
+atomically against cancellation — a cancel that lands first aborts the commit
+and cleans the reserved directory, a cancel that lands after the claim is a
+no-op on a login that has already succeeded. Adding an account never changes
+the active selection. Cancel (DELETE) and every terminal failure kill the
+login's whole process group (the PATH entry is typically a Node launcher that
+re-execs the real `codex` binary, which must not be orphaned mid-poll) and
+clean an uncommitted reserved directory after ownership validation.
 
 Login resolves the same default `codex` binary the bridge uses; per-agent
 `codex_bin` overrides do not affect provider-level account login.
@@ -190,7 +206,13 @@ Login resolves the same default `codex` binary the bridge uses; per-agent
   variables `OPENAI_API_KEY`, `CODEX_API_KEY`, and `CODEX_ACCESS_TOKEN` are
   also stripped from the Codex process env — otherwise they silently outrank
   `auth.json` and make the selection a no-op. System default leaves the env
-  untouched, preserving today's API-key workflows.
+  untouched, preserving today's API-key workflows. The strip is enforced at
+  every spawn boundary, not just in the overlay map — spawned processes
+  inherit the Gateway's own environment, so app-server runs
+  (`CodexClientConfig::env_removals` → `Command::env_remove`), managed usage
+  probes, and managed device-code logins each explicitly remove the
+  overrides. The canonical list is
+  `garyx_models::provider::CODEX_AUTH_ENV_OVERRIDES`.
 - The Codex provider implements `update_launch_environment` (currently the
   no-op trait default): launch env moves from frozen construction state into
   hot-applied provider state, mirroring the Claude provider.

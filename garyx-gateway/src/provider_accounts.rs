@@ -367,7 +367,7 @@ pub async fn delete_claude_code_account(
     let account_id = require_account_id(&account_id)?;
     let account_dir = validate_owned_account_dir(&state, &account_id).await?;
     let removed_id = account_id.clone();
-    mutate_config(&state, move |config| {
+    let selection_changed = mutate_config(&state, move |config| {
         let accounts = &mut config.provider_accounts.claude_code;
         let Some(index) = accounts
             .accounts
@@ -379,11 +379,20 @@ pub async fn delete_claude_code_account(
         accounts.accounts.remove(index);
         if accounts.active_account_id.as_deref() == Some(removed_id.as_str()) {
             accounts.active_account_id = None;
+            return Ok(true);
         }
-        Ok(())
+        Ok(false)
     })
     .await
     .map_err(map_mutate_error)?;
+    if selection_changed {
+        // Deleting the active account is a real selection change to System
+        // default and must run the ordinary switch side effects — session
+        // reconcile plus the provider-keyed quota recovery wake — exactly
+        // like a manual switch. The receiver is dropped: the spawned task
+        // owns the effect lifetime beyond this request.
+        let _ = spawn_claude_account_switch_effects(state.clone());
+    }
 
     if let Err(error) = crate::claude_oauth::delete_scoped_oauth_keychain(&account_dir).await {
         tracing::warn!(
@@ -912,6 +921,50 @@ mod tests {
             )
             .await
             .unwrap();
+    }
+
+    /// Symmetric fix alongside review #TASK-2763 finding 4 (Codex):
+    /// deleting the active Claude account resets the selection to System
+    /// default and must run the ordinary switch side effects.
+    #[tokio::test]
+    async fn deleting_the_active_claude_account_wakes_quota_recovery() {
+        let temp = tempdir().unwrap();
+        let (state, id, account_dir) = managed_account_state(temp.path());
+        insert_waiting_recovery(&state, "thread::claude-delete-active");
+
+        let Json(response) =
+            delete_claude_code_account(State(state.clone()), AxumPath(id.clone()))
+                .await
+                .unwrap();
+        assert_eq!(response["deleted_account_id"], id.as_str());
+        assert!(!account_dir.exists());
+        assert_eq!(
+            state
+                .config_snapshot()
+                .provider_accounts
+                .claude_code
+                .active_account_id,
+            None
+        );
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if state
+                    .ops
+                    .garyx_db
+                    .active_quota_recovery_job("thread::claude-delete-active")
+                    .unwrap()
+                    .is_some_and(|job| {
+                        job.wake_reason == crate::garyx_db::QuotaRecoveryWakeReason::AccountSwitch
+                    })
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("deleting the active account should wake waiting recoveries");
     }
 
     #[test]

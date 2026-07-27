@@ -2558,3 +2558,29 @@ fn test_normalize_codex_mcp_servers_canonicalizes_cwd() {
         .into_owned();
     assert_eq!(cwd, expected);
 }
+
+#[test]
+fn client_config_strips_inherited_auth_env_only_for_managed_homes() {
+    let provider = CodexAgentProvider::new(CodexAppServerConfig::default());
+
+    // Managed selection: the effective env carries a bridge-inserted
+    // CODEX_HOME, so the spawn boundary must remove the inherited auth
+    // overrides that would outrank the managed home's auth.json.
+    let managed_env = HashMap::from([(
+        "CODEX_HOME".to_owned(),
+        "/Users/test/.garyx/provider-accounts/codex/abc".to_owned(),
+    )]);
+    let config = provider.build_client_config(managed_env);
+    let mut expected: Vec<String> = CODEX_AUTH_ENV_OVERRIDES
+        .iter()
+        .map(|key| (*key).to_owned())
+        .collect();
+    expected.sort();
+    let mut actual = config.env_removals.clone();
+    actual.sort();
+    assert_eq!(actual, expected);
+
+    // System default: the env is left untouched for API-key workflows.
+    let config = provider.build_client_config(HashMap::new());
+    assert!(config.env_removals.is_empty());
+}

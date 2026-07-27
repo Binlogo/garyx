@@ -600,3 +600,37 @@ fn build_command_without_env_leaves_command_env_untouched() {
     let cmd = transport.build_command();
     assert_eq!(cmd.as_std().get_envs().count(), 0);
 }
+
+#[test]
+fn build_command_env_removals_clear_inherited_variables() {
+    // `Command::envs` only overlays on top of the inherited process env, so a
+    // caller that must guarantee absence (managed-account auth overrides)
+    // declares removals. On the std Command they appear as `None` entries.
+    let transport = CodexTransport::new("codex", &[])
+        .with_env_removals(vec!["OPENAI_API_KEY".to_owned(), "CODEX_API_KEY".to_owned()]);
+    let cmd = transport.build_command();
+    let std_cmd = cmd.as_std();
+    for key in ["OPENAI_API_KEY", "CODEX_API_KEY"] {
+        assert!(
+            std_cmd
+                .get_envs()
+                .any(|(name, value)| name == std::ffi::OsStr::new(key) && value.is_none()),
+            "{key} must be an explicit removal on the spawn Command"
+        );
+    }
+
+    // An explicit env entry for the same key still wins over its removal.
+    let mut env = HashMap::new();
+    env.insert("OPENAI_API_KEY".to_owned(), "explicit".to_owned());
+    let transport = CodexTransport::new("codex", &[])
+        .with_env(env)
+        .with_env_removals(vec!["OPENAI_API_KEY".to_owned()]);
+    let cmd = transport.build_command();
+    assert!(
+        cmd.as_std().get_envs().any(|(name, value)| {
+            name == std::ffi::OsStr::new("OPENAI_API_KEY")
+                && value == Some(std::ffi::OsStr::new("explicit"))
+        }),
+        "explicit env must override the removal"
+    );
+}

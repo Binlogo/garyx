@@ -748,16 +748,20 @@ async fn fetch_codex_usage_for_home(home: Option<&Path>) -> Result<ProviderUsage
             UsageFetchError::new(USAGE_ERROR_CREDENTIALS, "Codex home directory is unset")
         })?,
     };
+    // A managed home must read as the home's own auth.json identity: strip
+    // the inherited auth overrides from the probe process. The system default
+    // keeps them — its identity is whatever the ambient environment says.
+    let managed_home = home.is_some();
     let auth = read_codex_chatgpt_auth_at(&home_dir)
         .map_err(|error| UsageFetchError::new(USAGE_ERROR_CREDENTIALS, error))?;
     if !codex_access_token_locally_valid(&auth.access_token, Utc::now().timestamp()) {
-        return fetch_codex_usage_via_app_server(&home_dir).await;
+        return fetch_codex_usage_via_app_server(&home_dir, managed_home).await;
     }
     match request_codex_usage(&auth).await {
         Ok(value) => parse_codex_usage(&value)
             .map_err(|error| UsageFetchError::new(USAGE_ERROR_INVALID_RESPONSE, error)),
         Err(error) if error.code == USAGE_ERROR_REAUTH_REQUIRED => {
-            fetch_codex_usage_via_app_server(&home_dir).await
+            fetch_codex_usage_via_app_server(&home_dir, managed_home).await
         }
         Err(error) => Err(error),
     }
@@ -838,7 +842,10 @@ fn codex_access_token_locally_valid(access_token: &str, now_epoch_seconds: i64) 
 /// Read rate limits through a short-lived `codex app-server` in the given
 /// home. Codex owns the token refresh (and persists any rotated refresh token
 /// into that home's `auth.json`) as a side effect of serving the request.
-async fn fetch_codex_usage_via_app_server(home: &Path) -> Result<ProviderUsage, UsageFetchError> {
+async fn fetch_codex_usage_via_app_server(
+    home: &Path,
+    managed_home: bool,
+) -> Result<ProviderUsage, UsageFetchError> {
     #[cfg(test)]
     if std::env::var_os("GARYX_ALLOW_REAL_APP_SERVER_USAGE_FETCH").is_none() {
         return Err(UsageFetchError::new(
@@ -854,12 +861,21 @@ async fn fetch_codex_usage_via_app_server(home: &Path) -> Result<ProviderUsage, 
     use std::process::Stdio;
     use tokio::io::{AsyncBufReadExt as _, BufReader};
 
-    let mut child = tokio::process::Command::new("codex")
+    let mut command = tokio::process::Command::new("codex");
+    command
         .args(["app-server", "--listen", "stdio://"])
         .env("CODEX_HOME", home)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::null());
+    if managed_home {
+        // Inherited auth overrides would outrank the managed home's
+        // auth.json and report some other account's quota.
+        for key in garyx_models::provider::CODEX_AUTH_ENV_OVERRIDES {
+            command.env_remove(key);
+        }
+    }
+    let mut child = command
         .spawn()
         .map_err(|error| {
             UsageFetchError::new(
