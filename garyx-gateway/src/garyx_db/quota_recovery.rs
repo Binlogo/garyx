@@ -442,7 +442,9 @@ impl GaryxDbService {
         .map_err(Into::into)
     }
 
-    #[cfg(test)]
+    /// Point read of one recovery job. Shared by tests and quota
+    /// auto-switch's post-queue re-validation (a queued evaluation must
+    /// confirm its generation is still the active waiting row before acting).
     pub(crate) fn quota_recovery_job(
         &self,
         job_id: &str,
@@ -493,6 +495,34 @@ impl GaryxDbService {
             expedited_threads: changed,
             already_claimed_threads: usize::try_from(claimed).unwrap_or(usize::MAX),
         })
+    }
+
+    /// Make one exact waiting generation due now. Unlike the thread-wide
+    /// manual expedite, this refuses to touch a successor generation: a stale
+    /// auto-switch straggler wake must never accelerate a newer blocked run
+    /// it knows nothing about.
+    pub(crate) fn expedite_quota_recovery_generation(
+        &self,
+        thread_id: &str,
+        blocked_run_id: &str,
+        due_at: &str,
+        wake_reason: QuotaRecoveryWakeReason,
+    ) -> GaryxDbResult<bool> {
+        let thread_id = normalize_thread_id(thread_id)?;
+        let blocked_run_id = normalize_required("blocked_run_id", blocked_run_id)?;
+        let due_at = normalize_required("due_at", due_at)?;
+        let now = now_string();
+        let mut conn = self.conn()?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let changed = tx.execute(
+            "UPDATE quota_recovery_jobs
+                SET due_at = ?3, wake_reason = ?5, last_error = NULL,
+                    updated_at = ?4
+              WHERE thread_id = ?1 AND blocked_run_id = ?2 AND state = 'waiting'",
+            params![thread_id, blocked_run_id, due_at, now, wake_reason.as_str()],
+        )? > 0;
+        tx.commit()?;
+        Ok(changed)
     }
 
     pub(crate) fn expedite_quota_recovery_thread(
@@ -769,6 +799,60 @@ mod tests {
         );
     }
 
+    /// Review #TASK-2781 finding 3: a stale straggler wake must only touch
+    /// its own generation. When a newer blocked run superseded it, the wake
+    /// matches nothing — the successor keeps its own schedule.
+    #[test]
+    fn generation_expedite_refuses_a_successor_generation() {
+        let db = db();
+        insert(&db, "run::gen1", "2099-01-01T00:00:00Z");
+        // A newer generation supersedes gen1 and becomes the waiting row.
+        db.register_quota_recovery_job(NewQuotaRecoveryJob {
+            thread_id: "thread::quota",
+            provider: "claude_code",
+            blocked_run_id: "run::gen2",
+            blocked_seq: 9,
+            quota_window: None,
+            reset_at: None,
+            due_at: "2099-01-02T00:00:00Z",
+        })
+        .unwrap();
+
+        // The stale gen1 wake matches nothing.
+        assert!(
+            !db.expedite_quota_recovery_generation(
+                "thread::quota",
+                "run::gen1",
+                "2026-07-23T00:00:05Z",
+                QuotaRecoveryWakeReason::AccountSwitch,
+            )
+            .unwrap()
+        );
+        let job = db
+            .active_quota_recovery_job("thread::quota")
+            .unwrap()
+            .unwrap();
+        assert_eq!(job.blocked_run_id, "run::gen2");
+        assert_eq!(job.wake_reason, QuotaRecoveryWakeReason::QuotaReset);
+        assert_eq!(job.due_at, "2099-01-02T00:00:00Z");
+
+        // The current generation is woken when addressed exactly.
+        assert!(
+            db.expedite_quota_recovery_generation(
+                "thread::quota",
+                "run::gen2",
+                "2026-07-23T00:00:06Z",
+                QuotaRecoveryWakeReason::AccountSwitch,
+            )
+            .unwrap()
+        );
+        let job = db
+            .active_quota_recovery_job("thread::quota")
+            .unwrap()
+            .unwrap();
+        assert_eq!(job.wake_reason, QuotaRecoveryWakeReason::AccountSwitch);
+    }
+
     #[test]
     fn thread_expedite_records_the_requested_wake_reason() {
         let db = db();
@@ -812,7 +896,7 @@ mod tests {
                 "2026-07-23T00:00:02Z",
                 QuotaRecoveryWakeReason::Manual,
             )
-                .unwrap(),
+            .unwrap(),
             "a repeated manual retry should accept an already claimed generation"
         );
         assert!(
@@ -878,7 +962,7 @@ mod tests {
                 "2026-07-23T00:00:00.000Z",
                 QuotaRecoveryWakeReason::Manual,
             )
-                .unwrap()
+            .unwrap()
         );
         assert_eq!(
             db.next_quota_recovery_due_at().unwrap().as_deref(),

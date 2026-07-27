@@ -277,20 +277,24 @@ async fn register_plan(state: &Arc<AppState>, plan: RecoveryPlan) -> Option<Quot
 /// Only the event projection calls this — manual retry and startup reconcile
 /// re-register historical generations without an auto-switch trigger.
 async fn register_plan_with_auto_switch(state: &Arc<AppState>, plan: RecoveryPlan) {
-    let context = crate::quota_auto_switch::AccountProvider::from_canonical(&plan.provider).map(
-        |provider| crate::quota_auto_switch::QuotaBlockContext {
-            thread_id: plan.thread_id.clone(),
-            provider,
-            account_dir: plan.account_dir.clone(),
-            model: plan.model.clone(),
-        },
-    );
+    let provider = crate::quota_auto_switch::AccountProvider::from_canonical(&plan.provider);
+    let thread_id = plan.thread_id.clone();
     let run_id = plan.run_id.clone();
+    let account_dir = plan.account_dir.clone();
+    let model = plan.model.clone();
     let Some(job) = register_plan(state, plan).await else {
         return;
     };
-    if let Some(context) = context {
-        crate::quota_auto_switch::spawn_consideration(state, context, &job, &run_id);
+    if let Some(provider) = provider {
+        let context = crate::quota_auto_switch::QuotaBlockContext {
+            thread_id,
+            provider,
+            job_id: job.job_id.clone(),
+            blocked_run_id: run_id,
+            account_dir,
+            model,
+        };
+        crate::quota_auto_switch::spawn_consideration(state, context, &job);
     }
 }
 
@@ -652,11 +656,13 @@ pub(crate) async fn expedite_thread_manual(
     let thread_id_for_db = thread_id.to_owned();
     let db = state.ops.garyx_db.clone();
     let mut changed = db
-        .run_blocking(move |db| db.expedite_quota_recovery_thread(
+        .run_blocking(move |db| {
+            db.expedite_quota_recovery_thread(
                 &thread_id_for_db,
                 &now,
                 crate::garyx_db::QuotaRecoveryWakeReason::Manual,
-            ))
+            )
+        })
         .await
         .map_err(|error| error.to_string())?;
     if !changed {
@@ -673,11 +679,13 @@ pub(crate) async fn expedite_thread_manual(
             let thread_id_for_db = thread_id.to_owned();
             let db = state.ops.garyx_db.clone();
             changed = db
-                .run_blocking(move |db| db.expedite_quota_recovery_thread(
-                &thread_id_for_db,
-                &now,
-                crate::garyx_db::QuotaRecoveryWakeReason::Manual,
-            ))
+                .run_blocking(move |db| {
+                    db.expedite_quota_recovery_thread(
+                        &thread_id_for_db,
+                        &now,
+                        crate::garyx_db::QuotaRecoveryWakeReason::Manual,
+                    )
+                })
                 .await
                 .map_err(|error| error.to_string())?;
         }
@@ -688,21 +696,26 @@ pub(crate) async fn expedite_thread_manual(
     Ok(changed)
 }
 
-/// Auto-switch straggler wake: make one thread's waiting row due now because
-/// the account it blocked on is no longer the active selection. Unlike the
-/// manual path there is no transcript re-registration — the caller just
-/// registered this generation from the live event.
-pub(crate) async fn expedite_thread_account_switch(
+/// Auto-switch straggler wake: make one exact waiting generation due now
+/// because the account it blocked on is no longer the active selection.
+/// Generation-scoped on purpose — a stale evaluation must never accelerate a
+/// successor generation it knows nothing about, and there is no transcript
+/// re-registration here: the caller just registered this generation from the
+/// live event.
+pub(crate) async fn expedite_generation_account_switch(
     state: &Arc<AppState>,
     thread_id: &str,
+    blocked_run_id: &str,
 ) -> Result<bool, String> {
     let now = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
     let thread_id_for_db = thread_id.to_owned();
+    let blocked_run_id_for_db = blocked_run_id.to_owned();
     let db = state.ops.garyx_db.clone();
     let changed = db
         .run_blocking(move |db| {
-            db.expedite_quota_recovery_thread(
+            db.expedite_quota_recovery_generation(
                 &thread_id_for_db,
+                &blocked_run_id_for_db,
                 &now,
                 crate::garyx_db::QuotaRecoveryWakeReason::AccountSwitch,
             )
@@ -827,8 +840,8 @@ mod tests {
         assert_eq!(plan.model.as_deref(), Some("claude-fable-5"));
 
         // Pre-enrichment events keep parsing with the fields absent.
-        let legacy = parse_recovery_plan(&raw_rate_limit_event("run::two", "2026-07-23T00:00:00Z"))
-            .unwrap();
+        let legacy =
+            parse_recovery_plan(&raw_rate_limit_event("run::two", "2026-07-23T00:00:00Z")).unwrap();
         assert_eq!(legacy.account_dir, None);
         assert_eq!(legacy.model, None);
     }

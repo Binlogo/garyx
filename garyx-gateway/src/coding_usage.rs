@@ -875,14 +875,12 @@ async fn fetch_codex_usage_via_app_server(
             command.env_remove(key);
         }
     }
-    let mut child = command
-        .spawn()
-        .map_err(|error| {
-            UsageFetchError::new(
-                USAGE_ERROR_UPSTREAM,
-                format!("failed to start `codex app-server`: {error}"),
-            )
-        })?;
+    let mut child = command.spawn().map_err(|error| {
+        UsageFetchError::new(
+            USAGE_ERROR_UPSTREAM,
+            format!("failed to start `codex app-server`: {error}"),
+        )
+    })?;
     let mut stdin = child.stdin.take().ok_or_else(|| {
         UsageFetchError::new(USAGE_ERROR_UPSTREAM, "app-server stdin was unavailable")
     })?;

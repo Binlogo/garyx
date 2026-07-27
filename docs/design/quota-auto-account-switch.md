@@ -62,14 +62,23 @@ truth — usage APIs lag.
 `ProviderRateLimit` gains two additive optional fields, filled by the
 provider at staging time and persisted in the control payload:
 
-- `account_dir`: the run's `CLAUDE_CONFIG_DIR` / the app-server slot's
-  `CODEX_HOME` from the launch snapshot. Absent = system default profile.
-- `model`: the run's model (actual model when reported, otherwise the
-  configured model), used only for the scoped-bucket check.
+- `account_dir`: the run's launch-snapshot profile directory. This is a
+  three-state identity: managed runs carry their managed directory, System
+  default runs carry the explicitly resolved system profile (`~/.claude` /
+  the slot-or-ambient `CODEX_HOME` falling back to `~/.codex`), and only a
+  pre-enrichment legacy event omits the field. "Absent" must never be how a
+  new event says System default — that would collapse it into the legacy
+  assumption below and let a stale System-default block dethrone a healthy
+  managed selection.
+- `model`: the run's model — actual model when reported, otherwise the
+  requested model captured once at run start with the launch snapshot (a
+  defaults hot reload racing the stream must not relabel the blocked run).
+  Used only for the scoped-bucket check.
 
 The gateway maps `account_dir` back to a managed account id through its own
-managed-root layout (`managed_account_dir(config_path, id)`); the bridge stays
-path-dumb. Old events without the fields degrade to "the blocked account is
+managed-root layout (`managed_account_dir(config_path, id)`); any explicit
+directory outside the managed layout is the system profile; the bridge stays
+path-dumb. Old events without the field degrade to "the blocked account is
 the current selection", which is the pre-enrichment assumption.
 
 ## Evaluation policy
@@ -80,16 +89,22 @@ usage (existing cached resolvers: `resolve_claude_usage_for_config_dir`,
 `resolve_codex_usage_for_home`). The blocked account's usage cache entry is
 invalidated first so a stale "has allowance" reading cannot resurrect it.
 
-Eligibility of a candidate account:
+Eligibility of a candidate account fails closed: an allowance the reading
+does not confirm is treated as absent, never as unlimited.
 
-- usage reading available (stale cache fallbacks do not qualify), and
-- every reported general window (`session`, `weekly`) has
-  `remaining_percent > 0`, and
-- if the blocked model matches one of the candidate's scoped limits by model
-  name (e.g. Fable), that scoped window has `remaining_percent > 0`.
-  A scoped limit with `is_active: false` but usable scope and percentage
-  counts by its percentage, per the existing usage contract. A candidate
-  that reports no matching scoped bucket carries no scoped requirement.
+- The usage reading must be available and fresh (stale cache fallbacks do
+  not qualify).
+- Claude Code requires BOTH general windows (`session`, `weekly`) present
+  with `remaining_percent > 0`; a reading missing either window is
+  ineligible. When the blocked model belongs to a scoped family
+  (`garyx_models::provider::CLAUDE_SCOPED_MODEL_FAMILIES`, currently Fable),
+  the candidate must additionally expose a matching scoped bucket with
+  `remaining_percent > 0` — a candidate without the bucket cannot be assumed
+  to serve the family and is ineligible. A scoped limit with
+  `is_active: false` but usable scope and percentage counts by its
+  percentage, per the existing usage contract.
+- Codex requires the `weekly` window present with `remaining_percent > 0`;
+  a reported `session` window must also have allowance.
 
 Decision:
 
@@ -104,6 +119,21 @@ Decision:
   will retry on the new selection. If the current selection is not eligible,
   fall through to the switch evaluation above (exclude both the blocked
   account and the current selection from candidates).
+
+## Generation guard
+
+Every evaluation is pinned to the durable generation that triggered it. The
+context carries the recovery row's `job_id` and `blocked_run_id`; enqueue
+requires a still-waiting row for exactly that run; each generation is
+considered at most once per process (broadcast lag replays a window of
+historical events, and a replayed still-waiting generation must not
+re-evaluate after conditions changed); and after acquiring the per-provider
+queue the evaluation re-validates against SQLite that its row is still the
+active waiting generation — a row that was claimed, superseded, or settled
+while the evaluation was queued aborts without acting. The straggler wake is
+generation-scoped for the same reason: it expedites
+`(thread_id, blocked_run_id)` exactly and refuses to accelerate a successor
+generation it knows nothing about.
 
 ## Switch-once mechanics
 

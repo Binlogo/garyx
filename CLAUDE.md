@@ -249,15 +249,20 @@ Detailed UI rules: @docs/agents/mobile-ui.md and @docs/agents/desktop-ui.md.
   real provider-account selection change commits, its backend-owned recovery
   wake must outlive the originating HTTP request; selecting the already-active
   account remains a no-op and must not wake quota recovery.
-- Quota auto-switch (docs/design/quota-auto-account-switch.md) evaluates once
-  per committed rate-limited generation, serialized per provider, gated by
-  `provider_accounts.<provider>.auto_switch_on_quota` (absent = enabled). The
-  blocked account is the event's bridge-enriched `account_dir`, never a
-  usage-API guess; candidate eligibility requires a fresh reading with every
-  reported general window and the blocked model's scoped bucket above zero.
-  The selection commit is compare-and-swap inside the serialized config
-  mutation and reuses the manual switcher's side effects — auto-switch never
-  adds its own wake mechanism, and a lost race commits nothing.
+- Quota auto-switch (docs/design/quota-auto-account-switch.md) evaluates at
+  most once per committed rate-limited generation, serialized per provider,
+  gated by `provider_accounts.<provider>.auto_switch_on_quota` (absent =
+  enabled). The blocked account is the event's bridge-enriched `account_dir`
+  — an explicit directory even for System default; only legacy events omit
+  it — never a usage-API guess, and the fallback model is the run's launch
+  snapshot. Candidate eligibility fails closed: Claude needs both general
+  windows present with allowance plus the scoped-family bucket for scoped
+  models; Codex needs the weekly window; unconfirmed allowances never pass.
+  Evaluations re-validate their generation against SQLite after the provider
+  queue, and the straggler wake is generation-scoped. The selection commit
+  is compare-and-swap inside the serialized config mutation and reuses the
+  manual switcher's side effects — auto-switch never adds its own wake
+  mechanism, and a lost race commits nothing.
 - Anthropic OAuth usage can return a valid Fable `weekly_scoped` allowance with
   `is_active: false`; that flag means the bucket is not currently consuming,
   not that its quota is unavailable. Preserve scoped limits that have a usable

@@ -459,6 +459,32 @@ fn is_custom_standalone_agent(metadata: &HashMap<String, Value>) -> bool {
         .is_some_and(|value| !is_builtin_provider_agent_id(value))
 }
 
+/// The Codex home identity of one app-server slot for quota attribution: the
+/// slot's own `CODEX_HOME` (managed selection), else the ambient process
+/// `CODEX_HOME`, else `~/.codex`. Always a concrete directory when resolvable
+/// so a rate-limit event carries an explicit identity — an absent field is
+/// reserved for legacy events, never for "System default".
+fn quota_account_home(slot_env: &HashMap<String, String>) -> Option<String> {
+    if let Some(home) = slot_env
+        .get("CODEX_HOME")
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    {
+        return Some(home.to_owned());
+    }
+    if let Some(home) = std::env::var_os("CODEX_HOME").filter(|value| !value.is_empty()) {
+        return Some(PathBuf::from(home).to_string_lossy().into_owned());
+    }
+    std::env::var_os("HOME")
+        .filter(|value| !value.is_empty())
+        .map(|home| {
+            PathBuf::from(home)
+                .join(".codex")
+                .to_string_lossy()
+                .into_owned()
+        })
+}
+
 fn default_codex_config_path() -> Option<PathBuf> {
     if let Some(home) = std::env::var_os("CODEX_HOME").filter(|value| !value.is_empty()) {
         return Some(PathBuf::from(home).join("config.toml"));
@@ -2280,7 +2306,7 @@ impl CodexAgentProvider {
                 usage_limit_hit,
                 latest_rate_limit_snapshot.as_ref(),
                 streamed_error_message.as_deref(),
-                client_slot.env.get("CODEX_HOME").map(String::as_str),
+                quota_account_home(&client_slot.env).as_deref(),
                 actual_model.as_deref(),
             )
             .await;
@@ -2339,7 +2365,7 @@ impl CodexAgentProvider {
                 usage_limit_hit,
                 latest_rate_limit_snapshot.as_ref(),
                 error.as_deref(),
-                client_slot.env.get("CODEX_HOME").map(String::as_str),
+                quota_account_home(&client_slot.env).as_deref(),
                 actual_model.as_deref(),
             )
             .await;

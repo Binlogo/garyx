@@ -1058,6 +1058,15 @@ pub struct ProviderRunOptions {
     pub metadata: HashMap<String, Value>,
 }
 
+/// Claude model families that carry an independent model-scoped allowance in
+/// the Anthropic OAuth usage response (`limits[].scope.model`). A run on one
+/// of these families is only recoverable on an account whose usage reading
+/// exposes a matching scoped bucket with remaining allowance — an account
+/// without the bucket cannot be assumed to serve the family at all, so quota
+/// auto-switch fails closed. Maintained list; extend when Anthropic adds a
+/// scoped family.
+pub const CLAUDE_SCOPED_MODEL_FAMILIES: &[&str] = &["fable"];
+
 /// Environment variables that outrank `auth.json` inside the Codex CLI. Every
 /// process launched for a managed Codex account — app-server runs, usage
 /// probes, device-code logins — must explicitly remove these from its spawn

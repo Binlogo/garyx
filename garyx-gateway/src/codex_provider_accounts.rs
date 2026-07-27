@@ -1113,7 +1113,7 @@ mod tests {
             .unwrap();
     }
 
-/// Finding from review #TASK-2763: deleting the active account resets
+    /// Finding from review #TASK-2763: deleting the active account resets
     /// the selection to System default — a real selection change that must
     /// run the ordinary switch side effects, waking quota-paused threads.
     #[tokio::test]
@@ -1122,10 +1122,9 @@ mod tests {
         let (state, id, account_dir) = managed_account_state(temp.path());
         insert_waiting_codex_recovery(&state, "thread::codex-delete-active");
 
-        let Json(response) =
-            delete_codex_account(State(state.clone()), AxumPath(id.clone()))
-                .await
-                .unwrap();
+        let Json(response) = delete_codex_account(State(state.clone()), AxumPath(id.clone()))
+            .await
+            .unwrap();
         assert_eq!(response["deleted_account_id"], id.as_str());
         assert!(!account_dir.exists());
         assert_eq!(

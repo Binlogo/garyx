@@ -2584,3 +2584,27 @@ fn client_config_strips_inherited_auth_env_only_for_managed_homes() {
     let config = provider.build_client_config(HashMap::new());
     assert!(config.env_removals.is_empty());
 }
+
+#[test]
+fn quota_account_home_prefers_slot_env_and_always_resolves_an_identity() {
+    // Review #TASK-2781 finding 2: a rate-limit event must carry an explicit
+    // account identity for System default too, so a new event can never be
+    // mistaken for a legacy pre-enrichment one.
+    let managed = HashMap::from([(
+        "CODEX_HOME".to_owned(),
+        "/Users/test/.garyx/provider-accounts/codex/abc".to_owned(),
+    )]);
+    assert_eq!(
+        quota_account_home(&managed).as_deref(),
+        Some("/Users/test/.garyx/provider-accounts/codex/abc")
+    );
+
+    // System default: no slot override still resolves to a concrete home
+    // (ambient CODEX_HOME or ~/.codex) whenever the process has one.
+    let system = HashMap::new();
+    let resolved = quota_account_home(&system);
+    if std::env::var_os("HOME").is_some() || std::env::var_os("CODEX_HOME").is_some() {
+        let home = resolved.expect("system default must resolve an explicit identity");
+        assert!(!home.trim().is_empty());
+    }
+}

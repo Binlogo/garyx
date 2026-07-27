@@ -20,8 +20,8 @@ use futures_util::future::join_all;
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
-use crate::coding_usage::{self, ProviderUsage};
 use crate::codex_provider_accounts;
+use crate::coding_usage::{self, ProviderUsage};
 use crate::garyx_db::{QuotaRecoveryJob, QuotaRecoveryState};
 use crate::provider_accounts::{self, GuardedSwitchOutcome};
 use crate::server::AppState;
@@ -49,9 +49,17 @@ impl AccountProvider {
 pub(crate) struct QuotaBlockContext {
     pub thread_id: String,
     pub provider: AccountProvider,
-    /// Profile directory the blocked run launched with, when the event
-    /// carried it. `None` on pre-enrichment events; the evaluation then
-    /// assumes the blocked account is the current selection.
+    /// Durable identity of the generation this evaluation belongs to. The
+    /// evaluation re-validates it against SQLite after acquiring the
+    /// per-provider queue: a row that settled or was superseded while queued
+    /// must not act.
+    pub job_id: String,
+    pub blocked_run_id: String,
+    /// Profile directory the blocked run launched with. The bridge emits an
+    /// explicit directory for System default too (`~/.claude` / `~/.codex` or
+    /// the ambient override), so `None` only means a pre-enrichment legacy
+    /// event; the evaluation then assumes the blocked account is the current
+    /// selection.
     pub account_dir: Option<String>,
     /// Model the blocked run was using, for scoped-bucket checks.
     pub model: Option<String>,
@@ -87,39 +95,61 @@ pub(crate) fn map_blocked_account(
 }
 
 /// Minimum remaining percentage across every window the policy requires for
-/// this account, or `None` when the account is not positively eligible:
-/// unavailable or stale readings never qualify, every reported general window
-/// (5-hour session, weekly) must have allowance left, and when the blocked
-/// model maps onto one of the account's scoped limits (e.g. Claude's Fable
-/// weekly bucket) that scoped window must have allowance too. An account
-/// reporting no windows at all cannot be called eligible.
+/// this account, or `None` when the account is not positively eligible. The
+/// policy fails closed: an allowance the reading does not confirm is treated
+/// as absent, never as unlimited.
+///
+/// - Unavailable or stale readings never qualify.
+/// - Claude Code requires BOTH the 5-hour session window and the weekly
+///   window, present with allowance left; a reading missing either window
+///   cannot confirm the account and is ineligible. When the blocked model
+///   belongs to a scoped family (`CLAUDE_SCOPED_MODEL_FAMILIES`, e.g. Fable),
+///   the account must additionally expose a matching scoped bucket with
+///   allowance — an account without the bucket is ineligible for that run.
+/// - Codex requires the weekly window, present with allowance left; a
+///   reported session window must also have allowance.
 pub(crate) fn eligible_remaining(
+    provider: AccountProvider,
     usage: &ProviderUsage,
     blocked_model: Option<&str>,
 ) -> Option<f64> {
     if !usage.available || usage.stale {
         return None;
     }
-    let mut min_remaining = f64::INFINITY;
-    let mut any_window = false;
-    for window in [usage.session.as_ref(), usage.weekly.as_ref()]
-        .into_iter()
-        .flatten()
+    let mut min_remaining = match provider {
+        AccountProvider::ClaudeCode => {
+            let session = usage.session.as_ref()?;
+            let weekly = usage.weekly.as_ref()?;
+            session.remaining_percent.min(weekly.remaining_percent)
+        }
+        AccountProvider::Codex => {
+            let weekly = usage.weekly.as_ref()?;
+            let mut min = weekly.remaining_percent;
+            if let Some(session) = usage.session.as_ref() {
+                min = min.min(session.remaining_percent);
+            }
+            min
+        }
+    };
+    if provider == AccountProvider::ClaudeCode
+        && let Some(model) = blocked_model
     {
-        any_window = true;
-        min_remaining = min_remaining.min(window.remaining_percent);
-    }
-    if let Some(model) = blocked_model {
         let model_lower = model.to_lowercase();
-        for scoped in &usage.scoped_limits {
-            if scoped_limit_matches_model(&scoped.id, &scoped.name, &model_lower) {
-                any_window = true;
-                min_remaining = min_remaining.min(scoped.window.remaining_percent);
+        let scoped_family = garyx_models::provider::CLAUDE_SCOPED_MODEL_FAMILIES
+            .iter()
+            .any(|family| model_lower.contains(family));
+        if scoped_family {
+            let mut matched = false;
+            for scoped in &usage.scoped_limits {
+                if scoped_limit_matches_model(&scoped.id, &scoped.name, &model_lower) {
+                    matched = true;
+                    min_remaining = min_remaining.min(scoped.window.remaining_percent);
+                }
+            }
+            if !matched {
+                return None;
             }
         }
-    }
-    if !any_window {
-        return None;
     }
     (min_remaining > 0.0).then_some(min_remaining)
 }
@@ -151,12 +181,13 @@ pub(crate) struct CandidateUsage {
 /// minimum-remaining across required windows, ties broken by name then id so
 /// concurrent evaluations agree on one target.
 pub(crate) fn pick_best_candidate<'a>(
+    provider: AccountProvider,
     candidates: &'a [CandidateUsage],
     blocked_model: Option<&str>,
 ) -> Option<&'a CandidateUsage> {
     let mut best: Option<(&CandidateUsage, f64)> = None;
     for candidate in candidates {
-        let Some(remaining) = eligible_remaining(&candidate.usage, blocked_model) else {
+        let Some(remaining) = eligible_remaining(provider, &candidate.usage, blocked_model) else {
             continue;
         };
         let better = match &best {
@@ -177,17 +208,30 @@ pub(crate) fn pick_best_candidate<'a>(
 
 /// Register interest in one committed rate-limited generation. Fire-and-forget:
 /// the evaluation runs on the per-provider queue and must never block the
-/// event projection loop. Only a still-waiting row for the triggering run may
-/// evaluate — replayed events whose generation already settled are ignored.
+/// event projection loop. Guards, in order:
+/// - only a still-waiting row for the triggering run may enqueue;
+/// - each generation is considered at most once per process — an event
+///   replay (broadcast lag) of a still-waiting generation must not
+///   re-evaluate it after conditions changed;
+/// - the evaluation re-validates the row against SQLite after acquiring the
+///   provider queue (see `evaluate`).
 pub(crate) fn spawn_consideration(
     state: &Arc<AppState>,
     ctx: QuotaBlockContext,
     registered: &QuotaRecoveryJob,
-    blocked_run_id: &str,
 ) {
     if registered.state != QuotaRecoveryState::Waiting
-        || registered.blocked_run_id != blocked_run_id
+        || registered.blocked_run_id != ctx.blocked_run_id
+        || registered.job_id != ctx.job_id
     {
+        return;
+    }
+    if !claim_generation_once(&ctx.job_id) {
+        debug!(
+            thread_id = %ctx.thread_id,
+            job_id = %ctx.job_id,
+            "quota auto-switch already considered this generation"
+        );
         return;
     }
     let state = state.clone();
@@ -198,6 +242,20 @@ pub(crate) fn spawn_consideration(
     });
 }
 
+/// Process-local once-per-generation claim. Bounded: the set is cleared when
+/// it grows past a few thousand entries — at one entry per blocked run this
+/// takes months, and losing dedup for ancient generations is harmless because
+/// their rows have long settled and fail the SQLite re-validation anyway.
+fn claim_generation_once(job_id: &str) -> bool {
+    static SEEN: OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> = OnceLock::new();
+    let seen = SEEN.get_or_init(Default::default);
+    let mut guard = seen.lock().expect("quota auto-switch dedup lock poisoned");
+    if guard.len() > 4096 {
+        guard.clear();
+    }
+    guard.insert(job_id.to_owned())
+}
+
 fn provider_queue(provider: AccountProvider) -> Arc<Mutex<()>> {
     static QUEUES: OnceLock<std::sync::Mutex<HashMap<&'static str, Arc<Mutex<()>>>>> =
         OnceLock::new();
@@ -206,11 +264,48 @@ fn provider_queue(provider: AccountProvider) -> Arc<Mutex<()>> {
         AccountProvider::Codex => "codex_app_server",
     };
     let queues = QUEUES.get_or_init(Default::default);
-    let mut guard = queues.lock().expect("quota auto-switch queue lock poisoned");
+    let mut guard = queues
+        .lock()
+        .expect("quota auto-switch queue lock poisoned");
     guard.entry(key).or_default().clone()
 }
 
 async fn evaluate(state: &Arc<AppState>, ctx: QuotaBlockContext) {
+    // Re-validate the generation now that we own the provider queue: while
+    // this evaluation waited, the row may have been claimed by the recovery
+    // worker, superseded by a newer blocked run, or settled entirely. A stale
+    // evaluation must not act on the world with outdated blocked-account
+    // context.
+    let job_id = ctx.job_id.clone();
+    let row = state
+        .ops
+        .garyx_db
+        .run_blocking(move |db| db.quota_recovery_job(&job_id))
+        .await;
+    match row {
+        Ok(Some(job))
+            if job.state == QuotaRecoveryState::Waiting
+                && job.blocked_run_id == ctx.blocked_run_id
+                && job.thread_id == ctx.thread_id => {}
+        Ok(_) => {
+            debug!(
+                thread_id = %ctx.thread_id,
+                job_id = %ctx.job_id,
+                "quota auto-switch generation settled while queued; skipping"
+            );
+            return;
+        }
+        Err(error) => {
+            warn!(
+                thread_id = %ctx.thread_id,
+                job_id = %ctx.job_id,
+                error = %error,
+                "quota auto-switch could not re-validate its generation; skipping"
+            );
+            return;
+        }
+    }
+
     let config = state.config_snapshot();
     let (enabled, current, managed): (bool, Option<String>, Vec<(String, String)>) =
         match ctx.provider {
@@ -288,8 +383,13 @@ async fn evaluate(state: &Arc<AppState>, ctx: QuotaBlockContext) {
         // old account. If the current selection has allowance, waking just
         // this thread lets it retry on the new selection.
         let current_usage = probe_usage(state, ctx.provider, current.as_deref()).await;
-        if eligible_remaining(&current_usage, ctx.model.as_deref()).is_some() {
-            match crate::quota_resend::expedite_thread_account_switch(state, &ctx.thread_id).await
+        if eligible_remaining(ctx.provider, &current_usage, ctx.model.as_deref()).is_some() {
+            match crate::quota_resend::expedite_generation_account_switch(
+                state,
+                &ctx.thread_id,
+                &ctx.blocked_run_id,
+            )
+            .await
             {
                 Ok(true) => info!(
                     thread_id = %ctx.thread_id,
@@ -343,7 +443,7 @@ async fn evaluate(state: &Arc<AppState>, ctx: QuotaBlockContext) {
     }))
     .await;
 
-    let Some(best) = pick_best_candidate(&candidates, ctx.model.as_deref()) else {
+    let Some(best) = pick_best_candidate(ctx.provider, &candidates, ctx.model.as_deref()) else {
         info!(
             provider = ?ctx.provider,
             thread_id = %ctx.thread_id,
@@ -443,60 +543,108 @@ mod tests {
     }
 
     #[test]
-    fn eligibility_requires_every_reported_general_window() {
+    fn claude_eligibility_requires_both_general_windows_and_fails_closed() {
+        let claude = AccountProvider::ClaudeCode;
         assert_eq!(
-            eligible_remaining(&usage(Some(20.0), Some(50.0)), None),
+            eligible_remaining(claude, &usage(Some(20.0), Some(50.0)), None),
             Some(20.0)
         );
-        assert_eq!(eligible_remaining(&usage(Some(0.0), Some(50.0)), None), None);
-        assert_eq!(eligible_remaining(&usage(Some(20.0), Some(0.0)), None), None);
-        // A provider reporting only one general window is judged on it.
-        assert_eq!(eligible_remaining(&usage(None, Some(35.0)), None), Some(35.0));
-        // No reported windows can never be positively eligible.
-        assert_eq!(eligible_remaining(&usage(None, None), None), None);
+        assert_eq!(
+            eligible_remaining(claude, &usage(Some(0.0), Some(50.0)), None),
+            None
+        );
+        assert_eq!(
+            eligible_remaining(claude, &usage(Some(20.0), Some(0.0)), None),
+            None
+        );
+        // Review #TASK-2781 finding 1: a reading that does not confirm a
+        // required window is ineligible — session-only, weekly-only, and
+        // windowless readings all fail closed.
+        assert_eq!(
+            eligible_remaining(claude, &usage(Some(25.0), None), None),
+            None
+        );
+        assert_eq!(
+            eligible_remaining(claude, &usage(None, Some(25.0)), None),
+            None
+        );
+        assert_eq!(eligible_remaining(claude, &usage(None, None), None), None);
+    }
+
+    #[test]
+    fn codex_eligibility_requires_the_weekly_window() {
+        let codex = AccountProvider::Codex;
+        assert_eq!(
+            eligible_remaining(codex, &usage(None, Some(35.0)), None),
+            Some(35.0)
+        );
+        assert_eq!(
+            eligible_remaining(codex, &usage(Some(10.0), Some(35.0)), None),
+            Some(10.0)
+        );
+        assert_eq!(
+            eligible_remaining(codex, &usage(Some(10.0), None), None),
+            None
+        );
+        assert_eq!(
+            eligible_remaining(codex, &usage(None, Some(0.0)), None),
+            None
+        );
     }
 
     #[test]
     fn unavailable_or_stale_readings_never_qualify() {
         let mut unavailable = usage(Some(80.0), Some(80.0));
         unavailable.available = false;
-        assert_eq!(eligible_remaining(&unavailable, None), None);
+        assert_eq!(
+            eligible_remaining(AccountProvider::ClaudeCode, &unavailable, None),
+            None
+        );
 
         let mut stale = usage(Some(80.0), Some(80.0));
         stale.stale = true;
-        assert_eq!(eligible_remaining(&stale, None), None);
+        assert_eq!(
+            eligible_remaining(AccountProvider::ClaudeCode, &stale, None),
+            None
+        );
     }
 
     #[test]
-    fn scoped_bucket_gates_only_matching_models() {
+    fn scoped_family_requires_a_matching_bucket_with_allowance() {
+        let claude = AccountProvider::ClaudeCode;
         let mut with_fable = usage(Some(40.0), Some(60.0));
         with_fable.scoped_limits = vec![fable_scope(0.0)];
 
         // A Fable run needs the Fable bucket too.
         assert_eq!(
-            eligible_remaining(&with_fable, Some("claude-fable-5-20260115")),
+            eligible_remaining(claude, &with_fable, Some("claude-fable-5-20260115")),
             None
         );
-        // A non-Fable run ignores the exhausted scoped bucket.
+        // A non-scoped-family run ignores the exhausted scoped bucket.
         assert_eq!(
-            eligible_remaining(&with_fable, Some("claude-sonnet-4")),
+            eligible_remaining(claude, &with_fable, Some("claude-sonnet-4")),
             Some(40.0)
         );
         // Unknown model applies no scoped requirement.
-        assert_eq!(eligible_remaining(&with_fable, None), Some(40.0));
+        assert_eq!(eligible_remaining(claude, &with_fable, None), Some(40.0));
 
         // A healthy scoped bucket participates in the headroom minimum.
         let mut healthy = usage(Some(40.0), Some(60.0));
         healthy.scoped_limits = vec![fable_scope(10.0)];
         assert_eq!(
-            eligible_remaining(&healthy, Some("claude-fable-5")),
+            eligible_remaining(claude, &healthy, Some("claude-fable-5")),
             Some(10.0)
         );
 
-        // Accounts without a matching scoped bucket carry no scoped gate.
+        // Review #TASK-2781 finding 1: an account WITHOUT the scoped bucket
+        // cannot be assumed to serve the scoped family — fail closed.
         assert_eq!(
-            eligible_remaining(&usage(Some(40.0), Some(60.0)), Some("claude-fable-5")),
-            Some(40.0)
+            eligible_remaining(
+                claude,
+                &usage(Some(40.0), Some(60.0)),
+                Some("claude-fable-5")
+            ),
+            None
         );
     }
 
@@ -507,11 +655,15 @@ mod tests {
         let mut value = usage(Some(50.0), Some(50.0));
         value.scoped_limits = vec![scoped];
         // Falls back to the `{kind}:{scope_id}` tail when the name is blank.
-        assert_eq!(eligible_remaining(&value, Some("claude-fable-5")), None);
+        assert_eq!(
+            eligible_remaining(AccountProvider::ClaudeCode, &value, Some("claude-fable-5")),
+            None
+        );
     }
 
     #[test]
     fn best_candidate_ranks_by_headroom_then_name_then_id() {
+        let claude = AccountProvider::ClaudeCode;
         let candidates = vec![
             CandidateUsage {
                 account_id: Some("b".to_owned()),
@@ -529,26 +681,28 @@ mod tests {
                 usage: usage(Some(0.0), Some(100.0)),
             },
         ];
-        let best = pick_best_candidate(&candidates, None).expect("one candidate is eligible");
+        let best =
+            pick_best_candidate(claude, &candidates, None).expect("one candidate is eligible");
         assert_eq!(best.account_id.as_deref(), Some("a"));
 
         let tied = vec![
             CandidateUsage {
                 account_id: Some("z".to_owned()),
                 name: "Zulu".to_owned(),
-                usage: usage(Some(50.0), None),
+                usage: usage(Some(50.0), Some(50.0)),
             },
             CandidateUsage {
                 account_id: Some("m".to_owned()),
                 name: "Mike".to_owned(),
-                usage: usage(Some(50.0), None),
+                usage: usage(Some(50.0), Some(50.0)),
             },
         ];
-        let best = pick_best_candidate(&tied, None).expect("both are eligible");
+        let best = pick_best_candidate(claude, &tied, None).expect("both are eligible");
         assert_eq!(best.account_id.as_deref(), Some("m"));
 
         assert!(
             pick_best_candidate(
+                claude,
                 &[CandidateUsage {
                     account_id: Some("x".to_owned()),
                     name: "X".to_owned(),
@@ -563,10 +717,14 @@ mod tests {
     #[test]
     fn blocked_account_maps_through_the_managed_layout() {
         let managed = vec!["abc".to_owned(), "def".to_owned()];
-        let dir_of =
-            |id: &str| std::path::PathBuf::from(format!("/data/provider-accounts/claude-code/{id}"));
+        let dir_of = |id: &str| {
+            std::path::PathBuf::from(format!("/data/provider-accounts/claude-code/{id}"))
+        };
 
-        assert_eq!(map_blocked_account(None, &managed, dir_of), BlockedAccount::Unknown);
+        assert_eq!(
+            map_blocked_account(None, &managed, dir_of),
+            BlockedAccount::Unknown
+        );
         assert_eq!(
             map_blocked_account(Some("  "), &managed, dir_of),
             BlockedAccount::Unknown
@@ -579,10 +737,22 @@ mod tests {
             ),
             BlockedAccount::Managed("def".to_owned())
         );
-        // Any directory outside the managed layout is the system profile.
+        // Any directory outside the managed layout is the system profile —
+        // including the explicit `~/.claude` / `~/.codex` identities the
+        // bridge now emits for System default runs.
         assert_eq!(
             map_blocked_account(Some("/Users/test/.claude"), &managed, dir_of),
             BlockedAccount::SystemDefault
         );
+    }
+
+    #[test]
+    fn generation_dedup_claims_each_job_once() {
+        // Review #TASK-2781 finding 3: a lag replay of a still-waiting
+        // generation must not re-evaluate it.
+        let job = format!("quota-recovery:run::{}", uuid::Uuid::new_v4());
+        assert!(claim_generation_once(&job));
+        assert!(!claim_generation_once(&job));
+        assert!(!claim_generation_once(&job));
     }
 }

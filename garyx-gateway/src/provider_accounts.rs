@@ -1022,10 +1022,9 @@ mod tests {
         let (state, id, account_dir) = managed_account_state(temp.path());
         insert_waiting_recovery(&state, "thread::claude-delete-active");
 
-        let Json(response) =
-            delete_claude_code_account(State(state.clone()), AxumPath(id.clone()))
-                .await
-                .unwrap();
+        let Json(response) = delete_claude_code_account(State(state.clone()), AxumPath(id.clone()))
+            .await
+            .unwrap();
         assert_eq!(response["deleted_account_id"], id.as_str());
         assert!(!account_dir.exists());
         assert_eq!(
@@ -1214,7 +1213,6 @@ mod tests {
         );
         assert_eq!(job.due_at, "2099-01-01T00:01:00Z");
     }
-
 
     #[tokio::test]
     async fn guarded_switch_commits_and_wakes_provider_recoveries() {

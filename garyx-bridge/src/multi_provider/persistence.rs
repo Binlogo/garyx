@@ -1413,10 +1413,7 @@ fn rate_limit_control_value(rate_limit: &ProviderRateLimit) -> Value {
         object.insert("message".to_owned(), Value::String(message.clone()));
     }
     if let Some(account_dir) = &rate_limit.account_dir {
-        object.insert(
-            "account_dir".to_owned(),
-            Value::String(account_dir.clone()),
-        );
+        object.insert("account_dir".to_owned(), Value::String(account_dir.clone()));
     }
     if let Some(model) = &rate_limit.model {
         object.insert("model".to_owned(), Value::String(model.clone()));

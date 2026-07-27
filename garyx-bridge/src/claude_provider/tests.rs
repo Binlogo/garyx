@@ -1782,7 +1782,14 @@ async fn test_process_messages_streaming_waits_for_background_task_notification_
     let cb: StreamCallback = Box::new(|_| {});
     let task = tokio::spawn(async move {
         provider_for_task
-            .process_messages_streaming("run-background-task", "thread::test", &mut rx, &cb, None, None)
+            .process_messages_streaming(
+                "run-background-task",
+                "thread::test",
+                &mut rx,
+                &cb,
+                None,
+                None,
+            )
             .await
     });
 
@@ -2062,7 +2069,14 @@ async fn test_process_messages_streaming_survives_followup_gap_after_empty_backg
 
     let cb: StreamCallback = Box::new(|_| {});
     let (response_text, result_data, _signals) = provider
-        .process_messages_streaming("run-followup-gap", "thread::test", &mut source, &cb, None, None)
+        .process_messages_streaming(
+            "run-followup-gap",
+            "thread::test",
+            &mut source,
+            &cb,
+            None,
+            None,
+        )
         .await
         .expect("stream should process");
 
@@ -2133,7 +2147,14 @@ async fn test_process_messages_streaming_survives_gap_when_task_edge_precedes_re
 
     let cb: StreamCallback = Box::new(|_| {});
     let (response_text, result_data, _signals) = provider
-        .process_messages_streaming("run-edge-first", "thread::test", &mut source, &cb, None, None)
+        .process_messages_streaming(
+            "run-edge-first",
+            "thread::test",
+            &mut source,
+            &cb,
+            None,
+            None,
+        )
         .await
         .expect("stream should process");
 
@@ -2222,7 +2243,14 @@ async fn test_stop_hook_observation_holds_stdin_without_stream_task_events() {
 
     let cb: StreamCallback = Box::new(|_| {});
     let (response_text, result_data, _signals) = provider
-        .process_messages_streaming("run-stop-hook-hold", "thread::test", &mut source, &cb, None, None)
+        .process_messages_streaming(
+            "run-stop-hook-hold",
+            "thread::test",
+            &mut source,
+            &cb,
+            None,
+            None,
+        )
         .await
         .expect("stream should process");
 
@@ -2266,7 +2294,14 @@ async fn test_stop_hook_observation_with_terminal_entries_releases_stdin() {
 
     let cb: StreamCallback = Box::new(|_| {});
     let (response_text, result_data, _signals) = provider
-        .process_messages_streaming("run-stop-hook-terminal", "thread::test", &mut source, &cb, None, None)
+        .process_messages_streaming(
+            "run-stop-hook-terminal",
+            "thread::test",
+            &mut source,
+            &cb,
+            None,
+            None,
+        )
         .await
         .expect("stream should process");
 
@@ -2307,7 +2342,14 @@ async fn test_stop_hook_observation_empty_list_releases_prior_hold() {
 
     let cb: StreamCallback = Box::new(|_| {});
     let (response_text, _result_data, _signals) = provider
-        .process_messages_streaming("run-stop-hook-release", "thread::test", &mut source, &cb, None, None)
+        .process_messages_streaming(
+            "run-stop-hook-release",
+            "thread::test",
+            &mut source,
+            &cb,
+            None,
+            None,
+        )
         .await
         .expect("stream should process");
 
@@ -2379,7 +2421,14 @@ async fn test_stop_hook_hold_without_wake_turn_hits_idle_backstop_without_closin
     let cb: StreamCallback = Box::new(|_| {});
     let started = tokio::time::Instant::now();
     let error = provider
-        .process_messages_streaming("run-stop-hook-no-wake", "thread::test", &mut source, &cb, None, None)
+        .process_messages_streaming(
+            "run-stop-hook-no-wake",
+            "thread::test",
+            &mut source,
+            &cb,
+            None,
+            None,
+        )
         .await
         .expect_err("run should fail on the idle backstop");
 
@@ -2799,7 +2848,14 @@ async fn test_process_messages_streaming_emits_assistant_segment_boundaries() {
     });
 
     let (response_text, _result_data, _signals) = provider
-        .process_messages_streaming("run-assistant-segment", "thread::test", &mut rx, &cb, None, None)
+        .process_messages_streaming(
+            "run-assistant-segment",
+            "thread::test",
+            &mut rx,
+            &cb,
+            None,
+            None,
+        )
         .await
         .expect("stream should process");
 
@@ -3223,7 +3279,14 @@ async fn test_process_messages_streaming_suppresses_orphan_nested_result() {
     });
 
     let (response_text, result_data, _signals) = provider
-        .process_messages_streaming("run-orphan-nested", "thread::test", &mut rx, &cb, None, None)
+        .process_messages_streaming(
+            "run-orphan-nested",
+            "thread::test",
+            &mut rx,
+            &cb,
+            None,
+            None,
+        )
         .await
         .expect("stream should process");
 
@@ -4949,4 +5012,51 @@ fn build_claude_rate_limit_carries_launch_account_and_model() {
     .expect("rate limit built");
     assert_eq!(rate_limit.account_dir, None);
     assert_eq!(rate_limit.model, None);
+}
+
+#[tokio::test]
+async fn staged_rate_limit_model_uses_the_run_snapshot_not_hot_config() {
+    // Review #TASK-2781 finding 4: the quota payload's fallback model is the
+    // run's launch snapshot, threaded in by the caller. A defaults hot reload
+    // racing the stream must not relabel the blocked run — the stream layer
+    // never consults hot config for it.
+    let provider = make_provider();
+    provider.update_model_defaults(&ProviderModelDefaults {
+        model: "claude-sonnet-4".to_owned(),
+        default_model: "claude-sonnet-4".to_owned(),
+        model_reasoning_effort: String::new(),
+        model_service_tier: String::new(),
+    });
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+    tx.send(Ok(Message::Result(Box::new(ResultMessage {
+        subtype: "error_during_execution".to_owned(),
+        is_error: true,
+        session_id: "sdk-session-limit".to_owned(),
+        terminal_reason: Some("blocking_limit".to_owned()),
+        errors: vec!["usage limit reached".to_owned()],
+        ..Default::default()
+    }))))
+    .await
+    .unwrap();
+    drop(tx);
+
+    let (_chunks, cb) = collecting_callback();
+    provider
+        .process_messages_streaming(
+            "run-limit-model",
+            "thread::limit-model",
+            &mut rx,
+            &cb,
+            None,
+            Some("claude-fable-5"),
+        )
+        .await
+        .expect("stream should process");
+
+    let staged = provider
+        .take_rate_limit("thread::limit-model")
+        .await
+        .expect("rate limit should be staged");
+    assert_eq!(staged.model.as_deref(), Some("claude-fable-5"));
 }
