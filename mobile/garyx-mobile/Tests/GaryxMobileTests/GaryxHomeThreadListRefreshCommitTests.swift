@@ -1071,6 +1071,262 @@ final class GaryxHomeThreadListRefreshCommitTests: XCTestCase {
         ))
     }
 
+    func testColdStartRecentIdentityInterruptionSchedulesAReplacementRefresh() async throws {
+        let recentStarted = expectation(description: "cold-start recent request started")
+        let recentGate = DispatchSemaphore(value: 0)
+        let recentRequests = GaryxLockedCounter()
+        let snapshotRequests = GaryxLockedCounter()
+        let session = makeStubSession { request in
+            let url = try XCTUnwrap(request.url)
+            switch (request.httpMethod, url.path) {
+            case ("GET", "/api/thread-summaries"):
+                return try garyxStubResponse(
+                    request,
+                    data: try garyxTask2783ThreadSummariesCaptureData(
+                        generation: .beforeRotation
+                    )
+                )
+            case ("GET", "/api/thread-favorites/snapshot"):
+                let generation: GaryxTask2783CapturedGeneration =
+                    snapshotRequests.increment() == 1 ? .beforeRotation : .afterRotation
+                return try garyxStubResponse(
+                    request,
+                    data: try garyxTask2783FavoritesSnapshotCaptureData(
+                        generation: generation
+                    )
+                )
+            case ("GET", "/api/thread-pins"):
+                return try garyxStubResponse(
+                    request,
+                    data: try garyxPinsPageData(ids: [], revision: 29)
+                )
+            case ("GET", "/api/recent-threads"):
+                if recentRequests.increment() == 1 {
+                    recentStarted.fulfill()
+                    guard recentGate.wait(timeout: .now() + 5) == .success else {
+                        throw GaryxRefreshStubError.timedOut
+                    }
+                }
+                return try garyxStubResponse(
+                    request,
+                    data: try garyxTask2783RecentThreadsCaptureData(
+                        generation: .afterRotation
+                    )
+                )
+            default:
+                return try garyxStubResponse(request, statusCode: 400, data: Data())
+            }
+        }
+        defer {
+            recentGate.signal()
+            GaryxRecentThreadsURLProtocolStub.requestHandler = nil
+            session.invalidateAndCancel()
+        }
+
+        let model = makeModel(session: session)
+        XCTAssertNil(
+            model.threadFavoritesState.storeIncarnationId,
+            "the reproduction must begin at the real cold-start identity state"
+        )
+        let refresh = Task { @MainActor in
+            await model.refreshThreads(source: .userAction)
+        }
+        await fulfillment(of: [recentStarted], timeout: 2)
+        let favoritesEstablishedIdentity = await waitUntil {
+            model.threadFavoritesState.storeIncarnationId
+                == GaryxTask2783CapturedGeneration.beforeRotation.storeIncarnationId
+        }
+        XCTAssertTrue(favoritesEstablishedIdentity)
+
+        recentGate.signal()
+        await refresh.value
+        let identityRecoverySettled = await waitUntil {
+            model.threadFavoritesState.storeIncarnationId
+                == GaryxTask2783CapturedGeneration.afterRotation.storeIncarnationId
+                && model.threadFavoritesState.activeSnapshotTicket == nil
+                && model.threadFavoritesSnapshotTask == nil
+        }
+        XCTAssertTrue(identityRecoverySettled)
+        await model.homeProjectionGateway.waitForIdleForTesting()
+
+        let replacementIssued = await waitUntil(timeout: 0.5) {
+            recentRequests.value > 1
+        }
+        let presentation = model.selectedRecentFeedPresentation
+        let placeholder = model.homeThreadListStore.presentationSnapshot.recentPlaceholder
+        XCTAssertTrue(
+            replacementIssued,
+            """
+            REPRO: the cold-start recent response was identity-interrupted and \
+            terminated with placeholder=\(placeholder), \
+            isRefreshingHead=\(presentation.isRefreshingHead), \
+            recentRequests=\(recentRequests.value). No replacement refresh was scheduled.
+            """
+        )
+    }
+
+    func testColdStartMatchingCapturedIdentitiesPrimeRecentWithoutInterruption() async throws {
+        let recentRequests = GaryxLockedCounter()
+        let snapshotRequests = GaryxLockedCounter()
+        let session = makeStubSession { request in
+            let url = try XCTUnwrap(request.url)
+            switch (request.httpMethod, url.path) {
+            case ("GET", "/api/thread-summaries"):
+                return try garyxStubResponse(
+                    request,
+                    data: try garyxTask2783ThreadSummariesCaptureData(
+                        generation: .beforeRotation
+                    )
+                )
+            case ("GET", "/api/thread-favorites/snapshot"):
+                snapshotRequests.increment()
+                return try garyxStubResponse(
+                    request,
+                    data: try garyxTask2783FavoritesSnapshotCaptureData(
+                        generation: .beforeRotation
+                    )
+                )
+            case ("GET", "/api/thread-pins"):
+                return try garyxStubResponse(
+                    request,
+                    data: try garyxPinsPageData(ids: [], revision: 29)
+                )
+            case ("GET", "/api/recent-threads"):
+                recentRequests.increment()
+                return try garyxStubResponse(
+                    request,
+                    data: try garyxTask2783RecentThreadsCaptureData(
+                        generation: .beforeRotation
+                    )
+                )
+            default:
+                return try garyxStubResponse(request, statusCode: 400, data: Data())
+            }
+        }
+        defer {
+            GaryxRecentThreadsURLProtocolStub.requestHandler = nil
+            session.invalidateAndCancel()
+        }
+
+        let model = makeModel(session: session)
+        XCTAssertNil(model.threadFavoritesState.storeIncarnationId)
+        await model.refreshThreads(source: .userAction)
+        let settled = await waitUntil {
+            model.threadFavoritesState.storeIncarnationId
+                == GaryxTask2783CapturedGeneration.beforeRotation.storeIncarnationId
+                && model.threadFavoritesState.activeSnapshotTicket == nil
+                && model.threadFavoritesSnapshotTask == nil
+                && model.selectedRecentFeedPresentation.isPrimed
+        }
+        XCTAssertTrue(settled)
+        await model.homeProjectionGateway.waitForIdleForTesting()
+
+        XCTAssertEqual(recentRequests.value, 2)
+        XCTAssertEqual(snapshotRequests.value, 1)
+        XCTAssertFalse(model.selectedRecentFeedPresentation.isRefreshingHead)
+        XCTAssertFalse(model.selectedRecentFeedPresentation.headFailure)
+        XCTAssertEqual(
+            model.homeThreadListStore.presentationSnapshot.recentPlaceholder,
+            .none,
+            "matching identities on both cold-start lanes must render the captured recent row"
+        )
+    }
+
+    func testColdStartFavoritesIdentityResetSchedulesAReplacementRefresh() async throws {
+        let snapshotStarted = expectation(description: "cold-start favorites snapshot started")
+        let snapshotGate = DispatchSemaphore(value: 0)
+        let recentRequests = GaryxLockedCounter()
+        let snapshotRequests = GaryxLockedCounter()
+        let session = makeStubSession { request in
+            let url = try XCTUnwrap(request.url)
+            switch (request.httpMethod, url.path) {
+            case ("GET", "/api/thread-summaries"):
+                return try garyxStubResponse(
+                    request,
+                    data: try garyxTask2783ThreadSummariesCaptureData(
+                        generation: .beforeRotation
+                    )
+                )
+            case ("GET", "/api/thread-favorites/snapshot"):
+                if snapshotRequests.increment() == 1 {
+                    snapshotStarted.fulfill()
+                    guard snapshotGate.wait(timeout: .now() + 5) == .success else {
+                        throw GaryxRefreshStubError.timedOut
+                    }
+                }
+                return try garyxStubResponse(
+                    request,
+                    data: try garyxTask2783FavoritesSnapshotCaptureData(
+                        generation: .afterRotation
+                    )
+                )
+            case ("GET", "/api/thread-pins"):
+                return try garyxStubResponse(
+                    request,
+                    data: try garyxPinsPageData(ids: [], revision: 29)
+                )
+            case ("GET", "/api/recent-threads"):
+                recentRequests.increment()
+                return try garyxStubResponse(
+                    request,
+                    data: try garyxTask2783RecentThreadsCaptureData(
+                        generation: .beforeRotation
+                    )
+                )
+            default:
+                return try garyxStubResponse(request, statusCode: 400, data: Data())
+            }
+        }
+        defer {
+            snapshotGate.signal()
+            GaryxRecentThreadsURLProtocolStub.requestHandler = nil
+            session.invalidateAndCancel()
+        }
+
+        let model = makeModel(session: session)
+        XCTAssertNil(
+            model.threadFavoritesState.storeIncarnationId,
+            "the reproduction must begin at the real cold-start identity state"
+        )
+        let refresh = Task { @MainActor in
+            await model.refreshThreads(source: .userAction)
+        }
+        await fulfillment(of: [snapshotStarted], timeout: 2)
+        await refresh.value
+        XCTAssertTrue(
+            model.selectedRecentFeedPresentation.isPrimed,
+            "the recent lane must commit before the delayed favorites snapshot resets it"
+        )
+        let recentRequestsAtReset = recentRequests.value
+
+        snapshotGate.signal()
+        let identityRecoverySettled = await waitUntil {
+            model.threadFavoritesState.storeIncarnationId
+                == GaryxTask2783CapturedGeneration.afterRotation.storeIncarnationId
+                && model.threadFavoritesState.activeSnapshotTicket == nil
+                && model.threadFavoritesSnapshotTask == nil
+        }
+        XCTAssertTrue(identityRecoverySettled)
+        await model.homeProjectionGateway.waitForIdleForTesting()
+
+        let replacementIssued = await waitUntil(timeout: 0.5) {
+            recentRequests.value > recentRequestsAtReset
+        }
+        let presentation = model.selectedRecentFeedPresentation
+        let placeholder = model.homeThreadListStore.presentationSnapshot.recentPlaceholder
+        XCTAssertTrue(
+            replacementIssued,
+            """
+            REPRO: the delayed cold-start favorites snapshot reset the primed \
+            recent feed and terminated with placeholder=\(placeholder), \
+            isRefreshingHead=\(presentation.isRefreshingHead), \
+            recentRequestsBeforeReset=\(recentRequestsAtReset), \
+            recentRequestsAfterReset=\(recentRequests.value). \
+            No replacement refresh was scheduled.
+            """
+        )
+    }
+
     func testCommittedArchiveFiltersALateFavoritesSnapshotEverywhere() async throws {
         let archivedId = "thread-archived-favorite"
         let session = makeStubSession { request in
@@ -3213,6 +3469,95 @@ private func garyxFavoritesSnapshotData(
                 "total": rows.count,
                 "truncated": false,
             ],
+        ]
+    )
+}
+
+/// Sanitized envelopes captured from the same SQLite store immediately before
+/// and after `garyx gateway rotate-store-incarnation`. User rows are replaced
+/// with public synthetic values; the wire keys and identity pairs are exact.
+private struct GaryxTask2783CapturedGeneration {
+    var storeIncarnationId: String
+    var serverBootId: String
+
+    static let beforeRotation = Self(
+        storeIncarnationId: "40bb509a-1ba9-4367-9b02-185b0f225d14",
+        serverBootId: "1b117b9d-ad35-4a9c-af1b-4a17de0420ef"
+    )
+    static let afterRotation = Self(
+        storeIncarnationId: "520bea32-bc35-4ba2-a232-d875bd0f30fb",
+        serverBootId: "7c0ced65-bc8f-46df-9324-9af560562cf3"
+    )
+}
+
+private func garyxTask2783ThreadSummariesCaptureData(
+    generation: GaryxTask2783CapturedGeneration
+) throws -> Data {
+    try JSONSerialization.data(
+        withJSONObject: [
+            "store_incarnation_id": generation.storeIncarnationId,
+            "server_boot_id": generation.serverBootId,
+            "threads": [],
+            "has_more": false,
+            "next_cursor": NSNull(),
+        ]
+    )
+}
+
+private func garyxTask2783RecentThreadsCaptureData(
+    generation: GaryxTask2783CapturedGeneration
+) throws -> Data {
+    let threadId = "thread::1000000001"
+    return try JSONSerialization.data(
+        withJSONObject: [
+            "threads": [[
+                "active_run_id": NSNull(),
+                "activity_seq": 1,
+                "agent_id": "test-agent",
+                "last_active_at": "2026-07-27T00:00:00Z",
+                "last_message_preview": "Synthetic capture row",
+                "message_count": 1,
+                "provider_type": "codex_app_server",
+                "recent_run_id": NSNull(),
+                "recorded_at": "2026-07-27T00:00:00Z",
+                "root_workspace_path": "/workspace/test",
+                "run_state": NSNull(),
+                "thread_id": threadId,
+                "thread_runtime": NSNull(),
+                "thread_type": "task",
+                "title": "Test Thread",
+                "updated_at": "2026-07-27T00:00:00Z",
+                "workspace_dir": "/workspace/test",
+                "workspace_origin": "explicit",
+            ]],
+            "count": 1,
+            "limit": 30,
+            "total": 1,
+            "has_more": false,
+            "next_cursor": NSNull(),
+            "store_incarnation_id": generation.storeIncarnationId,
+            "server_boot_id": generation.serverBootId,
+        ]
+    )
+}
+
+private func garyxTask2783FavoritesSnapshotCaptureData(
+    generation: GaryxTask2783CapturedGeneration
+) throws -> Data {
+    try JSONSerialization.data(
+        withJSONObject: [
+            "store_incarnation_id": generation.storeIncarnationId,
+            "server_boot_id": generation.serverBootId,
+            "revision": 29,
+            "thread_ids": [],
+            "favorites": [],
+            "recent": [
+                "threads": [],
+                "total": 0,
+                "truncated": false,
+            ],
+            "summaries": [],
+            "summaries_truncated": false,
         ]
     )
 }

@@ -342,6 +342,47 @@ final class GaryxHomeThreadListPagerTests: XCTestCase {
         XCTAssertNotNil(pager.requestLoadMore(trigger: .footer))
     }
 
+    func testColdStartIdentityInterruptCannotLeaveIdleFeedPresentedAsLoading() throws {
+        var feeds = GaryxRecentThreadFeeds(pageLimit: 30, overlap: 5)
+        let ticket = try XCTUnwrap(
+            feeds.requestRefresh(
+                gatewayScope: "http://gateway.example.test",
+                runtimeEpoch: 0
+            )
+        )
+
+        feeds.interruptRefresh(ticket)
+        let presentation = feeds.selectedPresentation
+        let store = GaryxHomeThreadListStore()
+        let input = GaryxHomeThreadListInput(
+            sectionsInput: GaryxHomeThreadSectionsInput(
+                threads: [],
+                agents: [],
+                automations: [],
+                pinnedThreadIds: [],
+                recentThreadIds: [],
+                selectedThreadId: nil
+            ),
+            runningThreadIds: [],
+            isLoadingThreads: presentation.showsInitialSkeleton,
+            isHomeVisible: true,
+            selectedRecentFilter: feeds.selectedFilter,
+            recentFeedPresentation: presentation
+        )
+        XCTAssertTrue(store.apply(input))
+
+        let placeholder = store.snapshot.recentPlaceholder
+        XCTAssertFalse(
+            placeholder == .loadingSkeleton(rowCount: 6)
+                && !presentation.isRefreshingHead,
+            """
+            REPRO: the interrupted cold-start refresh has no request in flight, \
+            but Core still projects \(placeholder). An indefinite loading \
+            skeleton must imply that a replacement head refresh is active.
+            """
+        )
+    }
+
     func testResetBumpsEpochAndStaleTicketsAreNoOps() throws {
         var pager = primedPager(cursor: 30)
         let refreshTicket = try XCTUnwrap(pager.requestRefresh())
