@@ -121,13 +121,6 @@ extension GaryxMobileModel {
             return
         }
 
-        await refreshThreads(source: .userAction)
-        guard canContinueLastOpenedThreadRestore(threadId: threadId) else { return }
-        if let thread = cachedThreadSummary(for: threadId),
-           await restoreLastOpenedThread(thread, requestedThreadId: threadId) {
-            return
-        }
-
         do {
             let thread = try await client().getThread(threadId: threadId)
             guard canContinueLastOpenedThreadRestore(threadId: threadId) else { return }
@@ -178,16 +171,6 @@ extension GaryxMobileModel {
         showPendingThreadLink(threadId, requestId: requestId, source: source)
         guard isCurrentPendingThreadOpen(requestId) else { return }
 
-        await refreshThreads(source: .userAction)
-        guard isCurrentPendingThreadOpen(requestId) else { return }
-        if let thread = cachedThreadSummary(for: threadId) {
-            await selectThread(
-                thread,
-                invalidatesPendingThreadOpen: false,
-                source: source
-            )
-            return
-        }
         do {
             let thread = try await client().getThread(threadId: threadId)
             guard isCurrentPendingThreadOpen(requestId) else { return }

@@ -778,7 +778,9 @@ extension GaryxMobileModel {
     ) {
         threadSummaryCache.writeThrough(summaries)
         if let recentThreadIds {
-            recentThreadFeeds.resetFeedData()
+            homeFeedSyncCoordinator.runRecentFeedEffects(
+                recentThreadFeeds.resetFeedData()
+            )
             for threadId in recentThreadIds.reversed() {
                 recentThreadFeeds.upsertChat(threadId: threadId)
             }

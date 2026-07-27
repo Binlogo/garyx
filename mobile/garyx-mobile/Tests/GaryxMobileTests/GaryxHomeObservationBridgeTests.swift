@@ -43,14 +43,11 @@ final class GaryxHomeObservationBridgeTests: XCTestCase {
         // pager flips hasMoreThreadSummaries/footer state, and the pager's
         // didSet republishes the observation-store pagination snapshot.
         var feeds = model.recentThreadFeeds
-        let ticket = feeds.requestRefresh(filter: .all)!
-        feeds.completeRefresh(
-            ticket,
-            bundle: makeGaryxTestRecentRefreshBundle(
-                threadIds: ["thread-pagination"],
-                hasMore: true,
-                nextCursor: "cursor-30"
-            )
+        primeRecentFeedState(
+            &feeds,
+            ids: ["thread-pagination"],
+            hasMore: true,
+            nextCursor: "cursor-30"
         )
         model.recentThreadFeeds = feeds
 
@@ -296,12 +293,41 @@ final class GaryxHomeObservationBridgeTests: XCTestCase {
 
     private func primeRecentFeed(_ model: GaryxMobileModel, ids: [String]) {
         var feeds = model.recentThreadFeeds
-        let ticket = feeds.requestRefresh(filter: .all)!
-        feeds.completeRefresh(
-            ticket,
-            bundle: makeGaryxTestRecentRefreshBundle(threadIds: ids)
-        )
+        primeRecentFeedState(&feeds, ids: ids)
         model.recentThreadFeeds = feeds
+    }
+
+    private func primeRecentFeedState(
+        _ feeds: inout GaryxRecentThreadFeeds,
+        ids: [String],
+        hasMore: Bool = false,
+        nextCursor: String? = nil
+    ) {
+        let effects = feeds.requestHeadEffects(
+            filter: .all,
+            source: .userAction
+        )
+        guard let request = effects.compactMap({ effect -> GaryxRecentHeadRequest? in
+            guard case .requestHead(let request) = effect else { return nil }
+            return request
+        }).first,
+        let ticket = feeds.beginHeadRequest(
+            request,
+            gatewayScope: "http://127.0.0.1:31337",
+            runtimeEpoch: 1
+        ) else {
+            return XCTFail("expected an owned Recent head request")
+        }
+        _ = feeds.completeHead(
+            ticket,
+            result: .page(
+                makeGaryxTestRecentRefreshBundle(
+                    threadIds: ids,
+                    hasMore: hasMore,
+                    nextCursor: nextCursor
+                )
+            )
+        )
     }
 
     private func trackStaticHomeReads(

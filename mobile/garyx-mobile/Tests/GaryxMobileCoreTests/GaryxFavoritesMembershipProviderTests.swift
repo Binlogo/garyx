@@ -67,7 +67,11 @@ final class GaryxFavoritesMembershipProviderTests: XCTestCase {
         XCTAssertEqual(cache.count, 0)
         XCTAssertEqual(leases.activeLeaseCount, 0)
         XCTAssertTrue(owner.snapshot.orderedThreadIds.isEmpty)
-        XCTAssertEqual(owner.publishCount, 0)
+        XCTAssertEqual(
+            owner.publishCount,
+            1,
+            "minting the legacy attempt publishes the shared priming phase"
+        )
         XCTAssertEqual(owner.state.activeSnapshotTicket, enhanced)
     }
 
@@ -119,7 +123,11 @@ final class GaryxFavoritesMembershipProviderTests: XCTestCase {
 
         XCTAssertTrue(decision.accepted)
         XCTAssertEqual(owner.snapshot.orderedThreadIds, ["thread::a", "thread::b", "thread::c"])
-        XCTAssertEqual(owner.publishCount, 1)
+        XCTAssertEqual(
+            owner.publishCount,
+            2,
+            "the attempt phase and accepted ready phase are separate publications"
+        )
         XCTAssertEqual(emissions.count, 1)
         XCTAssertEqual(cache.count, 3)
         XCTAssertEqual(leases.activeLeaseCount, 1)
@@ -186,12 +194,16 @@ final class GaryxFavoritesMembershipProviderTests: XCTestCase {
         XCTAssertFalse(owner.completeSnapshot(ticket: wrongGeneration, snapshot: response).accepted)
         XCTAssertNil(cache.summary(for: "thread::new"))
         XCTAssertEqual(leases.activeLeaseCount, 0)
-        XCTAssertEqual(owner.publishCount, 0)
+        XCTAssertEqual(
+            owner.publishCount,
+            1,
+            "the owned attempt is observable even though stale completions are not"
+        )
         XCTAssertEqual(owner.state.activeSnapshotTicket, ticket)
 
         XCTAssertTrue(owner.completeSnapshot(ticket: ticket, snapshot: response).accepted)
         XCTAssertEqual(owner.snapshot.orderedThreadIds, ["thread::new"])
-        XCTAssertEqual(owner.publishCount, 1)
+        XCTAssertEqual(owner.publishCount, 2)
     }
 
     func testGatewayEpochABACompletionCannotWriteOldSummaryOrMembership() throws {
@@ -257,7 +269,11 @@ final class GaryxFavoritesMembershipProviderTests: XCTestCase {
         XCTAssertTrue(owner.state.snapshotFailed)
         XCTAssertEqual(cache.count, 0)
         XCTAssertEqual(leases.activeLeaseCount, 0)
-        XCTAssertEqual(owner.publishCount, 0)
+        XCTAssertEqual(
+            owner.publishCount,
+            2,
+            "priming and its user-action failure are both phase transitions"
+        )
 
         let retry = try snapshotTicket(owner.requestRefresh())
         XCTAssertEqual(retry.requestFlavor, .enhanced)
@@ -299,7 +315,11 @@ final class GaryxFavoritesMembershipProviderTests: XCTestCase {
         XCTAssertEqual(replacement.capabilityGeneration, 9)
         XCTAssertEqual(owner.state.snapshotRequestFlavor, .enhanced)
         XCTAssertEqual(owner.state.capabilityGeneration, 9)
-        XCTAssertEqual(owner.snapshot.orderedThreadIds, ["thread::kept-until-barrier"])
+        XCTAssertTrue(
+            owner.snapshot.orderedThreadIds.isEmpty,
+            "an incarnation barrier clears the old membership before the owned replacement"
+        )
+        XCTAssertTrue(owner.state.headPhase.isRefreshing)
     }
 
     private func makeOwner(

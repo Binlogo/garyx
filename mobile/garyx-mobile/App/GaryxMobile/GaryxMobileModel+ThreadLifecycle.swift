@@ -673,7 +673,7 @@ extension GaryxMobileModel {
             activeAssistantMessageIdsByThread[thread.id] = nil
             threadResidencyTracker.remove(thread.id)
             clearTranscriptCache(for: thread.id)
-            await refreshThreads(source: .userAction)
+            await requestHomeFeedRefresh(source: .userAction)
         case .rejected(let code, let message):
             let reconstructionTickets: [GaryxThreadReconstructionTicket]
             if code == "wrong_incarnation" {

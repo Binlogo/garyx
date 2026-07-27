@@ -36,7 +36,14 @@ final class HomeProjectionReducerTests: XCTestCase {
             state = reduce(state, ingest(corpus, epoch: 1)).state
             assertCheckpointParity(state, store, file: #filePath, line: #line)
 
-            state = reduce(state, .loadingChanged(isLoading: true)).state
+            state = reduce(
+                state,
+                ingest(
+                    corpus,
+                    epoch: 2,
+                    recentFeedPresentation: .init(headPhase: primingPhase())
+                )
+            ).state
             state = reduce(state, .homeVisibilityChanged(isVisible: true)).state
             assertCheckpointParity(state, store, file: #filePath, line: #line)
 
@@ -80,10 +87,7 @@ final class HomeProjectionReducerTests: XCTestCase {
                     epoch: 3,
                     selectedRecentFilter: .nonTask,
                     recentFeedPresentation: .init(
-                        isPrimed: false,
-                        isRefreshingHead: false,
-                        headFailure: true,
-                        footerState: .hidden
+                        headPhase: .primingOwed(.networkFailure, .userAction)
                     )
                 )
             ).state
@@ -710,7 +714,7 @@ final class HomeProjectionReducerTests: XCTestCase {
         _ input: HomeThreadSectionsReference.Inputs,
         epoch: Int,
         selectedRecentFilter: GaryxRecentThreadFilter = .all,
-        recentFeedPresentation: GaryxRecentThreadFeedPresentation = .init(isPrimed: true)
+        recentFeedPresentation: GaryxRecentThreadFeedPresentation = .init(headPhase: .ready)
     ) -> HomeProjectionEvent {
         .recentThreadsIngested(
             threads: input.threads,
@@ -731,7 +735,6 @@ final class HomeProjectionReducerTests: XCTestCase {
     ) {
         _ = store.apply(state.legacyCheckpointInput())
         XCTAssertEqual(store.snapshot.sections, state.snapshot.sections, file: file, line: line)
-        XCTAssertEqual(store.snapshot.isLoadingThreads, state.snapshot.isLoadingThreads, file: file, line: line)
         XCTAssertEqual(store.snapshot.isHomeVisible, state.snapshot.isHomeVisible, file: file, line: line)
         XCTAssertEqual(store.snapshot.selectedRecentFilter, state.snapshot.selectedRecentFilter, file: file, line: line)
         XCTAssertEqual(store.snapshot.recentFeedPresentation, state.snapshot.recentFeedPresentation, file: file, line: line)
@@ -744,11 +747,16 @@ final class HomeProjectionReducerTests: XCTestCase {
     private func snapshot(sections: GaryxHomeThreadSections) -> GaryxHomeThreadListSnapshot {
         GaryxHomeThreadListSnapshot(
             sections: sections,
-            isLoadingThreads: false,
             isHomeVisible: true,
             selectedRecentFilter: .all,
-            recentFeedPresentation: .init(isPrimed: true)
+            recentFeedPresentation: .init(headPhase: .ready)
         )
+    }
+
+    private func primingPhase() -> GaryxRecentHeadPhase {
+        var state = GaryxRecentHeadState()
+        _ = state.beginAttempt()
+        return state.phase
     }
 
 }

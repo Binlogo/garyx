@@ -26,8 +26,12 @@ final class GaryxRecentThreadFeedsTests: XCTestCase {
 
         XCTAssertEqual(feeds.selectedFilter, .favorites)
         XCTAssertNil(feeds.selectedPager)
+        XCTAssertNil(
+            feeds.selectedPresentation,
+            "Recent must not fabricate a phase for the Favorites domain"
+        )
         XCTAssertNil(feeds.feed(for: .favorites))
-        XCTAssertNil(feeds.requestRefresh())
+        XCTAssertNil(feeds.testRequestHead())
         XCTAssertNil(feeds.requestLoadMore(trigger: .footer))
         XCTAssertNil(feeds.retryLoadMore())
         XCTAssertTrue(feeds.visibleRecentThreadIds.isEmpty)
@@ -35,13 +39,13 @@ final class GaryxRecentThreadFeedsTests: XCTestCase {
 
     func testLateCompletionWritesTicketFilterNotCurrentSelection() throws {
         var feeds = makeFeeds()
-        let all = try XCTUnwrap(feeds.requestRefresh(filter: .all))
+        let all = try XCTUnwrap(feeds.testRequestHead(filter: .all))
         feeds.select(.nonTask)
-        let chats = try XCTUnwrap(feeds.requestRefresh())
+        let chats = try XCTUnwrap(feeds.testRequestHead())
         feeds.select(.all)
 
         XCTAssertEqual(
-            feeds.completeRefresh(
+            feeds.testCompleteHead(
                 chats,
                 bundle: bundle(page([("chat-a", 20), ("chat-b", 19)]))
             ),
@@ -50,7 +54,7 @@ final class GaryxRecentThreadFeedsTests: XCTestCase {
         XCTAssertEqual(feeds.nonTaskFeed.orderedThreadIds, ["chat-a", "chat-b"])
         XCTAssertTrue(feeds.allFeed.orderedThreadIds.isEmpty)
         XCTAssertEqual(
-            feeds.completeRefresh(
+            feeds.testCompleteHead(
                 all,
                 bundle: bundle(page([("task", 30), ("chat-a", 20)]))
             ),
@@ -62,10 +66,18 @@ final class GaryxRecentThreadFeedsTests: XCTestCase {
     func testResetAbandonsOldEpochAndPreservesSelection() throws {
         var feeds = makeFeeds()
         feeds.select(.nonTask)
-        let ticket = try XCTUnwrap(feeds.requestRefresh())
-        feeds.resetFeedData()
+        let ticket = try XCTUnwrap(feeds.testRequestHead())
+        let effects = feeds.resetFeedData()
         XCTAssertEqual(
-            feeds.completeRefresh(ticket, bundle: bundle(page([("old", 1)]))),
+            feeds.nonTaskFeed.headPhase,
+            .primingOwed(.supersededByReset, .immediate)
+        )
+        XCTAssertTrue(effects.contains { effect in
+            guard case .requestHead(let request) = effect else { return false }
+            return request.filter == .nonTask
+        })
+        XCTAssertEqual(
+            feeds.testCompleteHead(ticket, bundle: bundle(page([("old", 1)]))),
             .abandonedStaleEpoch
         )
         XCTAssertEqual(feeds.selectedFilter, .nonTask)
@@ -74,30 +86,50 @@ final class GaryxRecentThreadFeedsTests: XCTestCase {
 
     func testEmptySuccessPrimesAndFailurePreservesCachedRows() throws {
         var feeds = makeFeeds()
-        let empty = try XCTUnwrap(feeds.requestRefresh(filter: .all))
+        let empty = try XCTUnwrap(feeds.testRequestHead(filter: .all))
         XCTAssertEqual(
-            feeds.completeRefresh(empty, bundle: bundle(page([]))),
+            feeds.testCompleteHead(empty, bundle: bundle(page([]))),
             .applied
         )
         XCTAssertTrue(feeds.allFeed.isPrimed)
         XCTAssertFalse(feeds.allFeed.headFailure)
 
         adoptHead(&feeds, filter: .nonTask, rows: [("chat", 10)])
-        let failed = try XCTUnwrap(feeds.requestRefresh(filter: .nonTask))
-        feeds.failRefresh(failed)
+        let failed = try XCTUnwrap(feeds.testRequestHead(filter: .nonTask))
+        feeds.testFailHead(failed)
         XCTAssertEqual(feeds.nonTaskFeed.orderedThreadIds, ["chat"])
         XCTAssertTrue(feeds.nonTaskFeed.headFailure)
     }
 
-    func testRefreshAndLoadMoreShareOneLane() throws {
+    func testRefreshBlockedByLoadMoreTrailsImmediatelyAfterCompletion() throws {
         var feeds = makeFeeds()
         adoptHead(&feeds, filter: .all, rows: [("old", 100)], hasMore: true)
-        let refresh = try XCTUnwrap(feeds.requestRefresh(filter: .all))
+        let refresh = try XCTUnwrap(feeds.testRequestHead(filter: .all))
         XCTAssertNil(feeds.requestLoadMore(trigger: .footer))
-        feeds.failRefresh(refresh)
+        feeds.testFailHead(refresh)
         let load = try XCTUnwrap(feeds.requestLoadMore(trigger: .footer))
-        XCTAssertNil(feeds.requestRefresh(filter: .all))
-        feeds.failLoadMore(load)
+        let blockedEffects = feeds.requestHeadEffects(
+            filter: .all,
+            source: .userPullToRefresh
+        )
+        XCTAssertTrue(blockedEffects.isEmpty)
+        XCTAssertNotNil(feeds.allFeed.pendingHeadRequest)
+
+        let trailingEffects = feeds.failLoadMore(load)
+        let trailingRequest = try XCTUnwrap(
+            trailingEffects.compactMap { effect -> GaryxRecentHeadRequest? in
+                guard case .requestHead(let request) = effect else { return nil }
+                return request
+            }.first
+        )
+        XCTAssertEqual(trailingRequest.source, .userPullToRefresh)
+        XCTAssertNotNil(
+            feeds.beginHeadRequest(
+                trailingRequest,
+                gatewayScope: "https://gateway.example.test",
+                runtimeEpoch: 1
+            )
+        )
     }
 
     func testLoadMoreUsesCursorAndDeduplicates() throws {
@@ -112,7 +144,7 @@ final class GaryxRecentThreadFeedsTests: XCTestCase {
         let load = try XCTUnwrap(feeds.requestLoadMore(trigger: .footer))
         XCTAssertEqual(load.cursor, "cursor-99")
         XCTAssertEqual(
-            feeds.completeLoadMore(
+            feeds.testCompleteLoadMore(
                 load,
                 page: page(
                     [("b", 99), ("c", 98)],
@@ -136,11 +168,11 @@ final class GaryxRecentThreadFeedsTests: XCTestCase {
             cursor: "cursor-99"
         )
         let load = try XCTUnwrap(feeds.requestLoadMore(trigger: .footer))
-        _ = feeds.completeLoadMore(
+        _ = feeds.testCompleteLoadMore(
             load,
             page: page([("old-98", 98)], hasMore: true, cursor: "cursor-98")
         )
-        let ticket = try XCTUnwrap(feeds.requestRefresh(filter: .all))
+        let ticket = try XCTUnwrap(feeds.testRequestHead(filter: .all))
         XCTAssertEqual(ticket.mode, .rangeFill)
         XCTAssertEqual(ticket.oldHeadActivitySeq, 100)
         let first = page(
@@ -164,7 +196,7 @@ final class GaryxRecentThreadFeedsTests: XCTestCase {
             pages: [first, second]
         ))
         XCTAssertEqual(
-            feeds.completeRefresh(
+            feeds.testCompleteHead(
                 ticket,
                 bundle: GaryxRecentThreadRefreshBundle(
                     primaryPages: [first, second],
@@ -183,8 +215,8 @@ final class GaryxRecentThreadFeedsTests: XCTestCase {
         var feeds = makeFeeds()
         adoptHead(&feeds, filter: .all, rows: [("old", 100)], hasMore: true)
         let before = feeds.allFeed.orderedThreadIds
-        let ticket = try XCTUnwrap(feeds.requestRefresh(filter: .all))
-        feeds.failRefresh(ticket)
+        let ticket = try XCTUnwrap(feeds.testRequestHead(filter: .all))
+        feeds.testFailHead(ticket)
         XCTAssertEqual(feeds.allFeed.orderedThreadIds, before)
         XCTAssertTrue(feeds.allFeed.headFailure)
     }
@@ -193,7 +225,7 @@ final class GaryxRecentThreadFeedsTests: XCTestCase {
         var feeds = makeFeeds()
         adoptHead(&feeds, filter: .all, rows: [("old", 100)], hasMore: true)
         let oldEpoch = feeds.allFeed.pager.epoch
-        let ticket = try XCTUnwrap(feeds.requestRefresh(filter: .all))
+        let ticket = try XCTUnwrap(feeds.testRequestHead(filter: .all))
         let pages = (0..<GaryxRecentThreadRangeFill.maxChainPages).map { index in
             let top = Int64(200 - index * 2)
             return page(
@@ -203,7 +235,7 @@ final class GaryxRecentThreadFeedsTests: XCTestCase {
             )
         }
         XCTAssertEqual(
-            feeds.completeRefresh(
+            feeds.testCompleteHead(
                 ticket,
                 bundle: GaryxRecentThreadRefreshBundle(
                     primaryPages: pages,
@@ -222,7 +254,7 @@ final class GaryxRecentThreadFeedsTests: XCTestCase {
         var feeds = makeFeeds()
         adoptHead(&feeds, filter: .all, rows: [("old", 100)], hasMore: true)
         let oldEpoch = feeds.allFeed.pager.epoch
-        let ticket = try XCTUnwrap(feeds.requestRefresh(filter: .all))
+        let ticket = try XCTUnwrap(feeds.testRequestHead(filter: .all))
         let pages = (0..<GaryxRecentThreadRangeFill.maxChainPages).map { index in
             let top = Int64(200 - index * 2)
             return page(
@@ -240,7 +272,7 @@ final class GaryxRecentThreadFeedsTests: XCTestCase {
         let movingAgain = page([("moved-again-230", 230)], hasMore: true)
 
         XCTAssertEqual(
-            feeds.completeRefresh(
+            feeds.testCompleteHead(
                 ticket,
                 bundle: GaryxRecentThreadRefreshBundle(
                     primaryPages: pages,
@@ -270,13 +302,13 @@ final class GaryxRecentThreadFeedsTests: XCTestCase {
             rows: [("old", 100), ("ghost", 90)],
             hasMore: true
         )
-        let ticket = try XCTUnwrap(feeds.requestRefresh(filter: .all))
+        let ticket = try XCTUnwrap(feeds.testRequestHead(filter: .all))
         let exhausted = page(
             [("new", 110), ("still-live", 105)],
             hasMore: false,
             cursor: nil
         )
-        _ = feeds.completeRefresh(ticket, bundle: bundle(exhausted))
+        _ = feeds.testCompleteHead(ticket, bundle: bundle(exhausted))
         XCTAssertEqual(feeds.allFeed.orderedThreadIds, ["new", "still-live"])
         XCTAssertNil(feeds.allFeed.nextCursor)
     }
@@ -284,7 +316,7 @@ final class GaryxRecentThreadFeedsTests: XCTestCase {
     func testBootMismatchForcesReplacementThenAcceptsNewBoot() throws {
         var feeds = makeFeeds()
         adoptHead(&feeds, filter: .all, rows: [("old", 100)], hasMore: true)
-        let range = try XCTUnwrap(feeds.requestRefresh(filter: .all))
+        let range = try XCTUnwrap(feeds.testRequestHead(filter: .all))
         let newBoot = page(
             [("new", 110)],
             hasMore: false,
@@ -292,16 +324,16 @@ final class GaryxRecentThreadFeedsTests: XCTestCase {
             boot: "boot-b"
         )
         XCTAssertEqual(
-            feeds.completeRefresh(range, bundle: bundle(newBoot)),
+            feeds.testCompleteHead(range, bundle: bundle(newBoot)),
             .forceReplacement
         )
         XCTAssertEqual(feeds.allFeed.orderedThreadIds, ["old"])
         XCTAssertTrue(feeds.allFeed.forceReplacementPending)
 
-        let replacement = try XCTUnwrap(feeds.requestRefresh(filter: .all))
+        let replacement = try XCTUnwrap(feeds.testRequestHead(filter: .all))
         XCTAssertEqual(replacement.mode, .replacement)
         XCTAssertEqual(
-            feeds.completeRefresh(replacement, bundle: bundle(newBoot)),
+            feeds.testCompleteHead(replacement, bundle: bundle(newBoot)),
             .applied
         )
         XCTAssertEqual(feeds.allFeed.orderedThreadIds, ["new"])
@@ -311,7 +343,7 @@ final class GaryxRecentThreadFeedsTests: XCTestCase {
     func testIncarnationMismatchForcesReplacementThenAcceptsNewStore() throws {
         var feeds = makeFeeds()
         adoptHead(&feeds, filter: .all, rows: [("old", 100)], hasMore: true)
-        let range = try XCTUnwrap(feeds.requestRefresh(filter: .all))
+        let range = try XCTUnwrap(feeds.testRequestHead(filter: .all))
         let newStore = page(
             [("new", 110)],
             hasMore: false,
@@ -319,15 +351,15 @@ final class GaryxRecentThreadFeedsTests: XCTestCase {
             incarnation: "inc-b"
         )
         XCTAssertEqual(
-            feeds.completeRefresh(range, bundle: bundle(newStore)),
+            feeds.testCompleteHead(range, bundle: bundle(newStore)),
             .forceReplacement
         )
         XCTAssertEqual(feeds.allFeed.orderedThreadIds, ["old"])
 
-        let replacement = try XCTUnwrap(feeds.requestRefresh(filter: .all))
+        let replacement = try XCTUnwrap(feeds.testRequestHead(filter: .all))
         XCTAssertEqual(replacement.mode, .replacement)
         XCTAssertEqual(
-            feeds.completeRefresh(replacement, bundle: bundle(newStore)),
+            feeds.testCompleteHead(replacement, bundle: bundle(newStore)),
             .applied
         )
         XCTAssertEqual(feeds.allFeed.orderedThreadIds, ["new"])
@@ -337,7 +369,7 @@ final class GaryxRecentThreadFeedsTests: XCTestCase {
     func testHeadVerificationAllowsOneImmediateRoundThenDefersMotion() throws {
         var feeds = makeFeeds()
         adoptHead(&feeds, filter: .all, rows: [("old", 100)], hasMore: true)
-        let ticket = try XCTUnwrap(feeds.requestRefresh(filter: .all))
+        let ticket = try XCTUnwrap(feeds.testRequestHead(filter: .all))
         let primary = page(
             [("new-110", 110), ("old", 100)],
             hasMore: true,
@@ -351,7 +383,7 @@ final class GaryxRecentThreadFeedsTests: XCTestCase {
         )
         let movingAgain = page([("moved-130", 130)], hasMore: true)
         XCTAssertEqual(
-            feeds.completeRefresh(
+            feeds.testCompleteHead(
                 ticket,
                 bundle: GaryxRecentThreadRefreshBundle(
                     primaryPages: [primary],
@@ -373,10 +405,10 @@ final class GaryxRecentThreadFeedsTests: XCTestCase {
         var feeds = makeFeeds()
         adoptHead(&feeds, filter: .all, rows: [("task", 20), ("chat", 19)])
         adoptHead(&feeds, filter: .nonTask, rows: [("chat", 19)])
-        let stale = try XCTUnwrap(feeds.requestRefresh(filter: .all))
+        let stale = try XCTUnwrap(feeds.testRequestHead(filter: .all))
         feeds.removeThread("chat")
         XCTAssertEqual(
-            feeds.completeRefresh(stale, bundle: bundle(page([("chat", 30)]))),
+            feeds.testCompleteHead(stale, bundle: bundle(page([("chat", 30)]))),
             .abandonedLocalMutation
         )
         XCTAssertEqual(feeds.allFeed.orderedThreadIds, ["task"])
@@ -391,8 +423,8 @@ final class GaryxRecentThreadFeedsTests: XCTestCase {
         var beforeCommit = makeFeeds()
         adoptHead(&beforeCommit, filter: .all, rows: [("target", 100), ("keep", 90)])
         beforeCommit.forceReplacement()
-        let committedTicket = try XCTUnwrap(beforeCommit.requestRefresh(filter: .all))
-        _ = beforeCommit.completeRefresh(
+        let committedTicket = try XCTUnwrap(beforeCommit.testRequestHead(filter: .all))
+        _ = beforeCommit.testCompleteHead(
             committedTicket,
             bundle: bundle(page([("keep", 90)]))
         )
@@ -401,20 +433,20 @@ final class GaryxRecentThreadFeedsTests: XCTestCase {
         var uncommitted = makeFeeds()
         adoptHead(&uncommitted, filter: .all, rows: [("target", 100), ("keep", 90)])
         uncommitted.forceReplacement()
-        let uncommittedTicket = try XCTUnwrap(uncommitted.requestRefresh(filter: .all))
-        _ = uncommitted.completeRefresh(
+        let uncommittedTicket = try XCTUnwrap(uncommitted.testRequestHead(filter: .all))
+        _ = uncommitted.testCompleteHead(
             uncommittedTicket,
             bundle: bundle(page([("target", 100), ("keep", 90)]))
         )
         XCTAssertEqual(uncommitted.allFeed.orderedThreadIds, ["target", "keep"])
 
         uncommitted.forceReplacement()
-        let failed = try XCTUnwrap(uncommitted.requestRefresh(filter: .all))
-        uncommitted.failRefresh(failed)
+        let failed = try XCTUnwrap(uncommitted.testRequestHead(filter: .all))
+        uncommitted.testFailHead(failed)
         XCTAssertEqual(uncommitted.allFeed.orderedThreadIds, ["target", "keep"])
         XCTAssertTrue(uncommitted.allFeed.forceReplacementPending)
         XCTAssertEqual(
-            try XCTUnwrap(uncommitted.requestRefresh(filter: .all)).mode,
+            try XCTUnwrap(uncommitted.testRequestHead(filter: .all)).mode,
             .replacement
         )
     }
@@ -422,11 +454,11 @@ final class GaryxRecentThreadFeedsTests: XCTestCase {
     func testLifecycleForceReplacementQueuedDuringActiveRefreshCannotBeConsumedByOldTicket() throws {
         var feeds = makeFeeds()
         adoptHead(&feeds, filter: .all, rows: [("target", 100), ("keep", 90)])
-        let oldTicket = try XCTUnwrap(feeds.requestRefresh(filter: .all))
+        let oldTicket = try XCTUnwrap(feeds.testRequestHead(filter: .all))
 
         feeds.forceReplacement()
         XCTAssertEqual(
-            feeds.completeRefresh(
+            feeds.testCompleteHead(
                 oldTicket,
                 bundle: bundle(page([("target", 100), ("keep", 90)]))
             ),
@@ -434,10 +466,10 @@ final class GaryxRecentThreadFeedsTests: XCTestCase {
         )
         XCTAssertTrue(feeds.allFeed.forceReplacementPending)
 
-        let replacement = try XCTUnwrap(feeds.requestRefresh(filter: .all))
+        let replacement = try XCTUnwrap(feeds.testRequestHead(filter: .all))
         XCTAssertEqual(replacement.mode, .replacement)
         XCTAssertEqual(
-            feeds.completeRefresh(replacement, bundle: bundle(page([("keep", 90)]))),
+            feeds.testCompleteHead(replacement, bundle: bundle(page([("keep", 90)]))),
             .applied
         )
         XCTAssertFalse(feeds.allFeed.forceReplacementPending)
@@ -448,17 +480,20 @@ final class GaryxRecentThreadFeedsTests: XCTestCase {
         var feeds = makeFeeds()
         adoptHead(&feeds, filter: .all, rows: [("head", 100)], hasMore: true)
         for index in 1..<GaryxRecentThreadRangeFill.replacementCycleInterval {
-            let ticket = try XCTUnwrap(feeds.requestRefresh(filter: .all))
+            let ticket = try XCTUnwrap(feeds.testRequestHead(filter: .all))
             if index == GaryxRecentThreadRangeFill.replacementCycleInterval - 1 {
                 XCTAssertEqual(ticket.mode, .replacement)
             }
             let head = page([("head", 100)], hasMore: true)
-            _ = feeds.completeRefresh(ticket, bundle: bundle(head))
+            _ = feeds.testCompleteHead(ticket, bundle: bundle(head))
         }
     }
 
     private func makeFeeds() -> GaryxRecentThreadFeeds {
-        GaryxRecentThreadFeeds(pageLimit: 30, overlap: 5)
+        GaryxRecentThreadFeeds.bootstrap(
+            pageLimit: 30,
+            overlap: 5
+        ).feeds
     }
 
     private func adoptHead(
@@ -468,13 +503,13 @@ final class GaryxRecentThreadFeedsTests: XCTestCase {
         hasMore: Bool = false,
         cursor: String? = nil
     ) {
-        let ticket = feeds.requestRefresh(filter: filter)!
+        let ticket = feeds.testRequestHead(filter: filter)!
         let value = page(
             rows,
             hasMore: hasMore,
             cursor: cursor ?? (hasMore ? "cursor-head" : nil)
         )
-        XCTAssertEqual(feeds.completeRefresh(ticket, bundle: bundle(value)), .applied)
+        XCTAssertEqual(feeds.testCompleteHead(ticket, bundle: bundle(value)), .applied)
     }
 
     private func page(
@@ -500,5 +535,49 @@ final class GaryxRecentThreadFeedsTests: XCTestCase {
             primaryPages: [value],
             verificationPage: value
         )
+    }
+}
+
+private extension GaryxRecentThreadFeeds {
+    mutating func testRequestHead(
+        filter: GaryxRecentThreadFilter? = nil,
+        forceReplacement: Bool = false
+    ) -> GaryxRecentThreadRefreshTicket? {
+        let effects = requestHeadEffects(
+            filter: filter,
+            source: .userAction,
+            forceReplacement: forceReplacement
+        )
+        guard let request = effects.compactMap({ effect -> GaryxRecentHeadRequest? in
+            guard case .requestHead(let request) = effect else { return nil }
+            return request
+        }).first else {
+            return nil
+        }
+        return beginHeadRequest(
+            request,
+            gatewayScope: "https://gateway.example.test",
+            runtimeEpoch: 1
+        )
+    }
+
+    mutating func testCompleteHead(
+        _ ticket: GaryxRecentThreadRefreshTicket,
+        bundle: GaryxRecentThreadRefreshBundle
+    ) -> GaryxRecentThreadFeedCompletion {
+        completeHead(ticket, result: .page(bundle)).outcome
+    }
+
+    mutating func testFailHead(
+        _ ticket: GaryxRecentThreadRefreshTicket
+    ) {
+        _ = completeHead(ticket, result: .failed)
+    }
+
+    mutating func testCompleteLoadMore(
+        _ ticket: GaryxRecentThreadLoadMoreTicket,
+        page: GaryxRecentThreadFeedPage
+    ) -> GaryxRecentThreadFeedCompletion {
+        completeLoadMore(ticket, page: page).outcome
     }
 }

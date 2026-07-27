@@ -33,39 +33,68 @@ public enum GaryxRecentThreadFilter: String, CaseIterable, Equatable, Hashable, 
     }
 }
 
-public struct GaryxRecentThreadFeedPresentation: Equatable, Sendable {
-    public var isPrimed: Bool
-    public var isRefreshingHead: Bool
-    public var headFailure: Bool
-    public var footerState: GaryxHomeLoadMoreFooterState
-
-    public init(
-        isPrimed: Bool = false,
-        isRefreshingHead: Bool = false,
-        headFailure: Bool = false,
-        footerState: GaryxHomeLoadMoreFooterState = .hidden
-    ) {
-        self.isPrimed = isPrimed
-        self.isRefreshingHead = isRefreshingHead
-        self.headFailure = headFailure
-        self.footerState = footerState
-    }
-
-    public var showsInitialSkeleton: Bool {
-        !isPrimed && isRefreshingHead && !headFailure
-    }
-}
-
 public enum GaryxRecentThreadRefreshMode: Equatable, Sendable {
     case rangeFill
     case replacement
 }
 
+public struct GaryxRecentHeadRequest: Equatable, Sendable {
+    public var filter: GaryxRecentThreadFilter
+    public var source: GaryxThreadListRefreshSource
+    public var forceReplacement: Bool
+    public var updatesHomeChrome: Bool
+    public var runsWhenUnselected: Bool
+
+    public init(
+        filter: GaryxRecentThreadFilter,
+        source: GaryxThreadListRefreshSource,
+        forceReplacement: Bool = false,
+        updatesHomeChrome: Bool = true,
+        runsWhenUnselected: Bool = false
+    ) {
+        precondition(filter != .favorites, "Favorites owns its snapshot transport")
+        self.filter = filter
+        self.source = source
+        self.forceReplacement = forceReplacement
+        self.updatesHomeChrome = updatesHomeChrome
+        self.runsWhenUnselected = runsWhenUnselected
+    }
+
+    public func merging(_ candidate: Self) -> Self {
+        precondition(filter == candidate.filter, "head requests only merge within one feed")
+        let mergedSource: GaryxThreadListRefreshSource
+        switch (source, candidate.source) {
+        case (.userPullToRefresh, _), (_, .userPullToRefresh):
+            mergedSource = .userPullToRefresh
+        case (.userAction, _), (_, .userAction):
+            mergedSource = .userAction
+        case (.backgroundLoop, .backgroundLoop):
+            mergedSource = .backgroundLoop
+        }
+        return Self(
+            filter: filter,
+            source: mergedSource,
+            forceReplacement: forceReplacement || candidate.forceReplacement,
+            updatesHomeChrome: updatesHomeChrome || candidate.updatesHomeChrome,
+            runsWhenUnselected: runsWhenUnselected || candidate.runsWhenUnselected
+        )
+    }
+}
+
+public enum GaryxRecentFeedEffect: Equatable, Sendable {
+    case requestHead(GaryxRecentHeadRequest)
+    case publish
+}
+
 public struct GaryxRecentThreadRefreshTicket: Equatable, Sendable {
     public let filter: GaryxRecentThreadFilter
     public let pagerTicket: GaryxThreadListRefreshTicket
+    public let attempt: GaryxRecentHeadAttempt
     public let gatewayScope: String
     public let runtimeEpoch: UInt64
+    public let source: GaryxThreadListRefreshSource
+    public let updatesHomeChrome: Bool
+    public let runsWhenUnselected: Bool
     public let mode: GaryxRecentThreadRefreshMode
     public let oldHeadActivitySeq: Int64?
     public let forceReplacementGeneration: UInt64
@@ -152,6 +181,45 @@ public enum GaryxRecentThreadFeedCompletion: Equatable, Sendable {
     case abandonedStaleEpoch
     case abandonedLocalMutation
     case forceReplacement
+    case failed
+    case interrupted(GaryxRecentHeadStall)
+}
+
+public enum GaryxRecentHeadResult: Equatable, Sendable {
+    case page(GaryxRecentThreadRefreshBundle)
+    case failed
+    case interrupted(GaryxRecentHeadStall)
+}
+
+public struct GaryxRecentHeadCompletion: Equatable, Sendable {
+    public var outcome: GaryxRecentThreadFeedCompletion
+    public var effects: [GaryxRecentFeedEffect]
+
+    public init(
+        outcome: GaryxRecentThreadFeedCompletion,
+        effects: [GaryxRecentFeedEffect]
+    ) {
+        self.outcome = outcome
+        self.effects = effects
+    }
+}
+
+public struct GaryxRecentLoadMoreCompletion: Equatable, Sendable {
+    public var outcome: GaryxRecentThreadFeedCompletion
+    public var effects: [GaryxRecentFeedEffect]
+
+    public init(
+        outcome: GaryxRecentThreadFeedCompletion,
+        effects: [GaryxRecentFeedEffect]
+    ) {
+        self.outcome = outcome
+        self.effects = effects
+    }
+}
+
+public struct GaryxRecentThreadFeedBootstrap: Equatable, Sendable {
+    public var state: GaryxRecentThreadFeedState
+    public var effects: [GaryxRecentFeedEffect]
 }
 
 public enum GaryxRecentThreadRangeFill {
@@ -180,10 +248,9 @@ public enum GaryxRecentThreadRangeFill {
     }
 }
 
-public struct GaryxRecentThreadFeedState: Equatable, Sendable {
+public struct GaryxRecentThreadFeedState: Equatable, Sendable, GaryxRecentHeadDomain {
     public private(set) var orderedThreadIds: [String]
-    public private(set) var isPrimed: Bool
-    public private(set) var headFailure: Bool
+    private var headState: GaryxRecentHeadState
     public private(set) var pager: GaryxHomeThreadListPager
     public private(set) var nextCursor: String?
     public private(set) var storeIncarnationId: String?
@@ -193,11 +260,11 @@ public struct GaryxRecentThreadFeedState: Equatable, Sendable {
     public private(set) var forceReplacementPending: Bool
     public private(set) var forceReplacementGeneration: UInt64
     public private(set) var trailingDirty: Bool
+    public private(set) var pendingHeadRequest: GaryxRecentHeadRequest?
 
-    public init(pageLimit: Int, overlap: Int) {
+    private init(pageLimit: Int, overlap: Int) {
         orderedThreadIds = []
-        isPrimed = false
-        headFailure = false
+        headState = GaryxRecentHeadState()
         pager = GaryxHomeThreadListPager(pageLimit: pageLimit, overlap: overlap)
         nextCursor = nil
         storeIncarnationId = nil
@@ -207,27 +274,74 @@ public struct GaryxRecentThreadFeedState: Equatable, Sendable {
         forceReplacementPending = false
         forceReplacementGeneration = 0
         trailingDirty = false
+        pendingHeadRequest = nil
     }
 
-    public var presentation: GaryxRecentThreadFeedPresentation {
-        GaryxRecentThreadFeedPresentation(
-            isPrimed: isPrimed,
-            isRefreshingHead: pager.isRefreshingHead,
-            headFailure: headFailure,
-            footerState: pager.footerState
+    public static func bootstrap(
+        filter: GaryxRecentThreadFilter,
+        pageLimit: Int,
+        overlap: Int
+    ) -> GaryxRecentThreadFeedBootstrap {
+        precondition(filter != .favorites, "Favorites owns its own reducer")
+        return GaryxRecentThreadFeedBootstrap(
+            state: GaryxRecentThreadFeedState(
+                pageLimit: pageLimit,
+                overlap: overlap
+            ),
+            effects: [
+                .requestHead(
+                    GaryxRecentHeadRequest(
+                        filter: filter,
+                        source: .userAction,
+                        forceReplacement: true,
+                        updatesHomeChrome: filter == .all
+                    )
+                ),
+            ]
         )
     }
 
-    fileprivate mutating func requestRefresh(
+    public var headPhase: GaryxRecentHeadPhase { headState.phase }
+    public var rows: [String] { orderedThreadIds }
+    public var footerState: GaryxHomeLoadMoreFooterState { pager.footerState }
+    public var isPrimed: Bool { headPhase.isPrimed }
+    public var headFailure: Bool { headPhase.awaitsUserAction }
+
+    public var presentation: GaryxRecentThreadFeedPresentation {
+        GaryxRecentThreadFeedPresentation(self)
+    }
+
+    fileprivate mutating func enqueueHeadRequest(
+        _ request: GaryxRecentHeadRequest
+    ) -> [GaryxRecentFeedEffect] {
+        guard headPhase.activeAttempt == nil, !pager.isLoadingMore else {
+            pendingHeadRequest = Self.mergedPendingHeadRequest(
+                pendingHeadRequest,
+                request
+            )
+            return []
+        }
+        return [.requestHead(request)]
+    }
+
+    fileprivate mutating func beginHeadRequest(
+        _ request: GaryxRecentHeadRequest,
         gatewayScope: String,
-        runtimeEpoch: UInt64,
-        forceReplacement: Bool
+        runtimeEpoch: UInt64
     ) -> GaryxRecentThreadRefreshTicket? {
-        guard !pager.isLoadingMore, let ticket = pager.requestRefresh() else { return nil }
-        headFailure = false
+        guard !pager.isLoadingMore,
+              headPhase.activeAttempt == nil,
+              let pagerTicket = pager.requestRefresh(),
+              let attempt = headState.beginAttempt() else {
+            pendingHeadRequest = Self.mergedPendingHeadRequest(
+                pendingHeadRequest,
+                request
+            )
+            return nil
+        }
         let periodicReplacement = (refreshCycle + 1)
             % GaryxRecentThreadRangeFill.replacementCycleInterval == 0
-        let mode: GaryxRecentThreadRefreshMode = forceReplacement
+        let mode: GaryxRecentThreadRefreshMode = request.forceReplacement
             || forceReplacementPending
             || !isPrimed
             || periodicReplacement
@@ -235,23 +349,63 @@ public struct GaryxRecentThreadFeedState: Equatable, Sendable {
             : .rangeFill
         return GaryxRecentThreadRefreshTicket(
             filter: .all, // Feed owner replaces this value.
-            pagerTicket: ticket,
+            pagerTicket: pagerTicket,
+            attempt: attempt,
             gatewayScope: gatewayScope,
             runtimeEpoch: runtimeEpoch,
+            source: request.source,
+            updatesHomeChrome: request.updatesHomeChrome,
+            runsWhenUnselected: request.runsWhenUnselected,
             mode: mode,
             oldHeadActivitySeq: headActivitySeq,
             forceReplacementGeneration: forceReplacementGeneration
         )
     }
 
-    fileprivate mutating func completeRefresh(
+    fileprivate mutating func completeHead(
+        _ ticket: GaryxRecentThreadRefreshTicket,
+        result: GaryxRecentHeadResult
+    ) -> GaryxRecentHeadCompletion {
+        switch result {
+        case .page(let bundle):
+            return completeHeadPage(ticket, bundle: bundle)
+        case .failed:
+            pager.failRefresh(ticket.pagerTicket)
+            guard headState.settle(
+                ticket.attempt,
+                stalledBy: .networkFailure,
+                demand: pendingHeadRequest == nil ? .userAction : .immediate
+            ) else {
+                return GaryxRecentHeadCompletion(
+                    outcome: .abandonedStaleEpoch,
+                    effects: [.publish]
+                )
+            }
+            return GaryxRecentHeadCompletion(
+                outcome: .failed,
+                effects: [.publish] + drainPendingHeadEffects()
+            )
+        case .interrupted(let stall):
+            pager.interruptRefresh(ticket.pagerTicket)
+            return settleHead(
+                ticket,
+                outcome: .interrupted(stall),
+                stalledBy: stall
+            )
+        }
+    }
+
+    private mutating func completeHeadPage(
         _ ticket: GaryxRecentThreadRefreshTicket,
         bundle: GaryxRecentThreadRefreshBundle
-    ) -> GaryxRecentThreadFeedCompletion {
+    ) -> GaryxRecentHeadCompletion {
         guard !bundle.primaryPages.isEmpty else {
             pager.failRefresh(ticket.pagerTicket)
-            headFailure = true
-            return .abandonedStaleEpoch
+            return settleHead(
+                ticket,
+                outcome: .abandonedStaleEpoch,
+                stalledBy: .supersededByReset
+            )
         }
         let allPages = bundle.primaryPages
             + [bundle.verificationPage]
@@ -260,21 +414,36 @@ public struct GaryxRecentThreadFeedState: Equatable, Sendable {
         guard let identity = Self.consistentIdentity(allPages) else {
             pager.failRefresh(ticket.pagerTicket)
             markForceReplacement()
-            return .forceReplacement
+            return settleHead(
+                ticket,
+                outcome: .forceReplacement,
+                stalledBy: .identityReplacement,
+                forceReplacement: true
+            )
         }
         if let storeIncarnationId,
            storeIncarnationId != identity.storeIncarnationId,
            ticket.mode != .replacement {
             pager.failRefresh(ticket.pagerTicket)
             markForceReplacement()
-            return .forceReplacement
+            return settleHead(
+                ticket,
+                outcome: .forceReplacement,
+                stalledBy: .identityReplacement,
+                forceReplacement: true
+            )
         }
         if let serverBootId,
            serverBootId != identity.serverBootId,
            ticket.mode != .replacement {
             pager.failRefresh(ticket.pagerTicket)
             markForceReplacement()
-            return .forceReplacement
+            return settleHead(
+                ticket,
+                outcome: .forceReplacement,
+                stalledBy: .identityReplacement,
+                forceReplacement: true
+            )
         }
 
         var primary = applyChain(
@@ -294,8 +463,12 @@ public struct GaryxRecentThreadFeedState: Equatable, Sendable {
             let immediateTicket = GaryxRecentThreadRefreshTicket(
                 filter: ticket.filter,
                 pagerTicket: ticket.pagerTicket,
+                attempt: ticket.attempt,
                 gatewayScope: ticket.gatewayScope,
                 runtimeEpoch: ticket.runtimeEpoch,
+                source: ticket.source,
+                updatesHomeChrome: ticket.updatesHomeChrome,
+                runsWhenUnselected: ticket.runsWhenUnselected,
                 mode: .rangeFill,
                 oldHeadActivitySeq: primaryHead,
                 forceReplacementGeneration: ticket.forceReplacementGeneration
@@ -331,9 +504,17 @@ public struct GaryxRecentThreadFeedState: Equatable, Sendable {
             replacementCommitted: primary.replacement
         ) {
         case .abandonedStaleEpoch:
-            return .abandonedStaleEpoch
+            return settleHead(
+                ticket,
+                outcome: .abandonedStaleEpoch,
+                stalledBy: .supersededByReset
+            )
         case .abandonedLocalMutation:
-            return .abandonedLocalMutation
+            return settleHead(
+                ticket,
+                outcome: .abandonedLocalMutation,
+                stalledBy: .racedLocalMutation
+            )
         case .apply:
             let replacementRequestedAfterDispatch = forceReplacementPending
                 && forceReplacementGeneration != ticket.forceReplacementGeneration
@@ -346,20 +527,20 @@ public struct GaryxRecentThreadFeedState: Equatable, Sendable {
             refreshCycle += 1
             forceReplacementPending = replacementRequestedAfterDispatch
             trailingDirty = continuedMotion
-            isPrimed = true
-            headFailure = false
-            return replacementRequestedAfterDispatch ? .forceReplacement : .applied
+            if replacementRequestedAfterDispatch {
+                return settleHead(
+                    ticket,
+                    outcome: .forceReplacement,
+                    stalledBy: .racedLocalMutation,
+                    forceReplacement: true
+                )
+            }
+            _ = headState.settleSuccess(ticket.attempt)
+            return GaryxRecentHeadCompletion(
+                outcome: .applied,
+                effects: [.publish] + drainPendingHeadEffects()
+            )
         }
-    }
-
-    fileprivate mutating func failRefresh(_ ticket: GaryxRecentThreadRefreshTicket) {
-        let accepted = ticket.pagerTicket.epoch == pager.epoch
-        pager.failRefresh(ticket.pagerTicket)
-        if accepted { headFailure = true }
-    }
-
-    fileprivate mutating func interruptRefresh(_ ticket: GaryxRecentThreadRefreshTicket) {
-        pager.interruptRefresh(ticket.pagerTicket)
     }
 
     fileprivate mutating func requestLoadMore(
@@ -367,7 +548,7 @@ public struct GaryxRecentThreadFeedState: Equatable, Sendable {
         gatewayScope: String,
         runtimeEpoch: UInt64
     ) -> GaryxRecentThreadLoadMoreTicket? {
-        guard !pager.isRefreshingHead,
+        guard headPhase.activeAttempt == nil,
               !forceReplacementPending,
               let cursor = nextCursor,
               let ticket = pager.requestLoadMore(trigger: trigger) else { return nil }
@@ -384,7 +565,7 @@ public struct GaryxRecentThreadFeedState: Equatable, Sendable {
         gatewayScope: String,
         runtimeEpoch: UInt64
     ) -> GaryxRecentThreadLoadMoreTicket? {
-        guard !pager.isRefreshingHead,
+        guard headPhase.activeAttempt == nil,
               !forceReplacementPending,
               let cursor = nextCursor,
               let ticket = pager.retryLoadMore() else { return nil }
@@ -400,16 +581,30 @@ public struct GaryxRecentThreadFeedState: Equatable, Sendable {
     fileprivate mutating func completeLoadMore(
         _ ticket: GaryxRecentThreadLoadMoreTicket,
         page: GaryxRecentThreadFeedPage
-    ) -> GaryxRecentThreadFeedCompletion {
+    ) -> GaryxRecentLoadMoreCompletion {
         if let storeIncarnationId, storeIncarnationId != page.storeIncarnationId {
             pager.failLoadMore(ticket.pagerTicket)
             markForceReplacement()
-            return .forceReplacement
+            return GaryxRecentLoadMoreCompletion(
+                outcome: .forceReplacement,
+                effects: [.publish] + recoveryHeadEffects(
+                    filter: ticket.filter,
+                    source: .userAction,
+                    forceReplacement: true
+                )
+            )
         }
         if let serverBootId, serverBootId != page.serverBootId {
             pager.failLoadMore(ticket.pagerTicket)
             markForceReplacement()
-            return .forceReplacement
+            return GaryxRecentLoadMoreCompletion(
+                outcome: .forceReplacement,
+                effects: [.publish] + recoveryHeadEffects(
+                    filter: ticket.filter,
+                    source: .userAction,
+                    forceReplacement: true
+                )
+            )
         }
         switch pager.completeLoadMore(
             ticket.pagerTicket,
@@ -418,9 +613,15 @@ public struct GaryxRecentThreadFeedState: Equatable, Sendable {
             hasMore: page.hasMore
         ) {
         case .abandonedStaleEpoch:
-            return .abandonedStaleEpoch
+            return GaryxRecentLoadMoreCompletion(
+                outcome: .abandonedStaleEpoch,
+                effects: [.publish] + drainPendingHeadEffects()
+            )
         case .abandonedLocalMutation:
-            return .abandonedLocalMutation
+            return GaryxRecentLoadMoreCompletion(
+                outcome: .abandonedLocalMutation,
+                effects: [.publish] + drainPendingHeadEffects()
+            )
         case .apply:
             orderedThreadIds = GaryxThreadListPageMerge.appendPage(
                 pageIds: Self.normalizedIds(page.rows.map(\.id)),
@@ -429,16 +630,25 @@ public struct GaryxRecentThreadFeedState: Equatable, Sendable {
             nextCursor = page.nextCursor
             storeIncarnationId = page.storeIncarnationId
             serverBootId = page.serverBootId
-            return .applied
+            return GaryxRecentLoadMoreCompletion(
+                outcome: .applied,
+                effects: [.publish] + drainPendingHeadEffects()
+            )
         }
     }
 
-    fileprivate mutating func failLoadMore(_ ticket: GaryxRecentThreadLoadMoreTicket) {
+    fileprivate mutating func failLoadMore(
+        _ ticket: GaryxRecentThreadLoadMoreTicket
+    ) -> [GaryxRecentFeedEffect] {
         pager.failLoadMore(ticket.pagerTicket)
+        return [.publish] + drainPendingHeadEffects()
     }
 
-    fileprivate mutating func interruptLoadMore(_ ticket: GaryxRecentThreadLoadMoreTicket) {
+    fileprivate mutating func interruptLoadMore(
+        _ ticket: GaryxRecentThreadLoadMoreTicket
+    ) -> [GaryxRecentFeedEffect] {
         pager.interruptLoadMore(ticket.pagerTicket)
+        return [.publish] + drainPendingHeadEffects()
     }
 
     fileprivate mutating func noteLocalMutation() { pager.noteLocalMutation() }
@@ -461,11 +671,12 @@ public struct GaryxRecentThreadFeedState: Equatable, Sendable {
         trailingDirty = false
     }
 
-    fileprivate mutating func reset() {
+    fileprivate mutating func reset(
+        filter: GaryxRecentThreadFilter
+    ) -> [GaryxRecentFeedEffect] {
         pager.reset()
         orderedThreadIds = []
-        isPrimed = false
-        headFailure = false
+        headState.reset()
         nextCursor = nil
         storeIncarnationId = nil
         serverBootId = nil
@@ -474,6 +685,96 @@ public struct GaryxRecentThreadFeedState: Equatable, Sendable {
         forceReplacementPending = false
         forceReplacementGeneration = 0
         trailingDirty = false
+        pendingHeadRequest = nil
+        return [
+            .publish,
+            .requestHead(
+                GaryxRecentHeadRequest(
+                    filter: filter,
+                    source: .userAction,
+                    forceReplacement: true,
+                    updatesHomeChrome: filter == .all
+                )
+            ),
+        ]
+    }
+
+    @discardableResult
+    fileprivate mutating func downgradeImmediateDemandToUserAction() -> Bool {
+        let changed = headState.downgradeImmediateDemandToUserAction()
+        if changed {
+            pendingHeadRequest = nil
+        }
+        return changed
+    }
+
+    private mutating func settleHead(
+        _ ticket: GaryxRecentThreadRefreshTicket,
+        outcome: GaryxRecentThreadFeedCompletion,
+        stalledBy stall: GaryxRecentHeadStall,
+        forceReplacement: Bool = false
+    ) -> GaryxRecentHeadCompletion {
+        guard headState.settle(
+            ticket.attempt,
+            stalledBy: stall,
+            demand: .immediate
+        ) else {
+            return GaryxRecentHeadCompletion(
+                outcome: .abandonedStaleEpoch,
+                effects: [.publish]
+            )
+        }
+        pendingHeadRequest = Self.mergedPendingHeadRequest(
+            pendingHeadRequest,
+            GaryxRecentHeadRequest(
+                filter: ticket.filter,
+                source: ticket.source,
+                forceReplacement: forceReplacement,
+                updatesHomeChrome: ticket.updatesHomeChrome,
+                runsWhenUnselected: ticket.runsWhenUnselected
+            )
+        )
+        return GaryxRecentHeadCompletion(
+            outcome: outcome,
+            effects: [.publish] + drainPendingHeadEffects()
+        )
+    }
+
+    private mutating func recoveryHeadEffects(
+        filter: GaryxRecentThreadFilter,
+        source: GaryxThreadListRefreshSource,
+        forceReplacement: Bool
+    ) -> [GaryxRecentFeedEffect] {
+        let request = GaryxRecentHeadRequest(
+            filter: filter,
+            source: source,
+            forceReplacement: forceReplacement,
+            updatesHomeChrome: true
+        )
+        pendingHeadRequest = Self.mergedPendingHeadRequest(
+            pendingHeadRequest,
+            request
+        )
+        headState.oweImmediate(stalledBy: .identityReplacement)
+        return drainPendingHeadEffects()
+    }
+
+    private mutating func drainPendingHeadEffects() -> [GaryxRecentFeedEffect] {
+        guard headPhase.activeAttempt == nil,
+              !pager.isLoadingMore,
+              let request = pendingHeadRequest else {
+            return []
+        }
+        pendingHeadRequest = nil
+        headState.oweImmediate(stalledBy: .interrupted)
+        return [.requestHead(request)]
+    }
+
+    private static func mergedPendingHeadRequest(
+        _ current: GaryxRecentHeadRequest?,
+        _ candidate: GaryxRecentHeadRequest
+    ) -> GaryxRecentHeadRequest {
+        current?.merging(candidate) ?? candidate
     }
 
     private func applyChain(
@@ -529,27 +830,57 @@ public struct GaryxRecentThreadFeedState: Equatable, Sendable {
     }
 }
 
+public struct GaryxRecentThreadFeedsBootstrap: Equatable, Sendable {
+    public var feeds: GaryxRecentThreadFeeds
+    public var effects: [GaryxRecentFeedEffect]
+}
+
 public struct GaryxRecentThreadFeeds: Equatable, Sendable {
     public private(set) var selectedFilter: GaryxRecentThreadFilter
     public private(set) var allFeed: GaryxRecentThreadFeedState
     public private(set) var nonTaskFeed: GaryxRecentThreadFeedState
 
-    public init(
+    private init(
+        selectedFilter: GaryxRecentThreadFilter,
+        allFeed: GaryxRecentThreadFeedState,
+        nonTaskFeed: GaryxRecentThreadFeedState
+    ) {
+        self.selectedFilter = selectedFilter
+        self.allFeed = allFeed
+        self.nonTaskFeed = nonTaskFeed
+    }
+
+    public static func bootstrap(
         pageLimit: Int,
         overlap: Int,
         selectedFilter: GaryxRecentThreadFilter = .all
-    ) {
-        self.selectedFilter = selectedFilter
-        allFeed = GaryxRecentThreadFeedState(pageLimit: pageLimit, overlap: overlap)
-        nonTaskFeed = GaryxRecentThreadFeedState(pageLimit: pageLimit, overlap: overlap)
+    ) -> GaryxRecentThreadFeedsBootstrap {
+        let all = GaryxRecentThreadFeedState.bootstrap(
+            filter: .all,
+            pageLimit: pageLimit,
+            overlap: overlap
+        )
+        let nonTask = GaryxRecentThreadFeedState.bootstrap(
+            filter: .nonTask,
+            pageLimit: pageLimit,
+            overlap: overlap
+        )
+        return GaryxRecentThreadFeedsBootstrap(
+            feeds: GaryxRecentThreadFeeds(
+                selectedFilter: selectedFilter,
+                allFeed: all.state,
+                nonTaskFeed: nonTask.state
+            ),
+            effects: all.effects + nonTask.effects
+        )
     }
 
     public var allRecentThreadIds: [String] { allFeed.orderedThreadIds }
     public var visibleRecentThreadIds: [String] {
         feed(for: selectedFilter)?.orderedThreadIds ?? []
     }
-    public var selectedPresentation: GaryxRecentThreadFeedPresentation {
-        feed(for: selectedFilter)?.presentation ?? .init(isPrimed: true)
+    public var selectedPresentation: GaryxRecentThreadFeedPresentation? {
+        feed(for: selectedFilter)?.presentation
     }
     public var selectedPager: GaryxHomeThreadListPager? { feed(for: selectedFilter)?.pager }
 
@@ -563,74 +894,84 @@ public struct GaryxRecentThreadFeeds: Equatable, Sendable {
 
     public mutating func select(_ filter: GaryxRecentThreadFilter) { selectedFilter = filter }
 
-    public mutating func requestRefresh(
+    public mutating func requestHeadEffects(
         filter: GaryxRecentThreadFilter? = nil,
-        gatewayScope: String = "",
-        runtimeEpoch: UInt64 = 0,
-        forceReplacement: Bool = false
-    ) -> GaryxRecentThreadRefreshTicket? {
+        source: GaryxThreadListRefreshSource,
+        forceReplacement: Bool = false,
+        updatesHomeChrome: Bool = true,
+        runsWhenUnselected: Bool = false
+    ) -> [GaryxRecentFeedEffect] {
         let filter = filter ?? selectedFilter
+        guard filter != .favorites else { return [] }
+        let request = GaryxRecentHeadRequest(
+            filter: filter,
+            source: source,
+            forceReplacement: forceReplacement,
+            updatesHomeChrome: updatesHomeChrome,
+            runsWhenUnselected: runsWhenUnselected
+        )
         switch filter {
         case .all:
-            guard let ticket = allFeed.requestRefresh(
+            return allFeed.enqueueHeadRequest(request)
+        case .nonTask:
+            return nonTaskFeed.enqueueHeadRequest(request)
+        case .favorites:
+            preconditionFailure("guarded above")
+        }
+    }
+
+    public mutating func beginHeadRequest(
+        _ request: GaryxRecentHeadRequest,
+        gatewayScope: String,
+        runtimeEpoch: UInt64
+    ) -> GaryxRecentThreadRefreshTicket? {
+        let ticket: GaryxRecentThreadRefreshTicket?
+        switch request.filter {
+        case .all:
+            ticket = allFeed.beginHeadRequest(
+                request,
                 gatewayScope: gatewayScope,
-                runtimeEpoch: runtimeEpoch,
-                forceReplacement: forceReplacement
-            ) else { return nil }
-            return GaryxRecentThreadRefreshTicket(
-                filter: filter,
-                pagerTicket: ticket.pagerTicket,
-                gatewayScope: ticket.gatewayScope,
-                runtimeEpoch: ticket.runtimeEpoch,
-                mode: ticket.mode,
-                oldHeadActivitySeq: ticket.oldHeadActivitySeq,
-                forceReplacementGeneration: ticket.forceReplacementGeneration
+                runtimeEpoch: runtimeEpoch
             )
         case .nonTask:
-            guard let ticket = nonTaskFeed.requestRefresh(
+            ticket = nonTaskFeed.beginHeadRequest(
+                request,
                 gatewayScope: gatewayScope,
-                runtimeEpoch: runtimeEpoch,
-                forceReplacement: forceReplacement
-            ) else { return nil }
-            return GaryxRecentThreadRefreshTicket(
-                filter: filter,
-                pagerTicket: ticket.pagerTicket,
-                gatewayScope: ticket.gatewayScope,
-                runtimeEpoch: ticket.runtimeEpoch,
-                mode: ticket.mode,
-                oldHeadActivitySeq: ticket.oldHeadActivitySeq,
-                forceReplacementGeneration: ticket.forceReplacementGeneration
+                runtimeEpoch: runtimeEpoch
             )
         case .favorites:
-            return nil
+            ticket = nil
         }
+        guard let ticket else { return nil }
+        return GaryxRecentThreadRefreshTicket(
+            filter: request.filter,
+            pagerTicket: ticket.pagerTicket,
+            attempt: ticket.attempt,
+            gatewayScope: ticket.gatewayScope,
+            runtimeEpoch: ticket.runtimeEpoch,
+            source: ticket.source,
+            updatesHomeChrome: ticket.updatesHomeChrome,
+            runsWhenUnselected: ticket.runsWhenUnselected,
+            mode: ticket.mode,
+            oldHeadActivitySeq: ticket.oldHeadActivitySeq,
+            forceReplacementGeneration: ticket.forceReplacementGeneration
+        )
     }
 
-    @discardableResult
-    public mutating func completeRefresh(
+    public mutating func completeHead(
         _ ticket: GaryxRecentThreadRefreshTicket,
-        bundle: GaryxRecentThreadRefreshBundle
-    ) -> GaryxRecentThreadFeedCompletion {
+        result: GaryxRecentHeadResult
+    ) -> GaryxRecentHeadCompletion {
         switch ticket.filter {
-        case .all: return allFeed.completeRefresh(ticket, bundle: bundle)
-        case .nonTask: return nonTaskFeed.completeRefresh(ticket, bundle: bundle)
-        case .favorites: return .abandonedStaleEpoch
-        }
-    }
-
-    public mutating func failRefresh(_ ticket: GaryxRecentThreadRefreshTicket) {
-        switch ticket.filter {
-        case .all: allFeed.failRefresh(ticket)
-        case .nonTask: nonTaskFeed.failRefresh(ticket)
-        case .favorites: break
-        }
-    }
-
-    public mutating func interruptRefresh(_ ticket: GaryxRecentThreadRefreshTicket) {
-        switch ticket.filter {
-        case .all: allFeed.interruptRefresh(ticket)
-        case .nonTask: nonTaskFeed.interruptRefresh(ticket)
-        case .favorites: break
+        case .all:
+            return allFeed.completeHead(ticket, result: result)
+        case .nonTask:
+            return nonTaskFeed.completeHead(ticket, result: result)
+        case .favorites:
+            return GaryxRecentHeadCompletion(
+                outcome: .abandonedStaleEpoch,
+                effects: [.publish]
+            )
         }
     }
 
@@ -705,31 +1046,38 @@ public struct GaryxRecentThreadFeeds: Equatable, Sendable {
         }
     }
 
-    @discardableResult
     public mutating func completeLoadMore(
         _ ticket: GaryxRecentThreadLoadMoreTicket,
         page: GaryxRecentThreadFeedPage
-    ) -> GaryxRecentThreadFeedCompletion {
+    ) -> GaryxRecentLoadMoreCompletion {
         switch ticket.filter {
         case .all: return allFeed.completeLoadMore(ticket, page: page)
         case .nonTask: return nonTaskFeed.completeLoadMore(ticket, page: page)
-        case .favorites: return .abandonedStaleEpoch
+        case .favorites:
+            return GaryxRecentLoadMoreCompletion(
+                outcome: .abandonedStaleEpoch,
+                effects: [.publish]
+            )
         }
     }
 
-    public mutating func failLoadMore(_ ticket: GaryxRecentThreadLoadMoreTicket) {
+    public mutating func failLoadMore(
+        _ ticket: GaryxRecentThreadLoadMoreTicket
+    ) -> [GaryxRecentFeedEffect] {
         switch ticket.filter {
-        case .all: allFeed.failLoadMore(ticket)
-        case .nonTask: nonTaskFeed.failLoadMore(ticket)
-        case .favorites: break
+        case .all: return allFeed.failLoadMore(ticket)
+        case .nonTask: return nonTaskFeed.failLoadMore(ticket)
+        case .favorites: return [.publish]
         }
     }
 
-    public mutating func interruptLoadMore(_ ticket: GaryxRecentThreadLoadMoreTicket) {
+    public mutating func interruptLoadMore(
+        _ ticket: GaryxRecentThreadLoadMoreTicket
+    ) -> [GaryxRecentFeedEffect] {
         switch ticket.filter {
-        case .all: allFeed.interruptLoadMore(ticket)
-        case .nonTask: nonTaskFeed.interruptLoadMore(ticket)
-        case .favorites: break
+        case .all: return allFeed.interruptLoadMore(ticket)
+        case .nonTask: return nonTaskFeed.interruptLoadMore(ticket)
+        case .favorites: return [.publish]
         }
     }
 
@@ -757,8 +1105,22 @@ public struct GaryxRecentThreadFeeds: Equatable, Sendable {
         nonTaskFeed.upsertAtHead(threadId)
     }
 
-    public mutating func resetFeedData() {
-        allFeed.reset()
-        nonTaskFeed.reset()
+    public mutating func resetFeedData() -> [GaryxRecentFeedEffect] {
+        allFeed.reset(filter: .all) + nonTaskFeed.reset(filter: .nonTask)
+    }
+
+    public mutating func downgradeImmediateDemandToUserAction(
+        filter: GaryxRecentThreadFilter
+    ) -> [GaryxRecentFeedEffect] {
+        let changed: Bool
+        switch filter {
+        case .all:
+            changed = allFeed.downgradeImmediateDemandToUserAction()
+        case .nonTask:
+            changed = nonTaskFeed.downgradeImmediateDemandToUserAction()
+        case .favorites:
+            changed = false
+        }
+        return changed ? [.publish] : []
     }
 }

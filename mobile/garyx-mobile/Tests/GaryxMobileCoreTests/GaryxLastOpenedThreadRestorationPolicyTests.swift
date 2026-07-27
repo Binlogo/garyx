@@ -65,12 +65,23 @@ final class GaryxLastOpenedThreadRestorationPolicyTests: XCTestCase {
                 selectedThreadId: nil
             ),
             runningThreadIds: [],
-            isLoadingThreads: true,
-            isHomeVisible: true
+            isHomeVisible: true,
+            recentFeedPresentation: .init(headPhase: primingPhase())
         )
 
         XCTAssertTrue(store.apply(input))
         XCTAssertEqual(store.snapshot.recentPlaceholder, .loadingSkeleton(rowCount: 6))
+
+        let unavailable = GaryxHomeThreadListInput(
+            sectionsInput: input.sectionsInput,
+            runningThreadIds: [],
+            isHomeVisible: true,
+            recentFeedPresentation: .init(
+                headPhase: .primingOwed(.networkFailure, .userAction)
+            )
+        )
+        XCTAssertTrue(store.apply(unavailable))
+        XCTAssertEqual(store.snapshot.recentPlaceholder, .unavailable)
     }
 
     func testCachedRecentRowsSuppressSkeletonDuringRefresh() {
@@ -86,12 +97,26 @@ final class GaryxLastOpenedThreadRestorationPolicyTests: XCTestCase {
                 selectedThreadId: fixture.selectedThreadId
             ),
             runningThreadIds: [],
-            isLoadingThreads: true,
-            isHomeVisible: true
+            isHomeVisible: true,
+            recentFeedPresentation: .init(headPhase: refreshingPhase())
         )
 
         XCTAssertTrue(store.apply(input))
         XCTAssertEqual(store.snapshot.sections.recent.count, 3)
         XCTAssertEqual(store.snapshot.recentPlaceholder, .none)
+    }
+
+    private func primingPhase() -> GaryxRecentHeadPhase {
+        var state = GaryxRecentHeadState()
+        _ = state.beginAttempt()
+        return state.phase
+    }
+
+    private func refreshingPhase() -> GaryxRecentHeadPhase {
+        var state = GaryxRecentHeadState()
+        let priming = state.beginAttempt()!
+        _ = state.settleSuccess(priming)
+        _ = state.beginAttempt()
+        return state.phase
     }
 }

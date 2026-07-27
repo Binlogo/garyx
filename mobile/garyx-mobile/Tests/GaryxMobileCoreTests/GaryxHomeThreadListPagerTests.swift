@@ -326,33 +326,58 @@ final class GaryxHomeThreadListPagerTests: XCTestCase {
 
     // MARK: 7. Reset + stale tickets
 
-    func testIdentityInterruptReleasesBothLanesWithoutCreatingFailureState() throws {
-        var pager = primedPager(cursor: 30)
-        let refresh = try XCTUnwrap(pager.requestRefresh())
-        let loadMore = try XCTUnwrap(pager.requestLoadMore(trigger: .footer))
+    func testIdentityInterruptProducesOwnedImmediateReplacement() throws {
+        let bootstrap = GaryxRecentThreadFeeds.bootstrap(pageLimit: 30, overlap: 5)
+        var feeds = bootstrap.feeds
+        let request = try headRequest(in: bootstrap.effects, filter: .all)
+        let ticket = try XCTUnwrap(
+            feeds.beginHeadRequest(
+                request,
+                gatewayScope: "https://gateway.example.test",
+                runtimeEpoch: 1
+            )
+        )
 
-        pager.interruptRefresh(refresh)
-        pager.interruptLoadMore(loadMore)
+        let completion = feeds.completeHead(
+            ticket,
+            result: .interrupted(.interrupted)
+        )
 
-        XCTAssertFalse(pager.isRefreshingHead)
-        XCTAssertFalse(pager.isLoadingMore)
-        XCTAssertEqual(pager.gate, .ready)
-        XCTAssertEqual(pager.loadMoreFailureRevision, 0)
-        XCTAssertNotNil(pager.requestRefresh())
-        XCTAssertNotNil(pager.requestLoadMore(trigger: .footer))
+        XCTAssertEqual(
+            feeds.allFeed.headPhase,
+            .primingOwed(.interrupted, .immediate)
+        )
+        XCTAssertTrue(completion.effects.contains { effect in
+            guard case .requestHead(let request) = effect else { return false }
+            return request.filter == .all
+        })
     }
 
     func testColdStartIdentityInterruptCannotLeaveIdleFeedPresentedAsLoading() throws {
-        var feeds = GaryxRecentThreadFeeds(pageLimit: 30, overlap: 5)
+        let bootstrap = GaryxRecentThreadFeeds.bootstrap(pageLimit: 30, overlap: 5)
+        var feeds = bootstrap.feeds
+        let initialRequest = try headRequest(in: bootstrap.effects, filter: .all)
         let ticket = try XCTUnwrap(
-            feeds.requestRefresh(
+            feeds.beginHeadRequest(
+                initialRequest,
                 gatewayScope: "http://gateway.example.test",
                 runtimeEpoch: 0
             )
         )
 
-        feeds.interruptRefresh(ticket)
-        let presentation = feeds.selectedPresentation
+        let interruption = feeds.completeHead(
+            ticket,
+            result: .interrupted(.identityReplacement)
+        )
+        let replacementRequest = try headRequest(in: interruption.effects, filter: .all)
+        _ = try XCTUnwrap(
+            feeds.beginHeadRequest(
+                replacementRequest,
+                gatewayScope: "http://gateway.example.test",
+                runtimeEpoch: 1
+            )
+        )
+        let presentation = try XCTUnwrap(feeds.selectedPresentation)
         let store = GaryxHomeThreadListStore()
         let input = GaryxHomeThreadListInput(
             sectionsInput: GaryxHomeThreadSectionsInput(
@@ -364,7 +389,6 @@ final class GaryxHomeThreadListPagerTests: XCTestCase {
                 selectedThreadId: nil
             ),
             runningThreadIds: [],
-            isLoadingThreads: presentation.showsInitialSkeleton,
             isHomeVisible: true,
             selectedRecentFilter: feeds.selectedFilter,
             recentFeedPresentation: presentation
@@ -692,5 +716,22 @@ final class GaryxHomeThreadListPagerTests: XCTestCase {
     func testShowsSkeletonDerivesFromListEmptiness() {
         XCTAssertTrue(GaryxThreadListRefreshPolicy.showsSkeleton(listIsEmpty: true))
         XCTAssertFalse(GaryxThreadListRefreshPolicy.showsSkeleton(listIsEmpty: false))
+    }
+
+    private func headRequest(
+        in effects: [GaryxRecentFeedEffect],
+        filter: GaryxRecentThreadFilter
+    ) throws -> GaryxRecentHeadRequest {
+        let effect = try XCTUnwrap(effects.first { effect in
+            guard case .requestHead(let request) = effect else { return false }
+            return request.filter == filter
+        })
+        guard case .requestHead(let request) = effect else {
+            throw NSError(
+                domain: "GaryxHomeThreadListPagerTests",
+                code: 1
+            )
+        }
+        return request
     }
 }

@@ -6,7 +6,6 @@ final class HomeProjectionActorTests: XCTestCase {
         let fixture = GaryxHomeListFixture.makeInputs(threadCount: 20, pinnedCount: 2, runningCount: 0)
         let legacyInput = GaryxHomeThreadListInput(
             fixture,
-            isLoadingThreads: false,
             isHomeVisible: true
         )
         XCTAssertFalse(
@@ -38,24 +37,24 @@ final class HomeProjectionActorTests: XCTestCase {
         var openInput = fixture
         openInput.selectedThreadId = "thread-10"
         gateway.capture(HomeProjectionCapture(
-            legacyInput: GaryxHomeThreadListInput(openInput, isLoadingThreads: false, isHomeVisible: false),
+            legacyInput: GaryxHomeThreadListInput(openInput, isHomeVisible: false),
             runTrackerBusyThreadIds: ["thread-10"]
         ))
 
         var homeInput = openInput
         gateway.capture(HomeProjectionCapture(
-            legacyInput: GaryxHomeThreadListInput(homeInput, isLoadingThreads: false, isHomeVisible: true),
+            legacyInput: GaryxHomeThreadListInput(homeInput, isHomeVisible: true),
             runTrackerBusyThreadIds: ["thread-10"]
         ))
 
         gateway.capture(HomeProjectionCapture(
-            legacyInput: GaryxHomeThreadListInput(homeInput, isLoadingThreads: false, isHomeVisible: true),
+            legacyInput: GaryxHomeThreadListInput(homeInput, isHomeVisible: true),
             runTrackerBusyThreadIds: ["thread-10"]
         ))
 
         homeInput.selectedThreadId = nil
         gateway.capture(HomeProjectionCapture(
-            legacyInput: GaryxHomeThreadListInput(homeInput, isLoadingThreads: false, isHomeVisible: true),
+            legacyInput: GaryxHomeThreadListInput(homeInput, isHomeVisible: true),
             runTrackerBusyThreadIds: [],
             committedRunStateBusyByThreadId: ["thread-10": false]
         ))
@@ -78,14 +77,18 @@ final class HomeProjectionActorTests: XCTestCase {
         var first = fixture
         first.selectedThreadId = "thread-1"
         gateway.capture(HomeProjectionCapture(
-            legacyInput: GaryxHomeThreadListInput(first, isLoadingThreads: false, isHomeVisible: true)
+            legacyInput: GaryxHomeThreadListInput(first, isHomeVisible: true)
         ))
 
         var latest = fixture
         latest.selectedThreadId = "thread-30"
         latest.busyThreadIds = ["thread-30"]
         gateway.capture(HomeProjectionCapture(
-            legacyInput: GaryxHomeThreadListInput(latest, isLoadingThreads: true, isHomeVisible: false),
+            legacyInput: GaryxHomeThreadListInput(
+                latest,
+                isHomeVisible: false,
+                headPhase: primingPhase()
+            ),
             committedRunStateBusyByThreadId: ["thread-30": true]
         ))
 
@@ -100,7 +103,7 @@ final class HomeProjectionActorTests: XCTestCase {
                 .presentation
                 .isRunning
         )
-        XCTAssertTrue(result.snapshot.isLoadingThreads)
+        XCTAssertTrue(result.snapshot.recentFeedPresentation.isRefreshingHead)
         XCTAssertFalse(result.snapshot.isHomeVisible)
     }
 
@@ -122,7 +125,11 @@ final class HomeProjectionActorTests: XCTestCase {
         }
 
         gateway.capture(HomeProjectionCapture(
-            legacyInput: GaryxHomeThreadListInput(fixture, isLoadingThreads: true, isHomeVisible: true)
+            legacyInput: GaryxHomeThreadListInput(
+                fixture,
+                isHomeVisible: true,
+                headPhase: primingPhase()
+            )
         ))
         await gateway.waitForIdleForTesting()
 
@@ -130,7 +137,11 @@ final class HomeProjectionActorTests: XCTestCase {
 
         let transactionId = gateway.beginTransaction(label: "refreshThreads")
         gateway.capture(HomeProjectionCapture(
-            legacyInput: GaryxHomeThreadListInput(fixture, isLoadingThreads: false, isHomeVisible: true)
+            legacyInput: GaryxHomeThreadListInput(
+                fixture,
+                isHomeVisible: true,
+                headPhase: .ready
+            )
         ))
         gateway.endTransaction(transactionId)
         await gateway.waitForIdleForTesting()
@@ -146,7 +157,7 @@ final class HomeProjectionActorTests: XCTestCase {
 
         XCTAssertNil(gateway.beginTransaction(label: "disabled"))
         gateway.capture(HomeProjectionCapture(
-            legacyInput: GaryxHomeThreadListInput(fixture, isLoadingThreads: false, isHomeVisible: true)
+            legacyInput: GaryxHomeThreadListInput(fixture, isHomeVisible: true)
         ))
         gateway.endTransaction(nil)
         await gateway.waitForIdleForTesting()
@@ -166,10 +177,9 @@ final class HomeProjectionActorTests: XCTestCase {
         let all = GaryxHomeThreadListInput(
             sectionsInput: sectionsInput,
             runningThreadIds: [],
-            isLoadingThreads: false,
             isHomeVisible: true,
             selectedRecentFilter: .all,
-            recentFeedPresentation: .init(isPrimed: true, footerState: .idle)
+            recentFeedPresentation: .init(headPhase: .ready, footerState: .idle)
         )
         _ = await actor.applyBoundary(
             capture: HomeProjectionCapture(legacyInput: all),
@@ -178,13 +188,10 @@ final class HomeProjectionActorTests: XCTestCase {
         let chats = GaryxHomeThreadListInput(
             sectionsInput: sectionsInput,
             runningThreadIds: [],
-            isLoadingThreads: false,
             isHomeVisible: true,
             selectedRecentFilter: .nonTask,
             recentFeedPresentation: .init(
-                isPrimed: false,
-                isRefreshingHead: false,
-                headFailure: true,
+                headPhase: .primingOwed(.networkFailure, .userAction),
                 footerState: .hidden
             )
         )
@@ -216,14 +223,19 @@ private extension GaryxHomeThreadSectionsInput {
 private extension GaryxHomeThreadListInput {
     init(
         _ input: HomeThreadSectionsReference.Inputs,
-        isLoadingThreads: Bool,
-        isHomeVisible: Bool
+        isHomeVisible: Bool,
+        headPhase: GaryxRecentHeadPhase = .ready
     ) {
         self.init(
             sectionsInput: GaryxHomeThreadSectionsInput(input),
             runningThreadIds: input.busyThreadIds,
-            isLoadingThreads: isLoadingThreads,
-            isHomeVisible: isHomeVisible
+            isHomeVisible: isHomeVisible,
+            recentFeedPresentation: .init(headPhase: headPhase)
         )
     }
+}
+
+private func primingPhase() -> GaryxRecentHeadPhase {
+    var state = GaryxRecentHeadState()
+    return .priming(state.beginAttempt()!)
 }

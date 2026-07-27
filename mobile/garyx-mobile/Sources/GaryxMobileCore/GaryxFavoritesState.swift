@@ -127,6 +127,7 @@ public struct GaryxFavoritesSnapshotTicket: Equatable, Sendable {
     public var gatewayScope: String
     public var runtimeEpoch: UInt64
     public var requestToken: UInt64
+    public var headAttempt: GaryxRecentHeadAttempt
     public var requestFlavor: GaryxFavoritesSnapshotRequestFlavor
     public var capabilityGeneration: UInt64
 }
@@ -197,7 +198,7 @@ public enum GaryxFavoriteMutationSettlement: Equatable, Sendable {
     case notSent(message: String)
 }
 
-public struct GaryxFavoritesState: Equatable, Sendable {
+public struct GaryxFavoritesState: Equatable, Sendable, GaryxRecentHeadDomain {
     public private(set) var gatewayScope: String
     public private(set) var runtimeEpoch: UInt64
     public private(set) var storeIncarnationId: String?
@@ -214,7 +215,7 @@ public struct GaryxFavoritesState: Equatable, Sendable {
     public private(set) var enhancedVisibleThreadIds: Set<String>?
     public private(set) var activeSnapshotTicket: GaryxFavoritesSnapshotTicket?
     public private(set) var snapshotTrailingDirty: Bool
-    public private(set) var snapshotFailed: Bool
+    private var headState: GaryxRecentHeadState
     public private(set) var snapshotRequestFlavor: GaryxFavoritesSnapshotRequestFlavor
     public private(set) var capabilityGeneration: UInt64
 
@@ -239,12 +240,21 @@ public struct GaryxFavoritesState: Equatable, Sendable {
         enhancedVisibleThreadIds = nil
         activeSnapshotTicket = nil
         snapshotTrailingDirty = false
-        snapshotFailed = false
+        headState = GaryxRecentHeadState()
         snapshotRequestFlavor = .legacy
         capabilityGeneration = 0
         nextGeneration = 1
         nextRequestToken = 1
         nextEffectToken = 1
+    }
+
+    public var headPhase: GaryxRecentHeadPhase { headState.phase }
+    public var snapshotFailed: Bool { headPhase.awaitsUserAction }
+    public var rows: [String] { presentedThreadIds }
+    public var footerState: GaryxHomeLoadMoreFooterState { .hidden }
+
+    public mutating func downgradeImmediateDemandToUserAction() -> Bool {
+        headState.downgradeImmediateDemandToUserAction()
     }
 
     public func isPresented(threadId rawThreadId: String) -> Bool {
@@ -298,7 +308,6 @@ public struct GaryxFavoritesState: Equatable, Sendable {
         return Array(ids.prefix(500))
     }
 
-    @discardableResult
     public mutating func replaceGatewayScope(
         _ scope: String,
         requestSnapshot shouldRequestSnapshot: Bool = true
@@ -312,7 +321,6 @@ public struct GaryxFavoritesState: Equatable, Sendable {
     /// A managed gateway reconnect may keep the same URL while establishing a
     /// new runtime epoch. Clear the full reducer domain so pre-restart tickets
     /// cannot become owned again under that identical scope string.
-    @discardableResult
     public mutating func resetGatewayRuntime(
         requestSnapshot shouldRequestSnapshot: Bool = true
     ) -> [GaryxFavoritesEffect] {
@@ -322,7 +330,6 @@ public struct GaryxFavoritesState: Equatable, Sendable {
 
     /// v24 §7.1 response judgment. Ownership/epoch are checked before the
     /// incarnation id so an old response cannot switch a new domain back.
-    @discardableResult
     public mutating func observeStoreIdentity(
         stamp: GaryxStoreResponseStamp,
         responseStoreIncarnationId: String
@@ -343,7 +350,6 @@ public struct GaryxFavoritesState: Equatable, Sendable {
         return (.scopeClear, requestSnapshot())
     }
 
-    @discardableResult
     public mutating func toggle(
         threadId rawThreadId: String,
         desired: Bool
@@ -360,7 +366,6 @@ public struct GaryxFavoritesState: Equatable, Sendable {
         return drain(threadId: threadId, origin: .ordinary)
     }
 
-    @discardableResult
     public mutating func requestSnapshot() -> [GaryxFavoritesEffect] {
         requestSnapshot(
             flavor: snapshotRequestFlavor,
@@ -368,7 +373,6 @@ public struct GaryxFavoritesState: Equatable, Sendable {
         )
     }
 
-    @discardableResult
     public mutating func requestSnapshot(
         flavor: GaryxFavoritesSnapshotRequestFlavor,
         capabilityGeneration: UInt64
@@ -378,23 +382,23 @@ public struct GaryxFavoritesState: Equatable, Sendable {
             snapshotTrailingDirty = true
             return []
         }
+        guard let headAttempt = headState.beginAttempt() else { return [] }
         let ticket = GaryxFavoritesSnapshotTicket(
             gatewayScope: gatewayScope,
             runtimeEpoch: runtimeEpoch,
             requestToken: nextRequestToken,
+            headAttempt: headAttempt,
             requestFlavor: flavor,
             capabilityGeneration: capabilityGeneration
         )
         nextRequestToken &+= 1
         activeSnapshotTicket = ticket
         snapshotTrailingDirty = false
-        snapshotFailed = false
         return [.snapshot(ticket)]
     }
 
     /// Upgrading capability is a replacement barrier: invalidate any active
     /// legacy flight before issuing exactly one enhanced snapshot ticket.
-    @discardableResult
     public mutating func transitionToEnhancedSnapshots(
         capabilityGeneration generation: UInt64
     ) -> GaryxFavoritesCapabilityTransition {
@@ -405,7 +409,9 @@ public struct GaryxFavoritesState: Equatable, Sendable {
         let cancelled = activeSnapshotTicket
         activeSnapshotTicket = nil
         snapshotTrailingDirty = false
-        snapshotFailed = false
+        if cancelled != nil {
+            headState.invalidate(stalledBy: .interrupted)
+        }
         snapshotRequestFlavor = .enhanced
         capabilityGeneration = generation
         return GaryxFavoritesCapabilityTransition(
@@ -419,7 +425,6 @@ public struct GaryxFavoritesState: Equatable, Sendable {
 
     /// Unknown/unsupported capability uses the legacy envelope for this
     /// runtime generation. This is also an isolation fence after reconnect.
-    @discardableResult
     public mutating func transitionToLegacySnapshots(
         capabilityGeneration generation: UInt64
     ) -> GaryxFavoritesCapabilityTransition {
@@ -438,6 +443,9 @@ public struct GaryxFavoritesState: Equatable, Sendable {
             || activeSnapshotTicket?.capabilityGeneration != generation {
             cancelled = activeSnapshotTicket
             activeSnapshotTicket = nil
+            if cancelled != nil {
+                headState.invalidate(stalledBy: .interrupted)
+            }
         } else {
             cancelled = nil
         }
@@ -453,7 +461,6 @@ public struct GaryxFavoritesState: Equatable, Sendable {
         )
     }
 
-    @discardableResult
     public mutating func completeSnapshot(
         ticket: GaryxFavoritesSnapshotTicket,
         snapshot: GaryxFavoriteSnapshot
@@ -464,7 +471,6 @@ public struct GaryxFavoritesState: Equatable, Sendable {
     /// Explicit acceptance boundary used by the unified owner. Rejected
     /// completions may schedule reducer-owned recovery, but never authorize a
     /// cache, lease, membership, or publication commit.
-    @discardableResult
     public mutating func completeSnapshotDecision(
         ticket: GaryxFavoritesSnapshotTicket,
         snapshot: GaryxFavoriteSnapshot
@@ -483,16 +489,24 @@ public struct GaryxFavoritesState: Equatable, Sendable {
         guard ticket.requestFlavor != .enhanced || snapshot.hasEnhancedSummaries else {
             activeSnapshotTicket = nil
             snapshotTrailingDirty = false
-            snapshotFailed = true
+            _ = headState.settle(
+                ticket.headAttempt,
+                stalledBy: .networkFailure,
+                demand: .userAction
+            )
             return .rejected(effects: [])
         }
         let trailing = snapshotTrailingDirty
         activeSnapshotTicket = nil
         snapshotTrailingDirty = false
-        snapshotFailed = false
         if let highestObservedRevision,
            snapshot.page.revision < highestObservedRevision {
             snapshotTrailingDirty = true
+            _ = headState.settle(
+                ticket.headAttempt,
+                stalledBy: .racedLocalMutation,
+                demand: .immediate
+            )
             return .rejected(effects: requestSnapshot())
         }
         _ = acceptRawWithoutReconcile(snapshot.page)
@@ -511,6 +525,7 @@ public struct GaryxFavoritesState: Equatable, Sendable {
         }
         favoritesServerBootId = snapshot.page.serverBootId
         favoritesSnapshotTruncated = snapshot.truncated
+        _ = headState.settleSuccess(ticket.headAttempt)
         var effects = reconcileAllIdleIntents()
         if trailing {
             effects += requestSnapshot()
@@ -518,7 +533,6 @@ public struct GaryxFavoritesState: Equatable, Sendable {
         return .accepted(effects: effects)
     }
 
-    @discardableResult
     public mutating func failSnapshot(
         ticket: GaryxFavoritesSnapshotTicket
     ) -> [GaryxFavoritesEffect] {
@@ -526,11 +540,14 @@ public struct GaryxFavoritesState: Equatable, Sendable {
         let trailing = snapshotTrailingDirty
         activeSnapshotTicket = nil
         snapshotTrailingDirty = false
-        snapshotFailed = true
+        _ = headState.settle(
+            ticket.headAttempt,
+            stalledBy: .networkFailure,
+            demand: trailing ? .immediate : .userAction
+        )
         return trailing ? requestSnapshot() : []
     }
 
-    @discardableResult
     public mutating func acceptReadPage(
         stamp: GaryxStoreResponseStamp,
         page: GaryxFavoritePage
@@ -552,7 +569,6 @@ public struct GaryxFavoritesState: Equatable, Sendable {
         return effects
     }
 
-    @discardableResult
     public mutating func settle(
         ticket: GaryxFavoriteMutationTicket,
         settlement: GaryxFavoriteMutationSettlement
@@ -621,7 +637,6 @@ public struct GaryxFavoritesState: Equatable, Sendable {
         return requestSnapshot()
     }
 
-    @discardableResult
     public mutating func fireBackoff(
         _ stamp: GaryxFavoriteBackoffStamp
     ) -> [GaryxFavoritesEffect] {

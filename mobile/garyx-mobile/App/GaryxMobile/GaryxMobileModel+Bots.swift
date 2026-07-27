@@ -324,7 +324,7 @@ extension GaryxMobileModel {
             }
 
             await refreshRemoteState()
-            await refreshThreads(source: .userAction)
+            await requestHomeFeedRefresh(source: .userAction)
         case .rejected(let code, let message):
             pendingThreadArchives.cancelArchive(threadId: normalizedThreadId)
             let reconstructionTickets: [GaryxThreadReconstructionTicket]

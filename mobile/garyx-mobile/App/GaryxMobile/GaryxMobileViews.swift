@@ -28,10 +28,10 @@ struct GaryxRootView: View {
                         // catalog sweep refreshes in the background so the
                         // spinner ends when the list is fresh (TASK-1802 R1).
                         Task { await model.refreshRemoteState() }
-                        await model.refreshThreads(source: .userPullToRefresh)
+                        await model.requestHomeFeedRefresh(source: .userPullToRefresh)
                     },
                     onRefreshSidebarThreads: {
-                        await model.refreshThreads(source: .backgroundLoop)
+                        await model.requestHomeFeedRefresh(source: .backgroundLoop)
                     },
                     onLoadMoreThreads: { trigger in
                         await model.loadMoreThreads(trigger: trigger)

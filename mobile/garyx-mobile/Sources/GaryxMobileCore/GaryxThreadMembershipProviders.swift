@@ -93,8 +93,9 @@ public enum GaryxThreadListProviderCompletion: Equatable, Sendable {
 // MARK: - Recent (zero-change wrapper)
 
 public struct GaryxRecentThreadMembershipProvider: GaryxThreadListMembershipProvider,
-    Equatable, Sendable {
+    GaryxRecentHeadDomain, Equatable, Sendable {
     public private(set) var feeds: GaryxRecentThreadFeeds
+    public private(set) var bootstrapEffects: [GaryxRecentFeedEffect]
     public let filter: GaryxRecentThreadFilter
     public let instanceId: UInt64
 
@@ -104,13 +105,19 @@ public struct GaryxRecentThreadMembershipProvider: GaryxThreadListMembershipProv
         overlap: Int = 5,
         instanceId: UInt64 = 1
     ) {
+        precondition(filter != .favorites, "Favorites owns its own provider")
         self.filter = filter
         self.instanceId = instanceId
-        feeds = GaryxRecentThreadFeeds(
+        let bootstrap = GaryxRecentThreadFeeds.bootstrap(
             pageLimit: pageLimit,
             overlap: overlap,
             selectedFilter: filter
         )
+        feeds = bootstrap.feeds
+        bootstrapEffects = bootstrap.effects.filter {
+            guard case .requestHead(let request) = $0 else { return true }
+            return request.filter == filter
+        }
     }
 
     public nonisolated var identity: GaryxThreadListProviderIdentity {
@@ -122,43 +129,81 @@ public struct GaryxRecentThreadMembershipProvider: GaryxThreadListMembershipProv
         return GaryxThreadListMembershipSnapshot(
             identity: identity,
             orderedThreadIds: feed?.orderedThreadIds ?? [],
-            isPrimed: feed?.isPrimed ?? (filter == .favorites),
-            isRefreshing: feed?.pager.isRefreshingHead ?? false,
+            isPrimed: feed?.headPhase.isPrimed ?? false,
+            isRefreshing: feed?.headPhase.isRefreshing ?? false,
             headFailure: feed?.headFailure ?? false,
             footerState: feed?.pager.footerState ?? .hidden
         )
     }
 
-    public mutating func requestRefresh(
-        gatewayScope: String,
-        runtimeEpoch: UInt64,
+    public var headPhase: GaryxRecentHeadPhase {
+        switch filter {
+        case .all:
+            return feeds.allFeed.headPhase
+        case .nonTask:
+            return feeds.nonTaskFeed.headPhase
+        case .favorites:
+            preconditionFailure("Favorites owns its own provider")
+        }
+    }
+
+    public var rows: [String] {
+        feeds.feed(for: filter)?.orderedThreadIds ?? []
+    }
+
+    public var footerState: GaryxHomeLoadMoreFooterState {
+        feeds.feed(for: filter)?.footerState ?? .hidden
+    }
+
+    public mutating func takeBootstrapEffects() -> [GaryxRecentFeedEffect] {
+        defer { bootstrapEffects = [] }
+        return bootstrapEffects
+    }
+
+    public mutating func requestHeadEffects(
+        source: GaryxThreadListRefreshSource,
         forceReplacement: Bool = false
-    ) -> GaryxRecentThreadRefreshTicket? {
-        feeds.requestRefresh(
+    ) -> [GaryxRecentFeedEffect] {
+        feeds.requestHeadEffects(
             filter: filter,
-            gatewayScope: gatewayScope,
-            runtimeEpoch: runtimeEpoch,
+            source: source,
             forceReplacement: forceReplacement
         )
     }
 
-    public mutating func completeRefresh(
+    public mutating func beginHeadRequest(
+        _ request: GaryxRecentHeadRequest,
+        gatewayScope: String,
+        runtimeEpoch: UInt64
+    ) -> GaryxRecentThreadRefreshTicket? {
+        feeds.beginHeadRequest(
+            request,
+            gatewayScope: gatewayScope,
+            runtimeEpoch: runtimeEpoch
+        )
+    }
+
+    public mutating func completeHead(
         _ ticket: GaryxRecentThreadRefreshTicket,
-        bundle: GaryxRecentThreadRefreshBundle,
+        result: GaryxRecentHeadResult,
         summaryWrites: [GaryxThreadSummary]
-    ) -> GaryxThreadListProviderCompletion {
-        switch feeds.completeRefresh(ticket, bundle: bundle) {
+    ) -> (completion: GaryxThreadListProviderCompletion, effects: [GaryxRecentFeedEffect]) {
+        let completion = feeds.completeHead(ticket, result: result)
+        switch completion.outcome {
         case .applied:
-            return .accepted(
-                GaryxThreadListMembershipCommit(
-                    snapshot: snapshot,
-                    summaryWrites: summaryWrites
-                )
+            return (
+                .accepted(
+                    GaryxThreadListMembershipCommit(
+                        snapshot: snapshot,
+                        summaryWrites: summaryWrites
+                    )
+                ),
+                completion.effects
             )
         case .forceReplacement:
-            return .replacementRequired
-        case .abandonedStaleEpoch, .abandonedLocalMutation:
-            return .rejectedStaleInstance
+            return (.replacementRequired, completion.effects)
+        case .abandonedStaleEpoch, .abandonedLocalMutation, .failed, .interrupted:
+            return (.rejectedStaleInstance, completion.effects)
         }
     }
 }
