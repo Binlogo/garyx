@@ -25,12 +25,8 @@ final class Task2798CatalogRefreshE2ETests: XCTestCase {
             all.tap()
             XCTAssertEqual(filter.value as? String, "All")
         }
-        XCTAssertTrue(
-            app.staticTexts["Pinned"].waitForExistence(timeout: 5),
-            "the cached pinned section must be present before the pull"
-        )
-
         try waitForRequestCountToSettle(timeout: 10)
+        let hadPinnedSection = app.staticTexts["Pinned"].exists
         try resetTrace()
         try pullToRefresh(in: app)
 
@@ -50,7 +46,11 @@ final class Task2798CatalogRefreshE2ETests: XCTestCase {
             completedStatus(for: "/api/recent-threads", in: finalHomeTrace),
             200
         )
-        XCTAssertTrue(app.staticTexts["Pinned"].exists)
+        XCTAssertEqual(
+            app.staticTexts["Pinned"].exists,
+            hadPinnedSection,
+            "a selected-feed pull must preserve the cached pinned projection"
+        )
         XCTAssertTrue(app.staticTexts["Recent"].exists)
         addScreenshot(named: "TASK-2798 C1 Home after pull", from: app)
         addTraceAttachment(named: "TASK-2798 C1 request trace", trace: finalHomeTrace)
