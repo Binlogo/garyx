@@ -80,26 +80,45 @@ return isLoadingThreads ? .loadingSkeleton(rowCount: 6) : .empty                
    第 1 条那 5 道闸门。热恢复有无条件兜底刷新（`+Gateway.swift:439`
    `forceReplacement: true`），冷启动没有。
 
-### 1.4 确定性触发路径
+### 1.4 证据状态（#TASK-2783 三轮取证）
 
-`isHomeVisible` 默认值是 `false`（`GaryxHomeThreadListPresentation.swift:303, 317`）。
+**已证实（有必挂测试）**
 
-**若冷启动恢复了上次打开的会话，首页 `.task` 必然以 `false` 武装并立即自杀：**
+- **非法稳态真实存在、可达、且是出厂状态。** `(isPrimed=0, headFailure=0,
+  isRefreshingHead=0)` 渲染为骨架屏且无任何请求在飞；它同时是
+  `GaryxRecentThreadFeedState.init` 的初始值。
+- **两条 identity 路径能到达该稳态**（recent 被 `.scopeClear` 打断、favorites 快照迟到
+  reset 已 primed 的 recent），均**无补刀**。二者都需要 store incarnation 轮换。
+- **`.abandonedStaleEpoch` 与 identity interruption 确认无直接补刷**（穷举表已交付）。
+- **`isLoadingMore` 无泄漏窗口**（穷举表已交付）。
 
-- `restoreLastOpenedThreadIfNeeded()` 在 `+Gateway.swift:576` 执行，早于 `:581` 的首刷；
-- 此刻 `container == nil`，路由走同步分支（`GaryxProductionRouteStack.swift:434-442`），
-  `path` 同步变为非空；
-- Shell 最早在 `:581` 挂起让出主 actor 后才渲染；
-- home host 仍会作为 predecessor 被挂载（`GaryxRouteStackContainer.swift:1380-1382`），
-  于是 `.task(id: false)` 武装 → `:622` 立即 `return`。
+**已推翻（记录在案，避免后人重走）**
 
-这条路径下 100% 复现，不是概率事件。
+| 假设 | 推翻证据 |
+|---|---|
+| 冷启动 favorites `gatewayScope` 从 `""` 被替换，与首刷形成竞态 | `GaryxMobileModel.init` 在**返回前同步**完成 `loadGatewayScopedUserState → replaceGatewayScope`；不存在「首刷已发出、scope 才替换」的窗口。legacy-only UserDefaults 的确定性时序测试通过 |
+| 恢复上次会话导致首页 `.task` 以 `false` 武装而自杀 | 实测循环**正常武装**（`visible=true`）；且恢复流程**自身先刷新并 primed**，之后 `connectAndRefresh` 还会无条件再刷一次；`false` 状态持续整个会话页，不是未被观测的瞬时脉冲 |
+| `.task(id:)` 与 loop guard 读到不同步的两个真相源 | `presentationSnapshot.isHomeVisible` 逐字转发 `snapshot.isHomeVisible`，同一时刻恒等 |
 
-**无 restore 的冷启动**：首采样应为 `true`（置信度 0.75，投影 actor 往返通常快于两次网络
-往返），但没有任何 happens-before 边保证这一点；且即便武装成功，仍可能在 `:626`（0.30s）
-或 `:630`（10s）的延时采样点读到瞬时 false 而自杀，而该 false→true 的恢复会被
-`HomeProjectionGateway` 的覆盖式合并（`HomeProjectionActor.swift:341-346, 374-377`）
-吞掉，不产生边沿。
+**新发现（改变了对现象的解释）**
+
+- **「点 bot 再退回来就好」可能不是 `.task` 重武装。** `openBotGroup` 对携带
+  `mainThreadId` / `defaultOpenThreadId` 的 bot 会走 `openThread` → 冷缓存未命中 →
+  push 占位会话 → **直接补发 `refreshThreads(.userAction)`**。当前 catalog 中 5 个 bot
+  有 3 个属于这一类。已有测试证明：冷 Home 骨架屏 → `openBotGroup` → 两次真实 recent
+  请求 → 返回首页即 `.none`。
+- **冷启动存在「首刷被吞 → 等 10 秒下一轮」的窗口**：0.3s 那次 head refresh 可能因
+  自动分页的 load-more 在飞而返回 nil，下一次机会在 10 秒后。
+
+**仍未定**
+
+现场（无 store 轮换条件下）的真实永久触发器**尚未复现**。三轮取证共推翻 4 条假设。
+
+> **这对本设计意味着什么**：结构缺陷本身已被证据充分证实，与现场触发器是否查明无关——
+> 非法稳态可达、且是出厂状态，这本身就必须修。但**不得声称本次重构一定能修好用户报告的
+> 那一次**：若该现象另有成因（例如债务清单 D1 的投影事务泄漏导致首页投影冻结），
+> 需独立处理。开工前应向报告人确认现场细节（等待时长、所点 bot 的类型）。
+
 
 ### 1.5 为什么「切页面回来就好」
 
