@@ -30,6 +30,12 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .merge(public_runtime_routes())
         .merge(protected)
         .fallback(routes::fallback)
+        // Negotiated response compression for every HTTP surface. The default
+        // predicate skips `text/event-stream` (SSE frames must pass through
+        // uncompressed and unbuffered), already-compressed image bodies, and
+        // tiny responses; `server_tests.rs` pins both the JSON-compresses and
+        // SSE-is-exempt halves of that contract.
+        .layer(tower_http::compression::CompressionLayer::new())
         .with_state(state)
 }
 

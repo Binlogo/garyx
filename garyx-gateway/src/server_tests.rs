@@ -1382,3 +1382,112 @@ async fn bounded_drain_prefers_the_fully_graceful_path() {
     .await;
     assert_eq!(result.unwrap_err().to_string(), "serve outcome wins");
 }
+
+// --- Response-compression contract (route_graph CompressionLayer) ---
+//
+// Pins both halves of the compression predicate: negotiated JSON responses
+// come back gzip-encoded, while SSE responses stay uncompressed so event
+// frames pass through unbuffered.
+
+#[tokio::test]
+async fn compression_gzips_negotiated_json_responses() {
+    let state = test_state();
+    let gw = Gateway::new(state);
+
+    let req = authed_request()
+        .uri("/api/status")
+        .header("accept-encoding", "gzip")
+        .body(Body::empty())
+        .unwrap();
+    let resp = gw.router.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(
+        resp.headers()
+            .get(axum::http::header::CONTENT_ENCODING)
+            .and_then(|v| v.to_str().ok()),
+        Some("gzip"),
+        "negotiated JSON response must be gzip-encoded"
+    );
+
+    let compressed = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let mut decoder = flate2::read::GzDecoder::new(compressed.as_ref());
+    let mut decoded = Vec::new();
+    std::io::Read::read_to_end(&mut decoder, &mut decoded).expect("valid gzip body");
+    let json: serde_json::Value = serde_json::from_slice(&decoded).expect("decoded JSON");
+    assert!(json.get("status").is_some(), "decoded body is the status payload");
+}
+
+#[tokio::test]
+async fn compression_leaves_unnegotiated_responses_identity() {
+    let state = test_state();
+    let gw = Gateway::new(state);
+
+    // No Accept-Encoding header: the body must arrive as plain JSON.
+    let req = authed_request()
+        .uri("/api/status")
+        .body(Body::empty())
+        .unwrap();
+    let resp = gw.router.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), 200);
+    assert!(
+        resp.headers()
+            .get(axum::http::header::CONTENT_ENCODING)
+            .is_none(),
+        "unnegotiated response must not be encoded"
+    );
+    let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("plain JSON body");
+    assert!(json.get("status").is_some());
+}
+
+#[tokio::test]
+async fn compression_exempts_sse_thread_stream() {
+    let state = test_state();
+    let gw = Gateway::new(state.clone());
+
+    // Create a real thread over HTTP so the stream route accepts the key.
+    let create = authed_request()
+        .method("POST")
+        .uri("/api/threads")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::json!({"label": "compression sse probe"}).to_string(),
+        ))
+        .unwrap();
+    let created = gw.router.clone().oneshot(create).await.unwrap();
+    assert_eq!(created.status(), axum::http::StatusCode::CREATED);
+    let created_body = axum::body::to_bytes(created.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let created_json: serde_json::Value = serde_json::from_slice(&created_body).unwrap();
+    let thread_id = created_json["thread_id"].as_str().expect("thread id");
+
+    // A gzip-negotiating SSE subscription must come back as a plain
+    // event-stream: compression would buffer frames and break liveness.
+    let req = authed_request()
+        .uri(format!("/api/threads/{thread_id}/stream"))
+        .header("accept-encoding", "gzip")
+        .body(Body::empty())
+        .unwrap();
+    let resp = gw.router.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(
+        resp.headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.split(';').next().unwrap_or(v).trim().to_owned()),
+        Some("text/event-stream".to_owned()),
+        "stream route must answer as SSE"
+    );
+    assert!(
+        resp.headers()
+            .get(axum::http::header::CONTENT_ENCODING)
+            .is_none(),
+        "SSE response must stay uncompressed even when the client negotiates gzip"
+    );
+    // Do not consume the infinite stream body; headers prove the contract.
+}

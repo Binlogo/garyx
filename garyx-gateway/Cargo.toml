@@ -55,7 +55,7 @@ futures-util = "0.3"
 urlencoding = "2"
 sha2 = "0.10"
 crc32fast = "1"
-tower-http = { version = "0.6", features = ["limit"] }
+tower-http = { version = "0.6", features = ["limit", "compression-gzip"] }
 libc = "0.2"
 unicode-normalization = "0.1"
 
@@ -68,5 +68,7 @@ tempfile.workspace = true
 filetime.workspace = true
 proptest.workspace = true
 wiremock = "0.6"
+# Decodes negotiated-gzip responses in the response-compression contract tests.
+flate2 = "1"
 tokio-tungstenite = { workspace = true }
 futures-util = "0.3"
