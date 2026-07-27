@@ -5082,6 +5082,57 @@ fn build_claude_rate_limit_classifies_terminal_api_429_with_limit_copy() {
     assert_eq!(rate_limit.reset_at, None);
 }
 
+/// Review #TASK-2793: the real CLI (2.1.x) also renders quota errors with
+/// the "You've reached your …" prefix, and model-scoped weekly buckets
+/// render as "<model> limit" (seven_day_opus / seven_day_sonnet /
+/// seven_day_overage_included). Both must classify with the weekly window.
+#[test]
+fn build_claude_rate_limit_covers_reached_prefix_and_scoped_weekly_labels() {
+    let rate_limit = build_claude_rate_limit(
+        "claude_code",
+        ClaudeRateLimitSignals {
+            terminal_reason: Some("api_error"),
+            assistant_error_rate_limited: true,
+            api_error_status: Some(429),
+            response_text: Some(
+                "You've reached your session limit · resets 10:30pm (Asia/Shanghai)",
+            ),
+            ..bare_signals()
+        },
+        None,
+        None,
+    )
+    .expect("the reached-your prefix must classify");
+    assert_eq!(rate_limit.window.as_deref(), Some("five_hour"));
+
+    for (copy, expected_window) in [
+        ("You've hit your Opus limit · resets Jul 30", "seven_day"),
+        (
+            "You've reached your Sonnet limit · resets Jul 30",
+            "seven_day",
+        ),
+        ("You've hit your Fable 5 limit · resets Jul 30", "seven_day"),
+    ] {
+        let rate_limit = build_claude_rate_limit(
+            "claude_code",
+            ClaudeRateLimitSignals {
+                assistant_error_rate_limited: true,
+                api_error_status: Some(429),
+                response_text: Some(copy),
+                ..bare_signals()
+            },
+            None,
+            None,
+        )
+        .unwrap_or_else(|| panic!("{copy:?} must classify"));
+        assert_eq!(
+            rate_limit.window.as_deref(),
+            Some(expected_window),
+            "wrong window for {copy:?}"
+        );
+    }
+}
+
 /// Transient burst 429s carry different copy and must NOT enter the quota
 /// pipeline; neither must non-rate-limit assistant errors.
 #[test]

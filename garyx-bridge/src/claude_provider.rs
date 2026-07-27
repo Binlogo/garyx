@@ -259,11 +259,19 @@ struct ClaudeRateLimitSignals<'a> {
 /// The CLI's usage-limit copy, e.g. "You've hit your session limit · resets
 /// 10:30pm (Asia/Shanghai)" or a weekly variant. Deliberately narrow: an
 /// arbitrary 429 message must not classify as quota exhaustion.
+/// Prefixes the Claude CLI uses for its quota-error copy (2.1.x): "You've
+/// hit your …" and "You've reached your …" both render real limit
+/// exhaustions. An explicit table, not a fuzzy match — an arbitrary 429
+/// message must never classify as quota exhaustion.
+const CLAUDE_QUOTA_COPY_PREFIXES: &[&str] = &["you've hit your", "you've reached your"];
+
 fn claude_usage_limit_text(text: Option<&str>) -> Option<&str> {
     let text = text.map(str::trim).filter(|value| !value.is_empty())?;
     let lower = text.to_lowercase();
-    let is_limit_copy =
-        (lower.contains("hit your") && lower.contains("limit")) || lower.contains("usage limit");
+    let is_limit_copy = CLAUDE_QUOTA_COPY_PREFIXES
+        .iter()
+        .any(|prefix| lower.contains(prefix) && lower.contains("limit"))
+        || lower.contains("usage limit");
     is_limit_copy.then_some(text)
 }
 
@@ -368,7 +376,16 @@ fn build_claude_rate_limit(
             let lower = limit_text?.to_lowercase();
             if lower.contains("session limit") {
                 Some("five_hour".to_owned())
-            } else if lower.contains("weekly limit") || lower.contains("week") {
+            } else if lower.contains("weekly limit")
+                || lower.contains("week")
+                // Model-scoped weekly buckets render as "<model> limit"
+                // (the CLI's seven_day_opus / seven_day_sonnet /
+                // seven_day_overage_included mappings).
+                || lower.contains("opus limit")
+                || lower.contains("sonnet limit")
+                || lower.contains("fable 5 limit")
+                || lower.contains("fable limit")
+            {
                 Some("seven_day".to_owned())
             } else {
                 None
