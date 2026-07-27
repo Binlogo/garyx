@@ -5730,3 +5730,122 @@ async fn interruption_copy_does_not_cross_the_user_turn_boundary() {
         "an interruption from the previous turn must not stage the later unrelated failure"
     );
 }
+
+/// Review #TASK-2795 round 4: the idle terminal also classifies quota FIRST.
+/// A rejected rate_limit_event plus the interruption copy followed by the
+/// idle backstop stages the quota verdict — reverting the idle path to the
+/// connection-only helper turns this red.
+#[tokio::test(start_paused = true)]
+async fn quota_verdict_beats_interruption_on_the_idle_terminal() {
+    let provider = make_provider();
+    provider.initialize_pending_inputs("run-idle-mixed").await;
+
+    let mut source = ScriptedMessageSource::new(vec![
+        (
+            0,
+            scripted_system(
+                "rate_limit_event",
+                json!({
+                    "type": "rate_limit_event",
+                    "rate_limit_info": {
+                        "status": "rejected",
+                        "resetsAt": 1767225600,
+                        "rateLimitType": "five_hour",
+                    },
+                }),
+            ),
+        ),
+        (
+            1,
+            scripted_assistant_text(
+                "API Error: Connection closed mid-response. The response above may be incomplete.",
+            ),
+        ),
+        (
+            4_000_000,
+            scripted_system("status", json!({"type": "system", "subtype": "status"})),
+        ),
+    ]);
+
+    let cb: StreamCallback = Box::new(|_| {});
+    provider
+        .process_messages_streaming(
+            "run-idle-mixed",
+            "thread::idle-mixed",
+            &mut source,
+            &cb,
+            None,
+            None,
+        )
+        .await
+        .expect_err("run should fail on the idle backstop");
+    let staged = provider
+        .take_rate_limit("thread::idle-mixed")
+        .await
+        .expect("the quota verdict must stage on the idle terminal");
+    assert_eq!(
+        staged.reached_type.as_deref(),
+        Some("rate_limit_rejected"),
+        "quota classification must win over the interruption fallback on idle"
+    );
+}
+
+/// Review #TASK-2795 round 4: tool-result user messages do NOT clear the
+/// per-turn interruption signal — only a real user turn does. Moving the
+/// clear before the tool-result branch turns this red.
+#[tokio::test]
+async fn tool_result_user_message_does_not_clear_the_interruption_signal() {
+    let provider = make_provider();
+    let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+    tx.send(Ok(Message::Assistant(AssistantMessage {
+        content: vec![ContentBlock::Text(TextBlock {
+            text:
+                "API Error: Connection closed mid-response. The response above may be incomplete."
+                    .to_owned(),
+        })],
+        model: "claude-test".to_owned(),
+        parent_tool_use_id: None,
+        error: Some(AssistantMessageError::ServerError),
+    })))
+    .await
+    .unwrap();
+    // A tool-result user message is part of the SAME turn.
+    tx.send(Ok(Message::User(UserMessage {
+        content: UserContent::Blocks(vec![ContentBlock::ToolResult(ToolResultBlock {
+            tool_use_id: "tu-net".to_owned(),
+            content: Some(Value::String("ok".to_owned())),
+            is_error: None,
+        })]),
+        uuid: None,
+        parent_tool_use_id: None,
+        tool_use_result: None,
+        origin: None,
+    })))
+    .await
+    .unwrap();
+    tx.send(Ok(Message::Result(Box::new(ResultMessage {
+        subtype: "error_during_execution".to_owned(),
+        is_error: true,
+        session_id: "sdk-session-toolres".to_owned(),
+        terminal_reason: Some("api_error".to_owned()),
+        errors: vec!["something else went wrong".to_owned()],
+        ..Default::default()
+    }))))
+    .await
+    .unwrap();
+    drop(tx);
+
+    let (_chunks, cb) = collecting_callback();
+    provider
+        .process_messages_streaming("run-toolres", "thread::toolres", &mut rx, &cb, None, None)
+        .await
+        .expect("stream should process");
+    let staged = provider
+        .take_rate_limit("thread::toolres")
+        .await
+        .expect("a tool result must not clear the interruption signal");
+    assert_eq!(
+        staged.reached_type.as_deref(),
+        Some("connection_interrupted")
+    );
+}

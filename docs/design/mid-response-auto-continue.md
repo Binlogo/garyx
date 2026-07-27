@@ -100,8 +100,13 @@ Bridge (stream-shape driven, `claude_provider/tests.rs`):
   verdict, never the network retry.
 - `interruption_copy_does_not_cross_the_user_turn_boundary` — the real
   user-turn boundary clears the per-turn interruption signal; a later
-  unrelated failure in the next turn stays terminal. Tool-result user
-  messages never clear it.
+  unrelated failure in the next turn stays terminal.
+- `tool_result_user_message_does_not_clear_the_interruption_signal` —
+  tool-result user messages are part of the same turn and never clear the
+  signal; moving the clear before the tool-result branch turns this red.
+- `quota_verdict_beats_interruption_on_the_idle_terminal` — the idle
+  backstop also classifies quota first; reverting it to the
+  connection-only helper turns this red.
 
 Gateway (`quota_resend.rs`):
 
@@ -114,3 +119,10 @@ Gateway (`quota_resend.rs`):
   consideration (observed via the synchronous generation claim), while a
   quota verdict does. `auto_switch_context_for` is the single decision
   point the production path consumes; removing the gate turns this red.
+- `serialized_rate_limit_contract_gates_auto_switch_end_to_end` — the
+  bridge -> gateway marker contract guard: the `run_complete.rate_limit`
+  payload comes from the REAL bridge serializer
+  (`garyx_bridge::multi_provider::rate_limit_control_value`, exported as
+  the wire contract), flows through the production parser and
+  registration path, and pins both directions. Dropping `reached_type`
+  from the serializer turns this red.

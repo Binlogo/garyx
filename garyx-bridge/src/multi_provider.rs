@@ -14,6 +14,7 @@ use crate::provider_trait::ClearSessionOutcome;
 
 mod lifecycle;
 mod persistence;
+pub use persistence::rate_limit_control_value;
 mod provider_factory;
 mod resolver;
 mod run_management;

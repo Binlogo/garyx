@@ -1385,7 +1385,13 @@ pub(super) async fn save_thread_messages(
 /// consumed by the transcript run-state reducer. `will_auto_resend` is true
 /// whenever a concrete reset time is known: the gateway resends both the
 /// 5-hour and weekly windows the moment they recover.
-fn rate_limit_control_value(rate_limit: &ProviderRateLimit) -> Value {
+/// The wire contract between a staged `ProviderRateLimit` and the committed
+/// `run_complete.rate_limit` payload the gateway's quota-recovery projection
+/// parses. Public so the gateway's registration-path tests can drive the
+/// REAL serialized shape end to end — a field dropped here (e.g.
+/// `reached_type`) silently turns a transient interruption into a quota
+/// verdict downstream, and only a cross-crate test catches that.
+pub fn rate_limit_control_value(rate_limit: &ProviderRateLimit) -> Value {
     let mut object = serde_json::Map::new();
     object.insert(
         "provider".to_owned(),

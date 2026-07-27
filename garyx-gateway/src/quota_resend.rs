@@ -1003,6 +1003,96 @@ mod tests {
         assert!(latest_rate_limited_plan(&records).is_none());
     }
 
+    /// Review #TASK-2795 round 4: the bridge -> gateway marker contract has
+    /// an end-to-end guard. The `run_complete.rate_limit` payload comes from
+    /// the REAL bridge serializer (`garyx_bridge::multi_provider::
+    /// rate_limit_control_value`), flows through the production parser, and
+    /// drives the production registration path. Dropping `reached_type` from
+    /// the serializer would turn the interruption into a quota verdict and
+    /// flip the first assertion red.
+    #[tokio::test]
+    async fn serialized_rate_limit_contract_gates_auto_switch_end_to_end() {
+        let state = crate::server::AppStateBuilder::new(Default::default()).build();
+        state
+            .ops
+            .garyx_db
+            .run_thread_data_startup_migrations()
+            .unwrap();
+        state
+            .ops
+            .garyx_db
+            .write_thread_record_with_projections("thread::quota", "{}", None, None)
+            .unwrap();
+
+        let committed_event =
+            |run_id: &str, seq: u64, rate_limit: &garyx_models::provider::ProviderRateLimit| {
+                json!({
+                    "type": "committed_message",
+                    "thread_id": "thread::quota",
+                    "run_id": run_id,
+                    "seq": seq,
+                    "message": {
+                        "role": "system",
+                        "control": {
+                            "kind": "run_complete",
+                            "run_id": run_id,
+                            "status": "rate_limited",
+                            "rate_limit":
+                                garyx_bridge::multi_provider::rate_limit_control_value(rate_limit),
+                        }
+                    }
+                })
+                .to_string()
+            };
+
+        let interruption = garyx_models::provider::ProviderRateLimit {
+            provider: "claude_code".to_owned(),
+            reset_at: Some(Utc::now().to_rfc3339()),
+            reached_type: Some("connection_interrupted".to_owned()),
+            message: Some(
+                "API Error: Connection closed mid-response. The response above may be incomplete."
+                    .to_owned(),
+            ),
+            ..Default::default()
+        };
+        let plan = parse_recovery_plan(&committed_event("run::wire-interrupted", 5, &interruption))
+            .expect("the serialized interruption must parse");
+        register_plan_with_auto_switch(&state, plan).await;
+        let job = state
+            .ops
+            .garyx_db
+            .active_quota_recovery_job("thread::quota")
+            .unwrap()
+            .expect("the interruption registers a durable row");
+        assert_eq!(job.blocked_run_id, "run::wire-interrupted");
+        assert!(
+            !crate::quota_auto_switch::generation_was_considered(&job.job_id),
+            "the serialized transient marker must keep the generation away from auto-switch"
+        );
+
+        let quota = garyx_models::provider::ProviderRateLimit {
+            provider: "claude_code".to_owned(),
+            reset_at: Some(Utc::now().to_rfc3339()),
+            window: Some("five_hour".to_owned()),
+            reached_type: Some("api_rate_limit_429".to_owned()),
+            ..Default::default()
+        };
+        let plan = parse_recovery_plan(&committed_event("run::wire-quota", 11, &quota))
+            .expect("the serialized quota verdict must parse");
+        register_plan_with_auto_switch(&state, plan).await;
+        let job = state
+            .ops
+            .garyx_db
+            .active_quota_recovery_job("thread::quota")
+            .unwrap()
+            .expect("the quota verdict registers a durable row");
+        assert_eq!(job.blocked_run_id, "run::wire-quota");
+        assert!(
+            crate::quota_auto_switch::generation_was_considered(&job.job_id),
+            "the serialized quota verdict must reach auto-switch consideration"
+        );
+    }
+
     /// Review #TASK-2795 finding 3: the production registration path itself
     /// must gate auto-switch. Drives register_plan_with_auto_switch end to
     /// end and observes the consideration claim (taken synchronously before
