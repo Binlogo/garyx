@@ -4984,7 +4984,7 @@ fn bare_signals() -> ClaudeRateLimitSignals<'static> {
         errors: None,
         assistant_error_rate_limited: false,
         api_error_status: None,
-        response_text: None,
+        assistant_error_text: None,
     }
 }
 
@@ -5041,7 +5041,9 @@ fn build_claude_rate_limit_classifies_terminal_api_429_with_limit_copy() {
             terminal_reason: Some("api_error"),
             assistant_error_rate_limited: true,
             api_error_status: Some(429),
-            response_text: Some("You've hit your session limit · resets 10:30pm (Asia/Shanghai)"),
+            assistant_error_text: Some(
+                "You've hit your session limit · resets 10:30pm (Asia/Shanghai)",
+            ),
             ..bare_signals()
         },
         None,
@@ -5070,7 +5072,7 @@ fn build_claude_rate_limit_classifies_terminal_api_429_with_limit_copy() {
         ClaudeRateLimitSignals {
             assistant_error_rate_limited: true,
             api_error_status: Some(429),
-            response_text: Some("You've hit your weekly limit · resets Jul 30"),
+            assistant_error_text: Some("You've hit your weekly limit · resets Jul 30"),
             ..bare_signals()
         },
         None,
@@ -5094,7 +5096,7 @@ fn build_claude_rate_limit_covers_reached_prefix_and_scoped_weekly_labels() {
             terminal_reason: Some("api_error"),
             assistant_error_rate_limited: true,
             api_error_status: Some(429),
-            response_text: Some(
+            assistant_error_text: Some(
                 "You've reached your session limit · resets 10:30pm (Asia/Shanghai)",
             ),
             ..bare_signals()
@@ -5118,7 +5120,7 @@ fn build_claude_rate_limit_covers_reached_prefix_and_scoped_weekly_labels() {
             ClaudeRateLimitSignals {
                 assistant_error_rate_limited: true,
                 api_error_status: Some(429),
-                response_text: Some(copy),
+                assistant_error_text: Some(copy),
                 ..bare_signals()
             },
             None,
@@ -5144,7 +5146,7 @@ fn build_claude_rate_limit_rejects_non_quota_429_shapes() {
                 terminal_reason: Some("api_error"),
                 assistant_error_rate_limited: true,
                 api_error_status: Some(429),
-                response_text: Some("Rate limited, please slow down and retry."),
+                assistant_error_text: Some("Rate limited, please slow down and retry."),
                 ..bare_signals()
             },
             None,
@@ -5160,7 +5162,7 @@ fn build_claude_rate_limit_rejects_non_quota_429_shapes() {
                 terminal_reason: Some("api_error"),
                 assistant_error_rate_limited: false,
                 api_error_status: Some(529),
-                response_text: Some("You've hit your session limit · resets 10:30pm"),
+                assistant_error_text: Some("You've hit your session limit · resets 10:30pm"),
                 ..bare_signals()
             },
             None,
@@ -5253,4 +5255,105 @@ fn sdk_launch_options_consume_the_same_model_snapshot_as_quota_attribution() {
         Some("claude-fable-5"),
         "the SDK launch must use the run snapshot, not hot config"
     );
+}
+
+/// Review #TASK-2793 round 3: quota classification pairs the API error with
+/// its OWN assistant segment's text. A prior ordinary segment that merely
+/// quoted limit copy must not make a transient terminal 429 classify.
+#[tokio::test]
+async fn transient_429_does_not_inherit_quota_copy_from_prior_assistant_segment() {
+    let provider = make_provider();
+    let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+    tx.send(Ok(Message::Assistant(AssistantMessage {
+        content: vec![ContentBlock::Text(TextBlock {
+            text: "Earlier explanation quoted: You've reached your session limit.".to_owned(),
+        })],
+        model: "claude-test".to_owned(),
+        parent_tool_use_id: None,
+        error: None,
+    })))
+    .await
+    .unwrap();
+    tx.send(Ok(Message::Assistant(AssistantMessage {
+        content: vec![ContentBlock::Text(TextBlock {
+            text: "Rate limited, please slow down and retry.".to_owned(),
+        })],
+        model: "claude-test".to_owned(),
+        parent_tool_use_id: None,
+        error: Some(AssistantMessageError::RateLimit),
+    })))
+    .await
+    .unwrap();
+    tx.send(Ok(Message::Result(Box::new(ResultMessage {
+        subtype: "error_during_execution".to_owned(),
+        is_error: true,
+        session_id: "sdk-session-burst".to_owned(),
+        terminal_reason: Some("api_error".to_owned()),
+        api_error_status: Some(429),
+        ..Default::default()
+    }))))
+    .await
+    .unwrap();
+    drop(tx);
+
+    let (_chunks, cb) = collecting_callback();
+    provider
+        .process_messages_streaming("run-burst", "thread::burst", &mut rx, &cb, None, None)
+        .await
+        .expect("stream should process");
+    assert!(
+        provider.take_rate_limit("thread::burst").await.is_none(),
+        "transient terminal 429 must not inherit quota copy from prior assistant text"
+    );
+}
+
+/// The inverse pairing: prior ordinary content plus a genuine quota copy ON
+/// the error segment itself must classify.
+#[tokio::test]
+async fn quota_copy_on_the_error_segment_classifies_despite_prior_content() {
+    let provider = make_provider();
+    let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+    tx.send(Ok(Message::Assistant(AssistantMessage {
+        content: vec![ContentBlock::Text(TextBlock {
+            text: "Working through the plan…".to_owned(),
+        })],
+        model: "claude-test".to_owned(),
+        parent_tool_use_id: None,
+        error: None,
+    })))
+    .await
+    .unwrap();
+    tx.send(Ok(Message::Assistant(AssistantMessage {
+        content: vec![ContentBlock::Text(TextBlock {
+            text: "You've reached your session limit · resets 10:30pm (Asia/Shanghai)".to_owned(),
+        })],
+        model: "claude-test".to_owned(),
+        parent_tool_use_id: None,
+        error: Some(AssistantMessageError::RateLimit),
+    })))
+    .await
+    .unwrap();
+    tx.send(Ok(Message::Result(Box::new(ResultMessage {
+        subtype: "error_during_execution".to_owned(),
+        is_error: true,
+        session_id: "sdk-session-quota".to_owned(),
+        terminal_reason: Some("api_error".to_owned()),
+        api_error_status: Some(429),
+        ..Default::default()
+    }))))
+    .await
+    .unwrap();
+    drop(tx);
+
+    let (_chunks, cb) = collecting_callback();
+    provider
+        .process_messages_streaming("run-quota", "thread::quota-seg", &mut rx, &cb, None, None)
+        .await
+        .expect("stream should process");
+    let staged = provider
+        .take_rate_limit("thread::quota-seg")
+        .await
+        .expect("quota copy on the error segment must classify");
+    assert_eq!(staged.window.as_deref(), Some("five_hour"));
+    assert_eq!(staged.reached_type.as_deref(), Some("api_rate_limit_429"));
 }

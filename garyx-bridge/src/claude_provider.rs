@@ -227,6 +227,12 @@ struct StreamSignals {
     rate_limit_info: Option<Value>,
     /// Last assistant-level API error classification seen on the stream.
     last_assistant_error: Option<AssistantMessageError>,
+    /// Visible text of the SAME assistant message that carried
+    /// `last_assistant_error`. Quota classification must only look at this
+    /// paired segment — matching the whole run's aggregated text would let
+    /// an earlier segment that merely quoted limit copy misclassify a
+    /// transient terminal 429 (review #TASK-2793).
+    last_assistant_error_text: Option<String>,
 }
 
 /// Build a `ProviderRateLimit` from Claude's structured quota signals. Returns
@@ -251,9 +257,11 @@ struct ClaudeRateLimitSignals<'a> {
     /// The CLI classified the terminal assistant error as `rate_limit`.
     assistant_error_rate_limited: bool,
     api_error_status: Option<i64>,
-    /// The assistant text of the failed turn (the usage-limit copy lands
-    /// here, not in `errors`).
-    response_text: Option<&'a str>,
+    /// Visible text of the assistant message that carried the terminal API
+    /// error (the usage-limit copy lands here, not in `errors`). Never the
+    /// run's aggregated text: only the error segment's own copy may
+    /// classify.
+    assistant_error_text: Option<&'a str>,
 }
 
 /// The CLI's usage-limit copy, e.g. "You've hit your session limit · resets
@@ -352,7 +360,7 @@ fn build_claude_rate_limit(
         .and_then(Value::as_str)
         .map(|status| status.eq_ignore_ascii_case("rejected"))
         .unwrap_or(false);
-    let limit_text = claude_usage_limit_text(signals.response_text)
+    let limit_text = claude_usage_limit_text(signals.assistant_error_text)
         .or_else(|| claude_usage_limit_text(signals.errors));
     let api_rate_limited = signals.assistant_error_rate_limited
         && signals.api_error_status.is_none_or(|status| status == 429)
@@ -988,6 +996,18 @@ fn is_nested_claude_envelope(parent_tool_use_id: Option<&str>, blocks: &[Content
         .map(str::trim)
         .filter(|value| !value.is_empty())
         != Some(parent_tool_use_id)
+}
+
+/// Concatenated visible text of one assistant message's blocks. Used to pair
+/// an assistant-level API error with its own copy for quota classification.
+fn assistant_blocks_visible_text(blocks: &[ContentBlock]) -> String {
+    let mut text = String::new();
+    for block in blocks {
+        if let ContentBlock::Text(TextBlock { text: block_text }) = block {
+            text.push_str(block_text);
+        }
+    }
+    text
 }
 
 fn assistant_blocks_have_visible_text(blocks: &[ContentBlock]) -> bool {
@@ -2162,6 +2182,8 @@ impl ClaudeCliProvider {
                                 "claude assistant message carried an API error"
                             );
                             signals.last_assistant_error = Some(api_error.clone());
+                            signals.last_assistant_error_text =
+                                Some(assistant_blocks_visible_text(&assistant_msg.content));
                         }
                         if is_synthetic_no_response_message(&assistant_msg) {
                             tracing::debug!(
@@ -2547,7 +2569,7 @@ impl ClaudeCliProvider {
                     api_error_status: result_data
                         .as_ref()
                         .and_then(|result| result.api_error_status),
-                    response_text: Some(response_text.as_str()),
+                    assistant_error_text: signals.last_assistant_error_text.as_deref(),
                 },
                 quota_account_dir,
                 actual_model.as_deref().or(requested_model),
