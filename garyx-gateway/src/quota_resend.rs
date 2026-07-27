@@ -287,13 +287,18 @@ async fn register_plan(state: &Arc<AppState>, plan: RecoveryPlan) -> Option<Quot
 /// consider the blocked generation (docs/design/quota-auto-account-switch.md).
 /// Only the event projection calls this — manual retry and startup reconcile
 /// re-register historical generations without an auto-switch trigger.
+/// Whether a committed rate-limited generation is a real quota verdict that
+/// may drive auto account switch. A transient connection interruption is
+/// not: the timer resend handles it, and switching accounts over a network
+/// blip would be pure churn. The production registration path must consume
+/// this function — it is the single decision point the tests pin.
+fn reached_type_is_quota_verdict(reached_type: Option<&str>) -> bool {
+    reached_type != Some("connection_interrupted")
+}
+
 async fn register_plan_with_auto_switch(state: &Arc<AppState>, plan: RecoveryPlan) {
-    // A transient connection interruption is not a quota verdict: the timer
-    // resend handles it, and switching accounts over a network blip would be
-    // pure churn.
-    let quota_verdict = plan.reached_type.as_deref() != Some("connection_interrupted");
     let provider = crate::quota_auto_switch::AccountProvider::from_canonical(&plan.provider)
-        .filter(|_| quota_verdict);
+        .filter(|_| reached_type_is_quota_verdict(plan.reached_type.as_deref()));
     let thread_id = plan.thread_id.clone();
     let run_id = plan.run_id.clone();
     let account_dir = plan.account_dir.clone();
@@ -892,6 +897,15 @@ mod tests {
             "the transient marker must survive projection so auto-switch skips it"
         );
         assert!(plan.reset_at.is_some(), "the timer resend must stay armed");
+        assert!(
+            !reached_type_is_quota_verdict(plan.reached_type.as_deref()),
+            "a connection interruption must never drive auto account switch"
+        );
+        assert!(
+            reached_type_is_quota_verdict(Some("api_rate_limit_429")),
+            "real quota verdicts keep driving auto-switch"
+        );
+        assert!(reached_type_is_quota_verdict(None));
     }
 
     #[test]

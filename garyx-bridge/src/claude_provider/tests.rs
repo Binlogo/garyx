@@ -5339,6 +5339,24 @@ async fn quota_copy_on_the_error_segment_classifies_despite_prior_content() {
         session_id: "sdk-session-quota".to_owned(),
         terminal_reason: Some("api_error".to_owned()),
         api_error_status: Some(429),
+        ..Default::default()
+    }))))
+    .await
+    .unwrap();
+    drop(tx);
+
+    let (_chunks, cb) = collecting_callback();
+    provider
+        .process_messages_streaming("run-quota", "thread::quota-seg", &mut rx, &cb, None, None)
+        .await
+        .expect("stream should process");
+    let staged = provider
+        .take_rate_limit("thread::quota-seg")
+        .await
+        .expect("quota copy on the error segment must classify");
+    assert_eq!(staged.window.as_deref(), Some("five_hour"));
+    assert_eq!(staged.reached_type.as_deref(), Some("api_rate_limit_429"));
+}
 
 fn mid_response_error_result() -> Message {
     Message::Result(Box::new(ResultMessage {
@@ -5434,18 +5452,6 @@ async fn successful_attempt_resets_the_interruption_streak() {
 
     let (_chunks, cb) = collecting_callback();
     provider
-        .process_messages_streaming("run-quota", "thread::quota-seg", &mut rx, &cb, None, None)
-        .await
-        .expect("stream should process");
-    let staged = provider
-        .take_rate_limit("thread::quota-seg")
-        .await
-        .expect("quota copy on the error segment must classify");
-    assert_eq!(staged.window.as_deref(), Some("five_hour"));
-    assert_eq!(staged.reached_type.as_deref(), Some("api_rate_limit_429"));
-=======
-    let (_chunks, cb) = collecting_callback();
-    provider
         .process_messages_streaming("run-ok", "thread::net-reset", &mut rx, &cb, None, None)
         .await
         .expect("stream should process");
@@ -5481,4 +5487,135 @@ async fn plain_failures_do_not_stage_an_automatic_continue() {
         .await
         .expect("stream should process");
     assert!(provider.take_rate_limit("thread::err").await.is_none());
+}
+
+/// Review #TASK-2795 finding 1: an interruption segment observed on the
+/// stream must still stage recovery when the run dies on the idle backstop,
+/// which returns before result processing.
+#[tokio::test(start_paused = true)]
+async fn mid_response_copy_before_idle_backstop_still_stages_recovery() {
+    let provider = make_provider();
+    provider.initialize_pending_inputs("run-net-idle").await;
+
+    let mut source = ScriptedMessageSource::new(vec![
+        (
+            0,
+            scripted_assistant_text(
+                "API Error: Connection closed mid-response. The response above may be incomplete.",
+            ),
+        ),
+        // Nothing else until far beyond the idle ceiling.
+        (
+            4_000_000,
+            scripted_system("status", json!({"type": "system", "subtype": "status"})),
+        ),
+    ]);
+
+    let cb: StreamCallback = Box::new(|_| {});
+    let error = provider
+        .process_messages_streaming(
+            "run-net-idle",
+            "thread::net-idle",
+            &mut source,
+            &cb,
+            None,
+            None,
+        )
+        .await
+        .expect_err("run should fail on the idle backstop");
+    assert!(
+        matches!(&error, BridgeError::RunFailed(message) if message.contains("idle")),
+        "expected stream-idle failure, got: {error:?}"
+    );
+    let staged = provider
+        .take_rate_limit("thread::net-idle")
+        .await
+        .expect("the already-observed mid-response copy must still stage recovery");
+    assert_eq!(
+        staged.reached_type.as_deref(),
+        Some("connection_interrupted")
+    );
+}
+
+/// The SDK receive-error terminal must funnel through the same staging.
+#[tokio::test]
+async fn mid_response_copy_before_stream_error_still_stages_recovery() {
+    let provider = make_provider();
+    let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+    tx.send(Ok(Message::Assistant(AssistantMessage {
+        content: vec![ContentBlock::Text(TextBlock {
+            text:
+                "API Error: Connection closed mid-response. The response above may be incomplete."
+                    .to_owned(),
+        })],
+        model: "claude-test".to_owned(),
+        parent_tool_use_id: None,
+        error: Some(AssistantMessageError::ServerError),
+    })))
+    .await
+    .unwrap();
+    tx.send(Err(claude_agent_sdk::ClaudeSDKError::Connection(
+        "socket closed".to_owned(),
+    )))
+    .await
+    .unwrap();
+    drop(tx);
+
+    let (_chunks, cb) = collecting_callback();
+    provider
+        .process_messages_streaming("run-net-err", "thread::net-err", &mut rx, &cb, None, None)
+        .await
+        .expect_err("stream error should fail the run");
+    let staged = provider
+        .take_rate_limit("thread::net-err")
+        .await
+        .expect("the interruption segment must stage recovery on the receive-error terminal");
+    assert_eq!(
+        staged.reached_type.as_deref(),
+        Some("connection_interrupted")
+    );
+}
+
+/// Ordinary content merely QUOTING the copy must not arm the retry: only the
+/// CLI's own error surface (error-classified segment or the synthetic
+/// "API Error: …" line) counts.
+#[tokio::test]
+async fn quoted_interruption_copy_in_ordinary_content_does_not_stage() {
+    let provider = make_provider();
+    let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+    tx.send(Ok(Message::Assistant(AssistantMessage {
+        content: vec![ContentBlock::Text(TextBlock {
+            text: "上一轮 review 遇到 API Error: Connection closed mid-response,我们继续分析。"
+                .to_owned(),
+        })],
+        model: "claude-test".to_owned(),
+        parent_tool_use_id: None,
+        error: None,
+    })))
+    .await
+    .unwrap();
+    tx.send(Ok(Message::Result(Box::new(ResultMessage {
+        subtype: "error_during_execution".to_owned(),
+        is_error: true,
+        session_id: "sdk-session-quote".to_owned(),
+        terminal_reason: Some("api_error".to_owned()),
+        errors: vec!["something else went wrong".to_owned()],
+        ..Default::default()
+    }))))
+    .await
+    .unwrap();
+    drop(tx);
+
+    let (_chunks, cb) = collecting_callback();
+    provider
+        .process_messages_streaming("run-quote", "thread::net-quote", &mut rx, &cb, None, None)
+        .await
+        .expect("stream should process");
+    assert!(
+        provider
+            .take_rate_limit("thread::net-quote")
+            .await
+            .is_none(),
+        "a quoted copy inside ordinary content must not arm the retry"
+    );
 }

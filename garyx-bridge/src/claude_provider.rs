@@ -233,6 +233,13 @@ struct StreamSignals {
     /// an earlier segment that merely quoted limit copy misclassify a
     /// transient terminal 429 (review #TASK-2793).
     last_assistant_error_text: Option<String>,
+    /// The CLI's connection-interruption copy when a single assistant
+    /// segment surfaced it as an error (error-classified, or the synthetic
+    /// "API Error: …" line itself). Per-segment for the same reason as
+    /// above: ordinary content quoting the copy must not arm the retry.
+    /// Captured on the stream so the idle and receive-error terminals can
+    /// still stage recovery (review #TASK-2795).
+    interruption_copy: Option<String>,
 }
 
 /// Build a `ProviderRateLimit` from Claude's structured quota signals. Returns
@@ -431,6 +438,23 @@ fn build_claude_rate_limit(
 /// mid-response. The response above may be incomplete." A run that dies on
 /// this is worth exactly one cheap automatic retry — the model was mid-turn
 /// and the session is intact.
+/// Detect the interruption copy on ONE assistant segment. Only the CLI's
+/// own error surface counts: an error-classified segment, or the synthetic
+/// "API Error: …" line itself — a segment merely quoting the copy inside
+/// larger content must not arm the retry.
+fn claude_interruption_segment_copy(msg: &AssistantMessage) -> Option<String> {
+    let text = assistant_blocks_visible_text(&msg.content);
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let lower = trimmed.to_lowercase();
+    if !lower.contains("connection closed mid-response") {
+        return None;
+    }
+    (msg.error.is_some() || lower.starts_with("api error:")).then(|| trimmed.to_owned())
+}
+
 fn claude_connection_interruption_text(text: Option<&str>) -> Option<&str> {
     let text = text.map(str::trim).filter(|value| !value.is_empty())?;
     text.to_lowercase()
@@ -2090,6 +2114,62 @@ impl ClaudeCliProvider {
     }
 
     /// Core message processing loop with optional streaming callback.
+    /// Stage the transient-interruption recovery when a segment (or the
+    /// result errors) surfaced the CLI's mid-response copy. Shared by the
+    /// normal terminal path AND the idle / SDK receive-error terminals,
+    /// which return before result processing (review #TASK-2795). Returns
+    /// whether a retry was staged. Bounded per thread; a successful attempt
+    /// resets the streak elsewhere.
+    async fn stage_connection_interruption_if_seen(
+        &self,
+        thread_id: &str,
+        run_id: &str,
+        signals: &StreamSignals,
+        result_errors: Option<&str>,
+        quota_account_dir: Option<&Path>,
+        model: Option<&str>,
+    ) -> bool {
+        const MAX_CONSECUTIVE_INTERRUPTION_RETRIES: u32 = 3;
+        let Some(limit_text) = signals
+            .interruption_copy
+            .as_deref()
+            .or_else(|| claude_connection_interruption_text(result_errors))
+        else {
+            return false;
+        };
+        let streak = {
+            let mut counts = self.connection_interruption_counts.lock().await;
+            let streak = counts.entry(thread_id.to_owned()).or_insert(0);
+            *streak += 1;
+            *streak
+        };
+        if streak > MAX_CONSECUTIVE_INTERRUPTION_RETRIES {
+            tracing::warn!(
+                run_id = %run_id,
+                thread_id = %thread_id,
+                streak,
+                "claude run died mid-response repeatedly; leaving the failure terminal",
+            );
+            return false;
+        }
+        let rate_limit = build_claude_connection_interruption(
+            self.config.provider_type.as_slug(),
+            limit_text,
+            quota_account_dir,
+            model,
+        );
+        tracing::warn!(
+            run_id = %run_id,
+            thread_id = %thread_id,
+            streak,
+            "claude run died mid-response; staging a one-minute automatic continue",
+        );
+        self.pending_rate_limits
+            .stage(thread_id.to_owned(), rate_limit)
+            .await;
+        true
+    }
+
     async fn process_messages_streaming(
         &self,
         run_id: &str,
@@ -2163,6 +2243,18 @@ impl ClaudeCliProvider {
                         "stream idle for {}s, treating run as dead",
                         STREAM_IDLE_TIMEOUT_SECS,
                     );
+                    // An already-observed interruption segment must still
+                    // stage recovery even though this terminal never reaches
+                    // result processing (review #TASK-2795).
+                    self.stage_connection_interruption_if_seen(
+                        thread_id,
+                        run_id,
+                        &signals,
+                        None,
+                        quota_account_dir,
+                        actual_model.as_deref().or(requested_model),
+                    )
+                    .await;
                     return Err(BridgeError::RunFailed(format!(
                         "claude stream idle for {STREAM_IDLE_TIMEOUT_SECS}s"
                     )));
@@ -2226,6 +2318,9 @@ impl ClaudeCliProvider {
                             signals.last_assistant_error = Some(api_error.clone());
                             signals.last_assistant_error_text =
                                 Some(assistant_blocks_visible_text(&assistant_msg.content));
+                        }
+                        if let Some(copy) = claude_interruption_segment_copy(&assistant_msg) {
+                            signals.interruption_copy = Some(copy);
                         }
                         if is_synthetic_no_response_message(&assistant_msg) {
                             tracing::debug!(
@@ -2581,6 +2676,15 @@ impl ClaudeCliProvider {
                                 "error receiving message from SDK"
                             ),
                         }
+                        self.stage_connection_interruption_if_seen(
+                            thread_id,
+                            run_id,
+                            &signals,
+                            None,
+                            quota_account_dir,
+                            actual_model.as_deref().or(requested_model),
+                        )
+                        .await;
                         return Err(bridge_error);
                     }
                 },
@@ -2627,44 +2731,16 @@ impl ClaudeCliProvider {
                 self.pending_rate_limits
                     .stage(thread_id.to_owned(), rate_limit)
                     .await;
-            } else if let Some(limit_text) =
-                claude_connection_interruption_text(Some(response_text.as_str()))
-                    .or_else(|| claude_connection_interruption_text(errors_joined.as_deref()))
-            {
-                // Transient network interruption: schedule one automatic
-                // continue about a minute out through the same durable
-                // pipeline, bounded so a persistent outage cannot loop.
-                const MAX_CONSECUTIVE_INTERRUPTION_RETRIES: u32 = 3;
-                let streak = {
-                    let mut counts = self.connection_interruption_counts.lock().await;
-                    let streak = counts.entry(thread_id.to_owned()).or_insert(0);
-                    *streak += 1;
-                    *streak
-                };
-                if streak <= MAX_CONSECUTIVE_INTERRUPTION_RETRIES {
-                    let rate_limit = build_claude_connection_interruption(
-                        self.config.provider_type.as_slug(),
-                        limit_text,
-                        quota_account_dir,
-                        actual_model.as_deref().or(requested_model),
-                    );
-                    tracing::warn!(
-                        run_id = %run_id,
-                        thread_id = %thread_id,
-                        streak,
-                        "claude run died mid-response; staging a one-minute automatic continue",
-                    );
-                    self.pending_rate_limits
-                        .stage(thread_id.to_owned(), rate_limit)
-                        .await;
-                } else {
-                    tracing::warn!(
-                        run_id = %run_id,
-                        thread_id = %thread_id,
-                        streak,
-                        "claude run died mid-response repeatedly; leaving the failure terminal",
-                    );
-                }
+            } else {
+                self.stage_connection_interruption_if_seen(
+                    thread_id,
+                    run_id,
+                    &signals,
+                    errors_joined.as_deref(),
+                    quota_account_dir,
+                    actual_model.as_deref().or(requested_model),
+                )
+                .await;
             }
         } else {
             // A successful attempt ends the interruption streak.
