@@ -25,14 +25,30 @@
 - Keep ordinary form actions, switches, pickers, and selection monochrome.
   Green is semantic status color, not the default interactive tint.
 - Use Garyx's existing adaptive glass/material helpers for mobile chrome.
-- iOS 26 Liquid Glass has two hard rules. First, inside a
+- iOS 26 Liquid Glass has three hard rules. First, inside a
   `GlassEffectContainer`, apply glass directly to the content view
   (`content.glassEffect(in:)` via `garyxAdaptiveGlass`); a glass shape inside
   `.background {}` gets hoisted into the container's shared pass and draws
   over that view's own foreground content. Second, the glass surface itself
   has no hit-test region: interactive glass controls must declare an explicit
   `.contentShape` on the button label or taps between the content glyphs fall
-  through.
+  through. Third, glass is a material over a surface, never the surface's only
+  fill: it samples the composited backdrop, so a glass node over a region
+  nothing paints has no defined backdrop and shows stale compositor tiles as
+  random dark blocks on device.
+- Route content owns the one full-screen page background; every route wrapper
+  above it and the window itself are deliberately `.clear`. A reveal that
+  pushes page content aside therefore exposes a genuinely unpainted strip, and
+  any panel occupying that strip must paint its own opaque background —
+  `GaryxNavigationDrawerView` and the task-tree rail both do. Reserve glass for
+  bounded, floating chrome; a full-height rail that is translated on every drag
+  frame would also pay a full-screen offscreen blur per frame.
+- Backdrop-sampling artifacts are structurally invisible to screenshots and to
+  any pixel test built on `app.screenshot()`: the screenshot path re-renders the
+  layer tree instead of reading the live backdrop. "It does not reproduce in a
+  screenshot" is evidence for this class of bug, not evidence against it, so
+  diagnose it by reasoning about what paints the region rather than by trying to
+  capture it.
 - Chrome that expands in place (title capsule → thread settings panel) is a
   single morphing glass surface anchored to the collapsed control's rect via
   anchor preference, not a matched-geometry pair of separate views.
