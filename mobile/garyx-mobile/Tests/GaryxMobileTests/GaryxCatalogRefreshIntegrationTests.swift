@@ -292,13 +292,24 @@ final class GaryxCatalogRefreshIntegrationTests: XCTestCase {
 
         XCTAssertNil(model.lastSuccessfulCatalogSweepCompletedAt)
         await model.refreshRemoteState(.staleGated)
-        for path in garyxCatalogSweepPaths {
+        for path in garyxCatalogSweepPaths where path != "/api/capsules" {
             XCTAssertEqual(
                 recorder.catalogPathCounts[path],
                 2,
                 "a superseded sweep must leave \(path) stale"
             )
         }
+        XCTAssertEqual(
+            model.capsuleCatalogRequestedTicket,
+            2,
+            "both sweeps must request a capsule refresh"
+        )
+        let capsuleTransportCount =
+            recorder.catalogPathCounts["/api/capsules"] ?? 0
+        XCTAssertTrue(
+            (1...2).contains(capsuleTransportCount),
+            "capsule intents may share their existing single-flight transport"
+        )
         XCTAssertEqual(model.lastSuccessfulCatalogSweepCompletedAt, clock.now)
     }
 

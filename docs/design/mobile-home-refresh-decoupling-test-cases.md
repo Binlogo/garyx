@@ -49,15 +49,15 @@ sleeps or reads the wall clock.
 | B8 | Stale-gated caller within TTL is silent | connect sweep completes → trigger composer ensure-thread path within TTL | no new catalog-set requests | **PASS (2026-07-28)** — `testB8ComposerEnsureThreadIsSilentWithinTTL`; real ensure-thread path. |
 | B9 | Stale-gated caller past TTL sweeps | same, with injected clock advanced past TTL | catalog-set issued once | **PASS (2026-07-28)** — `testB9ComposerEnsureThreadSweepsPastTTL`; clock advanced without sleep. |
 | B10 | In-flight coalescing | hold sweep responses open → trigger forced + stale-gated again | each catalog path hit exactly once; both callers complete when responses release | **PASS (2026-07-28)** — `testB10ConcurrentIntentsCoalesceOntoOneSweep`; deterministic transport gate, each path exactly once and both joiners awaited settlement. |
-| B11 | Superseded sweep does not stamp freshness | start sweep, supersede via runtime-generation bump, then staleGated request | superseded sweep must not update lastCompleted; policy returns `.startSweep` | **PASS (2026-07-28)** — `testB11SupersededSweepDoesNotStampFreshness`; old flight released after generation bump, timestamp stayed nil, next stale-gated sweep ran. |
+| B11 | Superseded sweep does not stamp freshness | start sweep, supersede via runtime-generation bump, then staleGated request | superseded sweep must not update lastCompleted; policy returns `.startSweep` | **PASS (2026-07-28)** — `testB11SupersededSweepDoesNotStampFreshness`; old flight released after generation bump, timestamp stayed nil, and the next stale-gated sweep stamped the injected time. All 11 independently fetched paths ran twice; two capsule refresh tickets were observed while its existing single-flight worker correctly used one or two HTTP requests depending on scheduling. The invalid two-transport assertion reproduced on iteration 5 before the correction; the same per-iteration-relaunch stress then passed 50/50 in `/tmp/task-2798-b11-post-fix-50x.log`. |
 | B12 | Home avatar regression | restored catalog cache, then home pull-to-refresh | home rows still resolve agent avatars; no catalog requests issued | **PASS (2026-07-28)** — `testB12RestoredCatalogKeepsHomeAvatarWithoutPullSweep`; restored data-URL avatar resolved and pull issued zero catalog paths. |
 | B13 | Home pull retains canonical Home commit | seed a cached pinned thread that is absent from the returned page plus a selected Recent thread with cached runtime → pull All | only the selected Recent feed is requested; the page-external pinned row remains; runtime carry-over and selected title update still commit | **PASS (2026-07-28)** — `testB13HomePullCommitsSelectedFeedWithoutDroppingPinnedSection`; observed request paths are limited to `/api/recent-threads?tasks=include…`, with no `/api/thread-pins` or summary backfill. |
 
 B1–B13 plus the coalesced-intent regression
 `testConcurrentPullDoesNotNarrowQueuedUserAction` were executed together after
-the final test-lifecycle fix: 14/14 passed as the first suite in the
-post-commit 77/77 combined run
-`/tmp/task-2798-final-combined.xcresult` on iPhone 17 Pro Max / iOS 26.5.
+the B11 assertion correction: 14/14 passed as the first suite in the
+77/77 combined run `/tmp/task-2798-b11-fix-combined.xcresult` on iPhone 17 Pro
+Max / iOS 26.5.
 The coalesced-intent case proves a concurrent pull cannot narrow a queued
 user action's favorites, refreshed-pins, or secondary-feed work.
 
@@ -72,7 +72,7 @@ user action's favorites, refreshed-pins, or secondary-feed work.
 
 | # | Case | Expectation | Execution Record |
 |---|---|---|---|
-| D1 | Existing suites | `GaryxHomeThreadListRefreshCommitTests` and the full `GaryxMobileCoreTests` SwiftPM suite pass unmodified in intent (mechanical fixture updates allowed, behavioral assertions preserved) | **PASS (2026-07-28)** — post-commit B + Home combined selection: 77/77 (B 14/14, Home 63/63) in `/tmp/task-2798-final-combined.xcresult`; its post-B log contains no leaked `thread-home` / `thread-created` stream, invalidated-session exception, or process crash. Full SwiftPM suite: 1,643/1,643 in `/tmp/task-2798-reviewfix-core-full.log`. |
+| D1 | Existing suites | `GaryxHomeThreadListRefreshCommitTests` and the full `GaryxMobileCoreTests` SwiftPM suite pass unmodified in intent (mechanical fixture updates allowed, behavioral assertions preserved) | **PASS (2026-07-28)** — final B + Home combined selection: 77/77 (B 14/14, Home 63/63) in `/tmp/task-2798-b11-fix-combined.xcresult`; its post-B log contains no leaked `thread-home` / `thread-created` stream, invalidated-session exception, or process crash. Full SwiftPM suite: 1,643/1,643 in `/tmp/task-2798-reviewfix-core-full.log`. |
 
 ## Implementation record
 
