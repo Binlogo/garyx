@@ -171,22 +171,44 @@ private struct GaryxTaskTreeSidebarInteractionSurface<SurfaceContent: View>: Vie
     ) -> some View {
         let leadingSign: CGFloat = layoutDirection == .leftToRight ? 1 : -1
 
-        // Full-height rail: the material reaches the physical top and bottom
+        // Full-height rail: the background reaches the physical top and bottom
         // edges, while the header and scrolling content own their respective
         // safe-area insets. A trailing navigation rail is anchored to the
         // screen edge rather than floating like a card, so its leading edge
         // stays square at every reveal progress.
+        //
+        // The rail is an opaque surface, not glass, matching the left
+        // navigation drawer (`GaryxNavigationDrawerView`), which is the same
+        // reveal pattern. Two reasons it must not be a glass fill:
+        //
+        // 1. Correctness. Route content owns the one page background, so
+        //    `garyxPageBackground` travels left with `content` while every
+        //    route wrapper above it is deliberately `.clear`
+        //    (`GaryxRouteTransitionWrapperView`) and the window itself is clear
+        //    (`GaryxSafeAreaChrome.installWindowDefaults`). The push therefore
+        //    exposes a genuinely unpainted strip exactly under this panel, and
+        //    a glass pass there has no defined backdrop to sample: on device it
+        //    picks up stale compositor tiles as random dark blocks, which never
+        //    reproduce in a screenshot because the screenshot path re-renders
+        //    the layer tree instead of reading the live backdrop.
+        // 2. Cost. This surface is full-screen-height and is translated on
+        //    every drag frame, so a glass fill means a full-screen offscreen
+        //    blur per frame — the same expense the moving backdrop shadow was
+        //    removed for.
+        //
+        // Repeated content rows are also exactly what the product rule reserves
+        // glass away from; glass stays for navigation and transient controls.
         return GaryxTaskTreeSidebarPanel(
             topSafeAreaInset: safeAreaInsets.top,
             bottomSafeAreaInset: safeAreaInsets.bottom
         )
             .frame(width: panelWidth)
             .frame(maxHeight: .infinity)
-            .garyxAdaptiveGlass(
-                .regular,
-                isInteractive: false,
-                in: Rectangle()
-            )
+            // Not `garyxPageBackground()`: that bleeds through `.all` edges,
+            // which would push the fill past the rail's leading edge. The
+            // vertical bleed this rail does want comes from its own
+            // `ignoresSafeArea` below.
+            .background(GaryxTheme.background)
             .clipShape(Rectangle())
             // Reduce Motion: crossfade + scrim only, no interactive slide.
             .opacity(usesCrossFade ? Double(progress) : 1)
