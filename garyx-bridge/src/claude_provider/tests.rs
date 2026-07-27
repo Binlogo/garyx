@@ -5357,3 +5357,495 @@ async fn quota_copy_on_the_error_segment_classifies_despite_prior_content() {
     assert_eq!(staged.window.as_deref(), Some("five_hour"));
     assert_eq!(staged.reached_type.as_deref(), Some("api_rate_limit_429"));
 }
+
+fn mid_response_error_result() -> Message {
+    Message::Result(Box::new(ResultMessage {
+        subtype: "error_during_execution".to_owned(),
+        is_error: true,
+        session_id: "sdk-session-net".to_owned(),
+        terminal_reason: Some("api_error".to_owned()),
+        errors: vec![
+            "API Error: Connection closed mid-response. The response above may be incomplete."
+                .to_owned(),
+        ],
+        ..Default::default()
+    }))
+}
+
+/// A run dying on the CLI's "Connection closed mid-response" copy stages an
+/// automatic one-minute continue through the quota pipeline, marked as a
+/// transient interruption (never a quota verdict).
+#[tokio::test]
+async fn mid_response_interruption_stages_a_short_retry_with_streak_cap() {
+    let provider = make_provider();
+
+    for attempt in 1..=3 {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        tx.send(Ok(mid_response_error_result())).await.unwrap();
+        drop(tx);
+        let (_chunks, cb) = collecting_callback();
+        provider
+            .process_messages_streaming(
+                &format!("run-net-{attempt}"),
+                "thread::net",
+                &mut rx,
+                &cb,
+                None,
+                None,
+            )
+            .await
+            .expect("stream should process");
+        let staged = provider
+            .take_rate_limit("thread::net")
+            .await
+            .unwrap_or_else(|| panic!("attempt {attempt} must stage a retry"));
+        assert_eq!(
+            staged.reached_type.as_deref(),
+            Some("connection_interrupted")
+        );
+        let reset_at = staged.reset_at.expect("reset_at drives the resend timer");
+        let parsed = chrono::DateTime::parse_from_rfc3339(&reset_at).expect("rfc3339");
+        let delta = (chrono::Utc::now() - parsed.with_timezone(&chrono::Utc)).num_seconds();
+        assert!(
+            (0..=30).contains(&delta),
+            "reset_at should be ~now so the standard buffer lands the continue in ~1 minute"
+        );
+        assert_eq!(staged.window, None);
+    }
+
+    // The fourth consecutive interruption stays a terminal failure.
+    let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+    tx.send(Ok(mid_response_error_result())).await.unwrap();
+    drop(tx);
+    let (_chunks, cb) = collecting_callback();
+    provider
+        .process_messages_streaming("run-net-4", "thread::net", &mut rx, &cb, None, None)
+        .await
+        .expect("stream should process");
+    assert!(
+        provider.take_rate_limit("thread::net").await.is_none(),
+        "a persistent outage must stop looping after the streak cap"
+    );
+}
+
+/// A successful attempt ends the interruption streak: the next interruption
+/// retries again instead of inheriting the exhausted cap.
+#[tokio::test]
+async fn successful_attempt_resets_the_interruption_streak() {
+    let provider = make_provider();
+    provider
+        .connection_interruption_counts
+        .lock()
+        .await
+        .insert("thread::net-reset".to_owned(), 3);
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+    tx.send(Ok(Message::Result(Box::new(ResultMessage {
+        subtype: "success".to_owned(),
+        is_error: false,
+        session_id: "sdk-session-ok".to_owned(),
+        ..Default::default()
+    }))))
+    .await
+    .unwrap();
+    drop(tx);
+
+    let (_chunks, cb) = collecting_callback();
+    provider
+        .process_messages_streaming("run-ok", "thread::net-reset", &mut rx, &cb, None, None)
+        .await
+        .expect("stream should process");
+    assert!(
+        !provider
+            .connection_interruption_counts
+            .lock()
+            .await
+            .contains_key("thread::net-reset"),
+        "success must clear the streak"
+    );
+}
+
+/// Ordinary failures without the interruption copy must not stage anything.
+#[tokio::test]
+async fn plain_failures_do_not_stage_an_automatic_continue() {
+    let provider = make_provider();
+    let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+    tx.send(Ok(Message::Result(Box::new(ResultMessage {
+        subtype: "error_during_execution".to_owned(),
+        is_error: true,
+        session_id: "sdk-session-err".to_owned(),
+        terminal_reason: Some("api_error".to_owned()),
+        errors: vec!["something else went wrong".to_owned()],
+        ..Default::default()
+    }))))
+    .await
+    .unwrap();
+    drop(tx);
+    let (_chunks, cb) = collecting_callback();
+    provider
+        .process_messages_streaming("run-err", "thread::err", &mut rx, &cb, None, None)
+        .await
+        .expect("stream should process");
+    assert!(provider.take_rate_limit("thread::err").await.is_none());
+}
+
+/// Review #TASK-2795 finding 1: an interruption segment observed on the
+/// stream must still stage recovery when the run dies on the idle backstop,
+/// which returns before result processing.
+#[tokio::test(start_paused = true)]
+async fn mid_response_copy_before_idle_backstop_still_stages_recovery() {
+    let provider = make_provider();
+    provider.initialize_pending_inputs("run-net-idle").await;
+
+    let mut source = ScriptedMessageSource::new(vec![
+        (
+            0,
+            scripted_assistant_text(
+                "API Error: Connection closed mid-response. The response above may be incomplete.",
+            ),
+        ),
+        // Nothing else until far beyond the idle ceiling.
+        (
+            4_000_000,
+            scripted_system("status", json!({"type": "system", "subtype": "status"})),
+        ),
+    ]);
+
+    let cb: StreamCallback = Box::new(|_| {});
+    let error = provider
+        .process_messages_streaming(
+            "run-net-idle",
+            "thread::net-idle",
+            &mut source,
+            &cb,
+            None,
+            None,
+        )
+        .await
+        .expect_err("run should fail on the idle backstop");
+    assert!(
+        matches!(&error, BridgeError::RunFailed(message) if message.contains("idle")),
+        "expected stream-idle failure, got: {error:?}"
+    );
+    let staged = provider
+        .take_rate_limit("thread::net-idle")
+        .await
+        .expect("the already-observed mid-response copy must still stage recovery");
+    assert_eq!(
+        staged.reached_type.as_deref(),
+        Some("connection_interrupted")
+    );
+}
+
+/// The SDK receive-error terminal must funnel through the same staging.
+#[tokio::test]
+async fn mid_response_copy_before_stream_error_still_stages_recovery() {
+    let provider = make_provider();
+    let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+    tx.send(Ok(Message::Assistant(AssistantMessage {
+        content: vec![ContentBlock::Text(TextBlock {
+            text:
+                "API Error: Connection closed mid-response. The response above may be incomplete."
+                    .to_owned(),
+        })],
+        model: "claude-test".to_owned(),
+        parent_tool_use_id: None,
+        error: Some(AssistantMessageError::ServerError),
+    })))
+    .await
+    .unwrap();
+    tx.send(Err(claude_agent_sdk::ClaudeSDKError::Connection(
+        "socket closed".to_owned(),
+    )))
+    .await
+    .unwrap();
+    drop(tx);
+
+    let (_chunks, cb) = collecting_callback();
+    provider
+        .process_messages_streaming("run-net-err", "thread::net-err", &mut rx, &cb, None, None)
+        .await
+        .expect_err("stream error should fail the run");
+    let staged = provider
+        .take_rate_limit("thread::net-err")
+        .await
+        .expect("the interruption segment must stage recovery on the receive-error terminal");
+    assert_eq!(
+        staged.reached_type.as_deref(),
+        Some("connection_interrupted")
+    );
+}
+
+/// Ordinary content merely QUOTING the copy must not arm the retry: only the
+/// CLI's own error surface (error-classified segment or the synthetic
+/// "API Error: …" line) counts.
+#[tokio::test]
+async fn quoted_interruption_copy_in_ordinary_content_does_not_stage() {
+    let provider = make_provider();
+    let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+    tx.send(Ok(Message::Assistant(AssistantMessage {
+        content: vec![ContentBlock::Text(TextBlock {
+            text: "上一轮 review 遇到 API Error: Connection closed mid-response,我们继续分析。"
+                .to_owned(),
+        })],
+        model: "claude-test".to_owned(),
+        parent_tool_use_id: None,
+        error: None,
+    })))
+    .await
+    .unwrap();
+    tx.send(Ok(Message::Result(Box::new(ResultMessage {
+        subtype: "error_during_execution".to_owned(),
+        is_error: true,
+        session_id: "sdk-session-quote".to_owned(),
+        terminal_reason: Some("api_error".to_owned()),
+        errors: vec!["something else went wrong".to_owned()],
+        ..Default::default()
+    }))))
+    .await
+    .unwrap();
+    drop(tx);
+
+    let (_chunks, cb) = collecting_callback();
+    provider
+        .process_messages_streaming("run-quote", "thread::net-quote", &mut rx, &cb, None, None)
+        .await
+        .expect("stream should process");
+    assert!(
+        provider
+            .take_rate_limit("thread::net-quote")
+            .await
+            .is_none(),
+        "a quoted copy inside ordinary content must not arm the retry"
+    );
+}
+
+/// Review #TASK-2795 round 3: the early terminals classify quota FIRST. A
+/// rejected rate_limit_event followed by the interruption copy and an SDK
+/// receive error is a quota verdict — never a network retry.
+#[tokio::test]
+async fn quota_verdict_beats_interruption_on_the_stream_error_terminal() {
+    let provider = make_provider();
+    let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+    tx.send(Ok(Message::System(SystemMessage {
+        subtype: "rate_limit_event".to_owned(),
+        data: json!({
+            "type": "rate_limit_event",
+            "rate_limit_info": {
+                "status": "rejected",
+                "resetsAt": 1767225600,
+                "rateLimitType": "five_hour",
+            },
+        }),
+    })))
+    .await
+    .unwrap();
+    tx.send(Ok(Message::Assistant(AssistantMessage {
+        content: vec![ContentBlock::Text(TextBlock {
+            text:
+                "API Error: Connection closed mid-response. The response above may be incomplete."
+                    .to_owned(),
+        })],
+        model: "claude-test".to_owned(),
+        parent_tool_use_id: None,
+        error: Some(AssistantMessageError::ServerError),
+    })))
+    .await
+    .unwrap();
+    tx.send(Err(claude_agent_sdk::ClaudeSDKError::Connection(
+        "socket closed".to_owned(),
+    )))
+    .await
+    .unwrap();
+    drop(tx);
+
+    let (_chunks, cb) = collecting_callback();
+    provider
+        .process_messages_streaming("run-mixed", "thread::mixed", &mut rx, &cb, None, None)
+        .await
+        .expect_err("stream error should fail the run");
+    let staged = provider
+        .take_rate_limit("thread::mixed")
+        .await
+        .expect("the quota verdict must stage");
+    assert_eq!(
+        staged.reached_type.as_deref(),
+        Some("rate_limit_rejected"),
+        "quota classification must win over the interruption fallback"
+    );
+}
+
+/// Review #TASK-2795 round 3: an interruption observed in a previous user
+/// turn must not classify a later unrelated failure — the real user-turn
+/// boundary clears the signal.
+#[tokio::test]
+async fn interruption_copy_does_not_cross_the_user_turn_boundary() {
+    let provider = make_provider();
+    provider.initialize_pending_inputs("run-turns").await;
+    provider.set_pending_inputs("run-turns", 1).await;
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+    tx.send(Ok(Message::Assistant(AssistantMessage {
+        content: vec![ContentBlock::Text(TextBlock {
+            text:
+                "API Error: Connection closed mid-response. The response above may be incomplete."
+                    .to_owned(),
+        })],
+        model: "claude-test".to_owned(),
+        parent_tool_use_id: None,
+        error: Some(AssistantMessageError::ServerError),
+    })))
+    .await
+    .unwrap();
+    // A queued user message is consumed: a new logical turn begins.
+    tx.send(Ok(Message::User(UserMessage {
+        content: UserContent::Text("continue".to_owned()),
+        uuid: None,
+        parent_tool_use_id: None,
+        tool_use_result: None,
+        origin: None,
+    })))
+    .await
+    .unwrap();
+    // The new turn dies on an unrelated failure.
+    tx.send(Ok(Message::Result(Box::new(ResultMessage {
+        subtype: "error_during_execution".to_owned(),
+        is_error: true,
+        session_id: "sdk-session-turns".to_owned(),
+        terminal_reason: Some("api_error".to_owned()),
+        errors: vec!["something else went wrong".to_owned()],
+        ..Default::default()
+    }))))
+    .await
+    .unwrap();
+    drop(tx);
+
+    let (_chunks, cb) = collecting_callback();
+    provider
+        .process_messages_streaming("run-turns", "thread::turns", &mut rx, &cb, None, None)
+        .await
+        .expect("stream should process");
+    assert!(
+        provider.take_rate_limit("thread::turns").await.is_none(),
+        "an interruption from the previous turn must not stage the later unrelated failure"
+    );
+}
+
+/// Review #TASK-2795 round 4: the idle terminal also classifies quota FIRST.
+/// A rejected rate_limit_event plus the interruption copy followed by the
+/// idle backstop stages the quota verdict — reverting the idle path to the
+/// connection-only helper turns this red.
+#[tokio::test(start_paused = true)]
+async fn quota_verdict_beats_interruption_on_the_idle_terminal() {
+    let provider = make_provider();
+    provider.initialize_pending_inputs("run-idle-mixed").await;
+
+    let mut source = ScriptedMessageSource::new(vec![
+        (
+            0,
+            scripted_system(
+                "rate_limit_event",
+                json!({
+                    "type": "rate_limit_event",
+                    "rate_limit_info": {
+                        "status": "rejected",
+                        "resetsAt": 1767225600,
+                        "rateLimitType": "five_hour",
+                    },
+                }),
+            ),
+        ),
+        (
+            1,
+            scripted_assistant_text(
+                "API Error: Connection closed mid-response. The response above may be incomplete.",
+            ),
+        ),
+        (
+            4_000_000,
+            scripted_system("status", json!({"type": "system", "subtype": "status"})),
+        ),
+    ]);
+
+    let cb: StreamCallback = Box::new(|_| {});
+    provider
+        .process_messages_streaming(
+            "run-idle-mixed",
+            "thread::idle-mixed",
+            &mut source,
+            &cb,
+            None,
+            None,
+        )
+        .await
+        .expect_err("run should fail on the idle backstop");
+    let staged = provider
+        .take_rate_limit("thread::idle-mixed")
+        .await
+        .expect("the quota verdict must stage on the idle terminal");
+    assert_eq!(
+        staged.reached_type.as_deref(),
+        Some("rate_limit_rejected"),
+        "quota classification must win over the interruption fallback on idle"
+    );
+}
+
+/// Review #TASK-2795 round 4: tool-result user messages do NOT clear the
+/// per-turn interruption signal — only a real user turn does. Moving the
+/// clear before the tool-result branch turns this red.
+#[tokio::test]
+async fn tool_result_user_message_does_not_clear_the_interruption_signal() {
+    let provider = make_provider();
+    let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+    tx.send(Ok(Message::Assistant(AssistantMessage {
+        content: vec![ContentBlock::Text(TextBlock {
+            text:
+                "API Error: Connection closed mid-response. The response above may be incomplete."
+                    .to_owned(),
+        })],
+        model: "claude-test".to_owned(),
+        parent_tool_use_id: None,
+        error: Some(AssistantMessageError::ServerError),
+    })))
+    .await
+    .unwrap();
+    // A tool-result user message is part of the SAME turn.
+    tx.send(Ok(Message::User(UserMessage {
+        content: UserContent::Blocks(vec![ContentBlock::ToolResult(ToolResultBlock {
+            tool_use_id: "tu-net".to_owned(),
+            content: Some(Value::String("ok".to_owned())),
+            is_error: None,
+        })]),
+        uuid: None,
+        parent_tool_use_id: None,
+        tool_use_result: None,
+        origin: None,
+    })))
+    .await
+    .unwrap();
+    tx.send(Ok(Message::Result(Box::new(ResultMessage {
+        subtype: "error_during_execution".to_owned(),
+        is_error: true,
+        session_id: "sdk-session-toolres".to_owned(),
+        terminal_reason: Some("api_error".to_owned()),
+        errors: vec!["something else went wrong".to_owned()],
+        ..Default::default()
+    }))))
+    .await
+    .unwrap();
+    drop(tx);
+
+    let (_chunks, cb) = collecting_callback();
+    provider
+        .process_messages_streaming("run-toolres", "thread::toolres", &mut rx, &cb, None, None)
+        .await
+        .expect("stream should process");
+    let staged = provider
+        .take_rate_limit("thread::toolres")
+        .await
+        .expect("a tool result must not clear the interruption signal");
+    assert_eq!(
+        staged.reached_type.as_deref(),
+        Some("connection_interrupted")
+    );
+}
