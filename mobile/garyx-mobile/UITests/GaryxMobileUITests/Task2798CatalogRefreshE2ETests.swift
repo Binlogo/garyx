@@ -13,6 +13,13 @@ final class Task2798CatalogRefreshE2ETests: XCTestCase {
 
     override func setUpWithError() throws {
         continueAfterFailure = false
+        do {
+            _ = try request(path: "trace", method: "GET")
+        } catch {
+            throw XCTSkip(
+                "TASK-2798 real-gateway E2E requires the local trace proxy on port 31338"
+            )
+        }
     }
 
     func testC1HomePullAgainstRealGateway() throws {
