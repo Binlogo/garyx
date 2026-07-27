@@ -65,8 +65,8 @@ user action's favorites, refreshed-pins, or secondary-feed work.
 
 | # | Case | Steps | Expectation | Execution Record |
 |---|---|---|---|---|
-| C1 | Real pull-to-refresh network trace | launch against local gateway, settle, pull home list; capture gateway access pattern for the gesture window | only the feed request hits the gateway; list updates; avatars render | **PASS (2026-07-28)** — real local gateway, iPhone 17 Pro Max / iOS 26.5 / light. The tracked `Task2798CatalogRefreshE2ETests.testC1HomePullAgainstRealGateway` ran via ordinary `xcodebuild test` after a post-commit clean build; app and UI-test binaries were rebuilt at 02:15:17. `/tmp/task-2798-final-c1.xcresult` passed; proxy trace `/tmp/task-2798-c1-trace.jsonl` contains 6 successful `/api/recent-threads` page/range-fill requests, 52,471 response bytes, and no pins, summary, or catalog path. Updated list, preserved pinned section, and cached agent avatars are visible in `/tmp/task-2798-final-c1-home-after-pull.png`. |
-| C2 | Management surface unaffected | open Agents surface, pull-to-refresh | catalog requests observed; surface updates normally | **PASS (2026-07-28)** — same target/configuration and tracked UI-test source. `/tmp/task-2798-final-c2.xcresult` passed on the post-commit bundle; `/tmp/task-2798-c2-trace.jsonl` contains all 12 catalog paths with 200 responses plus the Agents surface's 5 provider-model requests, all 200, for 665,144 response bytes total. Normal rendered surface: `/tmp/task-2798-final-c2-agents-after-pull.png`. |
+| C1 | Real pull-to-refresh network trace | launch against local gateway, settle, pull home list; capture gateway access pattern for the gesture window | only the feed request hits the gateway; list updates; avatars render | **PASS (2026-07-28)** — real local gateway, iPhone 17 Pro Max / iOS 26.5 / light. The tracked `Task2798CatalogRefreshE2ETests.testC1HomePullAgainstRealGateway` ran via ordinary `xcodebuild test` after a clean build of final harness commit `2fe05ce6a`; `/tmp/task-2798-guarded-c1.xcresult` reports 1 passed, 0 failed, 0 skipped. Proxy trace `/tmp/task-2798-c1-trace.jsonl` contains 6 successful `/api/recent-threads` page/range-fill requests, 52,473 response bytes, and no pins, summary, or catalog path. The result attachment exported to `/tmp/task-2798-guarded-c1-attachments/165E139F-D447-413A-B1F1-F445CA3B36B8.png` shows the updated Recent list, preserved three-row Pinned section, and cached agent avatars. |
+| C2 | Management surface unaffected | open Agents surface, pull-to-refresh | catalog requests observed; surface updates normally | **PASS (2026-07-28)** — same final bundle, target, and configuration. `/tmp/task-2798-guarded-c2.xcresult` reports 1 passed, 0 failed, 0 skipped; `/tmp/task-2798-c2-trace.jsonl` contains all 12 catalog paths with 200 responses plus the Agents surface's 5 provider-model requests, all 200, for 665,151 response bytes total. The normal rendered Agents surface is attached and exported to `/tmp/task-2798-guarded-c2-attachments/7E1550C2-EBFA-431B-8D6F-D2F100A25A56.png`. |
 
 ## D. Regression sweep (headless)
 
@@ -85,7 +85,10 @@ commit with cached pins, so row/runtime/title reconciliation still runs without
 widening the approved feed-only request set. Merged pending intents retain the
 strongest projection work, so a pull cannot narrow an already queued user
 action. The real-gateway UI harness is tracked in the UI-test target, and the
-mocked integration fixture drains each model's complete gateway runtime before
-invalidating its sessions. The adjacent pre-existing unreachable-gateway test
-timing flake observed during stress repetition is recorded as Debt 3 in
-`docs/design/mobile-home-payload-review-debt.md` and was not changed here.
+two cases skip cleanly when their dedicated trace proxy is unavailable while
+the final proxy-backed acceptance runs above prove they executed rather than
+skipped. The mocked integration fixture drains each model's complete gateway
+runtime before invalidating its sessions. The adjacent pre-existing
+unreachable-gateway test timing flake observed during stress repetition is
+recorded as Debt 3 in `docs/design/mobile-home-payload-review-debt.md` and was
+not changed here.
