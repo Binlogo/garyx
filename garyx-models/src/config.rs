@@ -1064,6 +1064,11 @@ pub struct ClaudeCodeAccountsConfig {
     pub active_account_id: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub accounts: Vec<ClaudeCodeManagedAccount>,
+    /// When a run blocks on the provider quota, automatically switch the
+    /// selection to another configured account that still has allowance
+    /// (docs/design/quota-auto-account-switch.md). Absent means enabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_switch_on_quota: Option<bool>,
 }
 
 impl ClaudeCodeAccountsConfig {
@@ -1084,6 +1089,10 @@ impl ClaudeCodeAccountsConfig {
             .as_deref()
             .and_then(|account_id| self.account(account_id))
     }
+
+    pub fn auto_switch_on_quota_enabled(&self) -> bool {
+        self.auto_switch_on_quota.unwrap_or(true)
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
@@ -1094,6 +1103,11 @@ pub struct CodexAccountsConfig {
     pub active_account_id: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub accounts: Vec<CodexManagedAccount>,
+    /// When a run blocks on the provider quota, automatically switch the
+    /// selection to another configured account that still has allowance
+    /// (docs/design/quota-auto-account-switch.md). Absent means enabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_switch_on_quota: Option<bool>,
 }
 
 impl CodexAccountsConfig {
@@ -1113,6 +1127,10 @@ impl CodexAccountsConfig {
         self.active_account_id
             .as_deref()
             .and_then(|account_id| self.account(account_id))
+    }
+
+    pub fn auto_switch_on_quota_enabled(&self) -> bool {
+        self.auto_switch_on_quota.unwrap_or(true)
     }
 }
 

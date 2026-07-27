@@ -145,6 +145,72 @@ fn spawn_codex_account_switch_effects(
     response_rx
 }
 
+/// Resolve one Codex account's usage the same way the accounts list route
+/// does: managed ids go through owned-directory validation, `None` reads the
+/// system default home. Shared with quota auto-switch.
+pub(crate) async fn codex_account_usage(
+    state: &Arc<AppState>,
+    account_id: Option<&str>,
+) -> ProviderUsage {
+    if let Some(account_id) = account_id {
+        match validate_owned_account_dir(state, account_id).await {
+            Ok(home) => coding_usage::resolve_codex_usage_for_home(Some(&home), account_id).await,
+            Err(error) => coding_usage::unavailable_codex_usage(error.message),
+        }
+    } else {
+        coding_usage::resolve_codex_usage_for_home(None, "system").await
+    }
+}
+
+/// Commit `target` as the active Codex account only while the active
+/// selection still equals `expected_current`. Codex counterpart of
+/// `provider_accounts::switch_claude_account_if_current`; see that function
+/// and docs/design/quota-auto-account-switch.md for the contract.
+pub(crate) async fn switch_codex_account_if_current(
+    state: &Arc<AppState>,
+    expected_current: Option<&str>,
+    target: Option<&str>,
+) -> Result<crate::provider_accounts::GuardedSwitchOutcome, String> {
+    enum Reject {
+        LostRace,
+        UnknownTarget(String),
+    }
+    if let Some(target_id) = target {
+        validate_owned_account_dir(state, target_id)
+            .await
+            .map_err(|error| error.message)?;
+    }
+    let expected = expected_current.map(ToOwned::to_owned);
+    let selected = target.map(ToOwned::to_owned);
+    let result = mutate_config(state, move |config| {
+        let accounts = &mut config.provider_accounts.codex;
+        if accounts.active_account_id != expected || accounts.active_account_id == selected {
+            return Err(Reject::LostRace);
+        }
+        if let Some(account_id) = selected.as_deref()
+            && accounts.account(account_id).is_none()
+        {
+            return Err(Reject::UnknownTarget(account_id.to_owned()));
+        }
+        accounts.active_account_id = selected.clone();
+        Ok(())
+    })
+    .await;
+    match result {
+        Ok(()) => {
+            let _ = spawn_codex_account_switch_effects(state.clone());
+            Ok(crate::provider_accounts::GuardedSwitchOutcome::Switched)
+        }
+        Err(ConfigMutateError::Rejected(Reject::LostRace)) => {
+            Ok(crate::provider_accounts::GuardedSwitchOutcome::LostRace)
+        }
+        Err(ConfigMutateError::Rejected(Reject::UnknownTarget(account_id))) => {
+            Err(format!("unknown Codex account '{account_id}'"))
+        }
+        Err(ConfigMutateError::Apply(error)) => Err(error),
+    }
+}
+
 pub(crate) fn managed_accounts_root(config_path: Option<&Path>) -> PathBuf {
     let mut root = config_path
         .and_then(Path::parent)
@@ -156,7 +222,10 @@ pub(crate) fn managed_accounts_root(config_path: Option<&Path>) -> PathBuf {
     root
 }
 
-#[cfg(test)]
+/// Path of one managed account profile below the owned root. Pure
+/// derivation shared by tests and quota auto-switch's blocked-account
+/// mapping; runtime directory access still goes through
+/// `validate_owned_account_dir`.
 pub(crate) fn managed_account_dir(config_path: Option<&Path>, account_id: &str) -> PathBuf {
     managed_accounts_root(config_path).join(account_id)
 }
@@ -1053,10 +1122,9 @@ mod tests {
         let (state, id, account_dir) = managed_account_state(temp.path());
         insert_waiting_codex_recovery(&state, "thread::codex-delete-active");
 
-        let Json(response) =
-            delete_codex_account(State(state.clone()), AxumPath(id.clone()))
-                .await
-                .unwrap();
+        let Json(response) = delete_codex_account(State(state.clone()), AxumPath(id.clone()))
+            .await
+            .unwrap();
         assert_eq!(response["deleted_account_id"], id.as_str());
         assert!(!account_dir.exists());
         assert_eq!(
@@ -1148,6 +1216,57 @@ mod tests {
         assert_eq!(
             job.wake_reason,
             crate::garyx_db::QuotaRecoveryWakeReason::QuotaReset
+        );
+    }
+
+    #[tokio::test]
+    async fn guarded_codex_switch_commits_once_and_loses_races_silently() {
+        let temp = tempdir().unwrap();
+        let (state, id, _) = managed_account_state(temp.path());
+        insert_waiting_codex_recovery(&state, "thread::codex-auto-switch");
+
+        let outcome = switch_codex_account_if_current(&state, Some(&id), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            outcome,
+            crate::provider_accounts::GuardedSwitchOutcome::Switched
+        );
+        assert_eq!(
+            state
+                .config_snapshot()
+                .provider_accounts
+                .codex
+                .active_account_id,
+            None
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if state
+                    .ops
+                    .garyx_db
+                    .active_quota_recovery_job("thread::codex-auto-switch")
+                    .unwrap()
+                    .is_some_and(|job| {
+                        job.wake_reason == crate::garyx_db::QuotaRecoveryWakeReason::AccountSwitch
+                    })
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the committed guarded switch should wake waiting recoveries");
+
+        // A stale evaluation that still observed the managed account as the
+        // active selection loses the race and changes nothing.
+        let outcome = switch_codex_account_if_current(&state, Some(&id), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            outcome,
+            crate::provider_accounts::GuardedSwitchOutcome::LostRace
         );
     }
 

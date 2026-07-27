@@ -126,6 +126,93 @@ fn spawn_claude_account_switch_effects(
     response_rx
 }
 
+/// Resolve one Claude Code account's usage the same way the accounts list
+/// route does: managed ids go through owned-directory validation, `None`
+/// reads the system default profile. Shared with quota auto-switch.
+pub(crate) async fn claude_account_usage(
+    state: &Arc<AppState>,
+    account_id: Option<&str>,
+) -> ProviderUsage {
+    if let Some(account_id) = account_id {
+        match validate_owned_account_dir(state, account_id).await {
+            Ok(config_dir) => {
+                coding_usage::resolve_claude_usage_for_config_dir(Some(&config_dir), account_id)
+                    .await
+            }
+            Err(error) => coding_usage::unavailable_claude_usage(error.message),
+        }
+    } else {
+        coding_usage::resolve_claude_usage_for_config_dir(None, "system").await
+    }
+}
+
+/// Outcome of a guarded (compare-and-swap) account selection commit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GuardedSwitchOutcome {
+    /// The selection changed and the ordinary switch side effects (session
+    /// reconcile where applicable + provider-wide quota recovery wake) were
+    /// spawned.
+    Switched,
+    /// The active selection no longer matched the observed one — a concurrent
+    /// manual or automatic switch won. Nothing was persisted and no side
+    /// effect ran, preserving the "selecting the already-active account must
+    /// not wake quota recovery" contract.
+    LostRace,
+}
+
+enum GuardedSwitchReject {
+    LostRace,
+    UnknownTarget(String),
+}
+
+/// Commit `target` as the active Claude Code account only while the active
+/// selection still equals `expected_current`. Used by quota auto-switch
+/// (docs/design/quota-auto-account-switch.md); manual HTTP selection keeps its
+/// own unconditional path. A committed switch spawns exactly the manual
+/// switcher's side effects; the initial-result receiver is intentionally
+/// dropped — there is no HTTP response to fill, and the spawned task owns the
+/// effect lifetime.
+pub(crate) async fn switch_claude_account_if_current(
+    state: &Arc<AppState>,
+    expected_current: Option<&str>,
+    target: Option<&str>,
+) -> Result<GuardedSwitchOutcome, String> {
+    if let Some(target_id) = target {
+        validate_owned_account_dir(state, target_id)
+            .await
+            .map_err(|error| error.message)?;
+    }
+    let expected = expected_current.map(ToOwned::to_owned);
+    let selected = target.map(ToOwned::to_owned);
+    let result = mutate_config(state, move |config| {
+        let accounts = &mut config.provider_accounts.claude_code;
+        if accounts.active_account_id != expected || accounts.active_account_id == selected {
+            return Err(GuardedSwitchReject::LostRace);
+        }
+        if let Some(account_id) = selected.as_deref()
+            && accounts.account(account_id).is_none()
+        {
+            return Err(GuardedSwitchReject::UnknownTarget(account_id.to_owned()));
+        }
+        accounts.active_account_id = selected.clone();
+        Ok(())
+    })
+    .await;
+    match result {
+        Ok(()) => {
+            let _ = spawn_claude_account_switch_effects(state.clone());
+            Ok(GuardedSwitchOutcome::Switched)
+        }
+        Err(ConfigMutateError::Rejected(GuardedSwitchReject::LostRace)) => {
+            Ok(GuardedSwitchOutcome::LostRace)
+        }
+        Err(ConfigMutateError::Rejected(GuardedSwitchReject::UnknownTarget(account_id))) => {
+            Err(format!("unknown Claude Code account '{account_id}'"))
+        }
+        Err(ConfigMutateError::Apply(error)) => Err(error),
+    }
+}
+
 pub(crate) fn managed_accounts_root(config_path: Option<&Path>) -> PathBuf {
     let mut root = config_path
         .and_then(Path::parent)
@@ -137,7 +224,10 @@ pub(crate) fn managed_accounts_root(config_path: Option<&Path>) -> PathBuf {
     root
 }
 
-#[cfg(test)]
+/// Path of one managed account profile below the owned root. Pure
+/// derivation shared by tests and quota auto-switch's blocked-account
+/// mapping; runtime directory access still goes through
+/// `validate_owned_account_dir`.
 pub(crate) fn managed_account_dir(config_path: Option<&Path>, account_id: &str) -> PathBuf {
     managed_accounts_root(config_path).join(account_id)
 }
@@ -932,10 +1022,9 @@ mod tests {
         let (state, id, account_dir) = managed_account_state(temp.path());
         insert_waiting_recovery(&state, "thread::claude-delete-active");
 
-        let Json(response) =
-            delete_claude_code_account(State(state.clone()), AxumPath(id.clone()))
-                .await
-                .unwrap();
+        let Json(response) = delete_claude_code_account(State(state.clone()), AxumPath(id.clone()))
+            .await
+            .unwrap();
         assert_eq!(response["deleted_account_id"], id.as_str());
         assert!(!account_dir.exists());
         assert_eq!(
@@ -1123,6 +1212,86 @@ mod tests {
             crate::garyx_db::QuotaRecoveryWakeReason::QuotaReset
         );
         assert_eq!(job.due_at, "2099-01-01T00:01:00Z");
+    }
+
+    #[tokio::test]
+    async fn guarded_switch_commits_and_wakes_provider_recoveries() {
+        let temp = tempdir().unwrap();
+        let (state, id, _) = managed_account_state(temp.path());
+        insert_waiting_recovery(&state, "thread::quota-auto-switch");
+
+        let outcome = switch_claude_account_if_current(&state, Some(&id), None)
+            .await
+            .unwrap();
+        assert_eq!(outcome, GuardedSwitchOutcome::Switched);
+        assert_eq!(
+            state
+                .config_snapshot()
+                .provider_accounts
+                .claude_code
+                .active_account_id,
+            None
+        );
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if state
+                    .ops
+                    .garyx_db
+                    .active_quota_recovery_job("thread::quota-auto-switch")
+                    .unwrap()
+                    .is_some_and(|job| {
+                        job.wake_reason == crate::garyx_db::QuotaRecoveryWakeReason::AccountSwitch
+                    })
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the committed guarded switch should wake waiting recoveries");
+    }
+
+    #[tokio::test]
+    async fn guarded_switch_loses_the_race_without_side_effects() {
+        let temp = tempdir().unwrap();
+        let (state, id, _) = managed_account_state(temp.path());
+        insert_waiting_recovery(&state, "thread::quota-lost-race");
+
+        // The evaluation observed `None` as current, but the active selection
+        // is the managed account: a concurrent switch won.
+        let outcome = switch_claude_account_if_current(&state, None, Some(&id))
+            .await
+            .unwrap();
+        assert_eq!(outcome, GuardedSwitchOutcome::LostRace);
+        assert_eq!(
+            state
+                .config_snapshot()
+                .provider_accounts
+                .claude_code
+                .active_account_id
+                .as_deref(),
+            Some(id.as_str())
+        );
+        // No effects were spawned: the waiting row keeps its timer wake.
+        tokio::task::yield_now().await;
+        let job = state
+            .ops
+            .garyx_db
+            .active_quota_recovery_job("thread::quota-lost-race")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            job.wake_reason,
+            crate::garyx_db::QuotaRecoveryWakeReason::QuotaReset
+        );
+
+        // Re-selecting the already-active account is also a lost race.
+        let outcome = switch_claude_account_if_current(&state, Some(&id), Some(&id))
+            .await
+            .unwrap();
+        assert_eq!(outcome, GuardedSwitchOutcome::LostRace);
     }
 
     #[tokio::test]

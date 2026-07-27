@@ -379,6 +379,8 @@ fn build_codex_rate_limit(
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(ToOwned::to_owned),
+        account_dir: None,
+        model: None,
     })
 }
 
@@ -455,6 +457,32 @@ fn is_custom_standalone_agent(metadata: &HashMap<String, Value>) -> bool {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .is_some_and(|value| !is_builtin_provider_agent_id(value))
+}
+
+/// The Codex home identity of one app-server slot for quota attribution: the
+/// slot's own `CODEX_HOME` (managed selection), else the ambient process
+/// `CODEX_HOME`, else `~/.codex`. Always a concrete directory when resolvable
+/// so a rate-limit event carries an explicit identity — an absent field is
+/// reserved for legacy events, never for "System default".
+fn quota_account_home(slot_env: &HashMap<String, String>) -> Option<String> {
+    if let Some(home) = slot_env
+        .get("CODEX_HOME")
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    {
+        return Some(home.to_owned());
+    }
+    if let Some(home) = std::env::var_os("CODEX_HOME").filter(|value| !value.is_empty()) {
+        return Some(PathBuf::from(home).to_string_lossy().into_owned());
+    }
+    std::env::var_os("HOME")
+        .filter(|value| !value.is_empty())
+        .map(|home| {
+            PathBuf::from(home)
+                .join(".codex")
+                .to_string_lossy()
+                .into_owned()
+        })
 }
 
 fn default_codex_config_path() -> Option<PathBuf> {
@@ -1682,13 +1710,27 @@ impl CodexAgentProvider {
         usage_limit_hit: bool,
         snapshot: Option<&Value>,
         message: Option<&str>,
+        account_dir: Option<&str>,
+        model: Option<&str>,
     ) {
-        if let Some(rate_limit) = build_codex_rate_limit(
+        if let Some(mut rate_limit) = build_codex_rate_limit(
             self.config.provider_type.as_slug(),
             usage_limit_hit,
             snapshot,
             message,
         ) {
+            // The blocked run's identity comes from the app-server slot that
+            // served it — a busy slot keeps its startup env across selection
+            // changes, so the slot's `CODEX_HOME` is the account that actually
+            // hit the quota.
+            rate_limit.account_dir = account_dir
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned);
+            rate_limit.model = model
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned);
             tracing::warn!(
                 thread_id = %thread_id,
                 provider = %rate_limit.provider,
@@ -2264,6 +2306,8 @@ impl CodexAgentProvider {
                 usage_limit_hit,
                 latest_rate_limit_snapshot.as_ref(),
                 streamed_error_message.as_deref(),
+                quota_account_home(&client_slot.env).as_deref(),
+                actual_model.as_deref(),
             )
             .await;
             return Ok(ProviderRunResult {
@@ -2321,6 +2365,8 @@ impl CodexAgentProvider {
                 usage_limit_hit,
                 latest_rate_limit_snapshot.as_ref(),
                 error.as_deref(),
+                quota_account_home(&client_slot.env).as_deref(),
+                actual_model.as_deref(),
             )
             .await;
         }

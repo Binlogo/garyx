@@ -239,6 +239,8 @@ fn build_claude_rate_limit(
     terminal_reason: Option<&str>,
     rate_limit_info: Option<&Value>,
     message: Option<&str>,
+    account_dir: Option<&Path>,
+    model: Option<&str>,
 ) -> Option<ProviderRateLimit> {
     let blocking_result = terminal_reason == Some("blocking_limit");
     let info = rate_limit_info.and_then(Value::as_object);
@@ -270,6 +272,11 @@ fn build_claude_rate_limit(
             Some("rate_limit_rejected".to_owned())
         },
         message: message
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned),
+        account_dir: account_dir.map(|path| path.to_string_lossy().into_owned()),
+        model: model
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(ToOwned::to_owned),
@@ -1307,6 +1314,7 @@ impl ClaudeCliProvider {
         session_id: Option<&str>,
         run_id: &str,
         launch_env: &HashMap<String, String>,
+        requested_model: Option<&str>,
     ) -> ClaudeAgentOptions {
         // Reserve `garyx` for the built-in control-plane MCP server so a
         // stale runtime override cannot shadow the local gateway endpoint.
@@ -1335,9 +1343,13 @@ impl ClaudeCliProvider {
         // Workspace directory
         let cwd = resolve_claude_cwd(&self.config, options);
 
-        // Model: metadata override > (hot-reloadable) config default
+        // Model: the run's launch snapshot, captured once at run entry
+        // alongside the launch env. The builder never re-reads hot config
+        // for it — the SDK launch and the quota attribution must consume the
+        // same snapshot, or a defaults reload racing the run splits them
+        // (review #TASK-2781).
+        let model = requested_model.map(ToOwned::to_owned);
         let effective_config = self.effective_config();
-        let model = resolve_requested_model(&effective_config, &options.metadata);
         // Thinking level: per-run metadata overrides the provider default and
         // is mapped to the Claude CLI `--effort` flag.
         let requested_effort = resolve_requested_effort(&effective_config, &options.metadata);
@@ -1459,7 +1471,14 @@ impl ClaudeCliProvider {
             .read()
             .expect("claude launch environment lock poisoned")
             .clone();
-        self.build_sdk_options_with_launch_env(options, session_id, run_id, &launch_env)
+        let requested_model = resolve_requested_model(&self.effective_config(), &options.metadata);
+        self.build_sdk_options_with_launch_env(
+            options,
+            session_id,
+            run_id,
+            &launch_env,
+            requested_model.as_deref(),
+        )
     }
 
     /// Record a thread failure and return whether we should clear the provider session.
@@ -1666,6 +1685,7 @@ impl ClaudeCliProvider {
         run_id: &str,
         on_chunk: &StreamCallback,
         launch_env: &HashMap<String, String>,
+        requested_model: Option<&str>,
     ) -> Result<Option<SdkRunOutcome>, BridgeError> {
         // Drop any quota stash left by a prior attempt on this thread FIRST —
         // before connect/send can fail — so a stale entry from an earlier
@@ -1685,9 +1705,13 @@ impl ClaudeCliProvider {
             }
         }
 
-        let connect_future = sdk_run_streaming(
-            self.build_sdk_options_with_launch_env(options, session_id, run_id, launch_env),
-        );
+        let connect_future = sdk_run_streaming(self.build_sdk_options_with_launch_env(
+            options,
+            session_id,
+            run_id,
+            launch_env,
+            requested_model,
+        ));
         let mut run = connect_future
             .await
             .map_err(bridge_error_from_sdk_connect_error)?;
@@ -1725,8 +1749,16 @@ impl ClaudeCliProvider {
             )));
         }
 
+        let quota_account_dir = claude_config_dir(launch_env);
         let processing_result = self
-            .process_messages_streaming(run_id, &options.thread_id, &mut run, on_chunk)
+            .process_messages_streaming(
+                run_id,
+                &options.thread_id,
+                &mut run,
+                on_chunk,
+                quota_account_dir.as_deref(),
+                requested_model,
+            )
             .await;
 
         let (response_text, result_data, signals) = match processing_result {
@@ -1844,8 +1876,19 @@ impl ClaudeCliProvider {
             .read()
             .expect("claude launch environment lock poisoned")
             .clone();
-        self.execute_sdk_run_with_launch_env(options, session_id, run_id, on_chunk, &launch_env)
-            .await
+        // Capture the requested model with the launch snapshot: a hot
+        // defaults reload mid-stream must not relabel this run's quota
+        // attribution.
+        let requested_model = resolve_requested_model(&self.effective_config(), &options.metadata);
+        self.execute_sdk_run_with_launch_env(
+            options,
+            session_id,
+            run_id,
+            on_chunk,
+            &launch_env,
+            requested_model.as_deref(),
+        )
+        .await
     }
 
     /// Core message processing loop with optional streaming callback.
@@ -1855,6 +1898,8 @@ impl ClaudeCliProvider {
         thread_id: &str,
         source: &mut (impl MessageSource + Send),
         on_chunk: &StreamCallback,
+        quota_account_dir: Option<&Path>,
+        requested_model: Option<&str>,
     ) -> Result<(String, Option<ProcessedResult>, StreamSignals), BridgeError> {
         // NOTE: the per-attempt quota-stash cleanup lives at the TOP of
         // `execute_sdk_run` (before connect/send can fail), not here — a
@@ -2359,6 +2404,8 @@ impl ClaudeCliProvider {
                     .and_then(|result| result.terminal_reason.as_deref()),
                 signals.rate_limit_info.as_ref(),
                 errors_joined.as_deref(),
+                quota_account_dir,
+                actual_model.as_deref().or(requested_model),
             ) {
                 tracing::warn!(
                     run_id = %run_id,
@@ -2608,6 +2655,7 @@ impl ProviderRuntime for ClaudeCliProvider {
                 &run_id,
                 &on_chunk,
                 &launch_env,
+                requested_model.as_deref(),
             )
             .await;
 
@@ -2662,8 +2710,15 @@ impl ProviderRuntime for ClaudeCliProvider {
             }
             self.session_map.lock().await.remove(&options.thread_id);
             self.reset_failure_count(&options.thread_id).await;
-            self.execute_sdk_run_with_launch_env(options, None, &run_id, &on_chunk, &launch_env)
-                .await?
+            self.execute_sdk_run_with_launch_env(
+                options,
+                None,
+                &run_id,
+                &on_chunk,
+                &launch_env,
+                requested_model.as_deref(),
+            )
+            .await?
         } else if should_retry_same_session {
             tracing::warn!(
                 thread_id = %options.thread_id,
@@ -2676,6 +2731,7 @@ impl ProviderRuntime for ClaudeCliProvider {
                 &run_id,
                 &on_chunk,
                 &launch_env,
+                requested_model.as_deref(),
             )
             .await?
         } else {

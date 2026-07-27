@@ -438,8 +438,7 @@ async fn finalize_success(
     // committed. Claiming under the state lock makes the decision atomic —
     // after the claim a late cancel is a no-op instead.
     if !session.try_claim_finalize().await {
-        codex_provider_accounts::cleanup_failed_codex_auth_target(app_state, &session.target)
-            .await;
+        codex_provider_accounts::cleanup_failed_codex_auth_target(app_state, &session.target).await;
         return;
     }
     let Some(auth_json_path) = session.target.auth_json_path(app_state) else {
@@ -1070,13 +1069,10 @@ finish(3)
         let state = crate::server::AppStateBuilder::new(config)
             .with_config_path(dir.path().join("config.yaml"))
             .build();
-        let target = codex_provider_accounts::prepare_codex_auth_target(
-            &state,
-            Some("Cancelled"),
-            None,
-        )
-        .await
-        .unwrap();
+        let target =
+            codex_provider_accounts::prepare_codex_auth_target(&state, Some("Cancelled"), None)
+                .await
+                .unwrap();
         let home = target.codex_home.clone().expect("managed home reserved");
         write_valid_auth_json(&home);
         let session = Arc::new(CodexAuthSession::new("login-toctou".to_owned(), target));
@@ -1115,13 +1111,10 @@ finish(3)
         let state = crate::server::AppStateBuilder::new(config)
             .with_config_path(dir.path().join("config.yaml"))
             .build();
-        let target = codex_provider_accounts::prepare_codex_auth_target(
-            &state,
-            Some("Committed"),
-            None,
-        )
-        .await
-        .unwrap();
+        let target =
+            codex_provider_accounts::prepare_codex_auth_target(&state, Some("Committed"), None)
+                .await
+                .unwrap();
         let home = target.codex_home.clone().expect("managed home reserved");
         let account_id = target.account_id.clone().expect("reserved account id");
         write_valid_auth_json(&home);

@@ -606,8 +606,10 @@ fn build_command_env_removals_clear_inherited_variables() {
     // `Command::envs` only overlays on top of the inherited process env, so a
     // caller that must guarantee absence (managed-account auth overrides)
     // declares removals. On the std Command they appear as `None` entries.
-    let transport = CodexTransport::new("codex", &[])
-        .with_env_removals(vec!["OPENAI_API_KEY".to_owned(), "CODEX_API_KEY".to_owned()]);
+    let transport = CodexTransport::new("codex", &[]).with_env_removals(vec![
+        "OPENAI_API_KEY".to_owned(),
+        "CODEX_API_KEY".to_owned(),
+    ]);
     let cmd = transport.build_command();
     let std_cmd = cmd.as_std();
     for key in ["OPENAI_API_KEY", "CODEX_API_KEY"] {
