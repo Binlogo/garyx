@@ -201,7 +201,6 @@ struct GaryxHomeThreadListView: View, Equatable {
     let onAcceptPinnedOrderDrop: () -> Void
     let onCancelPinnedOrderDrag: () -> Void
     let onArchiveThread: (GaryxThreadSummary) async -> Void
-    private let silentRefreshIntervalNanos: UInt64 = 10_000_000_000
 
     static func == (lhs: GaryxHomeThreadListView, rhs: GaryxHomeThreadListView) -> Bool {
         lhs.homeListStore === rhs.homeListStore
@@ -240,9 +239,6 @@ struct GaryxHomeThreadListView: View, Equatable {
                     focus: $searchFieldFocused,
                     onCancel: cancelSearch
                 )
-            }
-            .task(id: homeListStore.snapshot.isHomeVisible) {
-                await runSilentSidebarRefreshLoop()
             }
             .overlay {
                 pinnedDragLifecycleAdapter
@@ -616,30 +612,6 @@ struct GaryxHomeThreadListView: View, Equatable {
         case .completeDismissAfterAnimation:
             break
         }
-    }
-
-    private func runSilentSidebarRefreshLoop() async {
-        guard shouldRefreshSidebarThreads else { return }
-        // Let the drawer-open animation settle before the first refresh so
-        // response handling does not contend with the opening transition.
-        try? await Task.sleep(for: .seconds(GaryxMotion.drawerRefreshDeferral))
-        guard !Task.isCancelled, shouldRefreshSidebarThreads else { return }
-        await refreshSidebarThreads()
-        while !Task.isCancelled {
-            try? await Task.sleep(nanoseconds: silentRefreshIntervalNanos)
-            guard !Task.isCancelled, shouldRefreshSidebarThreads else { return }
-            await refreshSidebarThreads()
-        }
-    }
-
-    private func refreshSidebarThreads() async {
-        guard shouldRefreshSidebarThreads else { return }
-        // Concurrent refreshes coalesce inside the pager; no extra gate.
-        await onRefreshSidebarThreads()
-    }
-
-    private var shouldRefreshSidebarThreads: Bool {
-        homeListStore.presentationSnapshot.isHomeVisible
     }
 
     private func pinnedReorderItems(

@@ -1877,6 +1877,127 @@ final class GaryxRouteStackContainerTests: XCTestCase {
         )
     }
 
+    func testHomeFeedOwnerAndReadyRowsSurviveHomeHostEvictionAndRemount() async throws {
+        let suiteName = "GaryxRouteStackContainerTests.home-feed.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        defaults.set(
+            "http://gateway.example.test",
+            forKey: GaryxMobileSettingsKeys.gatewayUrl
+        )
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let model = GaryxMobileModel(defaults: defaults)
+        model.homeFeedSyncCoordinator.deactivateScope()
+        let owner = GaryxHomeFeedSyncCoordinator(
+            initialEffects: [],
+            immediateDemandTimeout: GaryxMobileModel.homeFeedImmediateDemandTimeout,
+            scopeToken: model.gatewayRequestToken
+        )
+        model.homeFeedSyncCoordinator = owner
+        owner.attach(model)
+        defer {
+            owner.deactivateScope()
+            model.cancelThreadFavoritesSnapshotTransport()
+        }
+
+        let thread = GaryxThreadSummary(
+            id: "thread::host-remount",
+            title: "Host remount",
+            createdAt: nil,
+            updatedAt: "2026-07-27T00:00:00Z",
+            lastMessagePreview: "",
+            workspacePath: nil,
+            messageCount: 0,
+            agentId: nil,
+            providerType: nil,
+            recentRunId: nil,
+            activeRunId: nil,
+            runState: nil,
+            worktreePath: nil
+        )
+        model.seedThreadSummariesForTesting([thread])
+        let effects = model.recentThreadFeeds.requestHeadEffects(
+            filter: .all,
+            source: .userAction
+        )
+        let request = try XCTUnwrap(
+            effects.compactMap { effect -> GaryxRecentHeadRequest? in
+                guard case .requestHead(let request) = effect else { return nil }
+                return request
+            }.first
+        )
+        let ticket = try XCTUnwrap(
+            model.recentThreadFeeds.beginHeadRequest(
+                request,
+                gatewayScope: "http://gateway.example.test",
+                runtimeEpoch: 1
+            )
+        )
+        XCTAssertEqual(
+            model.recentThreadFeeds.completeHead(
+                ticket,
+                result: .page(
+                    makeGaryxTestRecentRefreshBundle(threadIds: [thread.id])
+                )
+            ).outcome,
+            .applied
+        )
+        await model.homeProjectionGateway.waitForIdleForTesting()
+        XCTAssertEqual(model.allRecentThreadIds, [thread.id])
+        XCTAssertEqual(
+            model.homeThreadListStore.presentationSnapshot.recentPlaceholder,
+            .none
+        )
+
+        let harness = Harness(
+            path: [],
+            routeHostBuilder: { node in
+                switch node {
+                case .home:
+                    return AnyView(
+                        Text(
+                            model.homeThreadListStore.presentationSnapshot
+                                .recentPlaceholder == .none
+                                ? "Home feed ready"
+                                : "Home feed not ready"
+                        )
+                    )
+                case .entry(let entry):
+                    return AnyView(Text(entry.id.rawValue))
+                }
+            }
+        )
+        XCTAssertEqual(
+            harness.hostBuildProbe.nodes.filter { $0 == .home }.count,
+            1
+        )
+
+        for index in 1...4 {
+            XCTAssertTrue(harness.container.push(entry(index), animated: false))
+        }
+        XCTAssertTrue(
+            harness.probe.unmounted.contains(.home),
+            "the test must actually evict the Home host before returning"
+        )
+        XCTAssertTrue(owner === model.homeFeedSyncCoordinator)
+
+        XCTAssertTrue(harness.container.pop(count: 4, animated: false))
+        XCTAssertEqual(harness.container.path, [])
+        XCTAssertEqual(
+            harness.hostBuildProbe.nodes.filter { $0 == .home }.count,
+            2,
+            "returning from the deep stack must build a fresh Home host"
+        )
+        XCTAssertEqual(model.allRecentThreadIds, [thread.id])
+        XCTAssertEqual(model.recentThreadFeeds.allFeed.headPhase, .ready)
+        XCTAssertEqual(
+            model.homeThreadListStore.presentationSnapshot.recentPlaceholder,
+            .none
+        )
+        XCTAssertTrue(owner === model.homeFeedSyncCoordinator)
+    }
+
     func testPopMultipleUnmountsEveryPermanentlyRemovedHostAtTerminal() {
         let harness = Harness(path: [entry(1), entry(2), entry(3)])
         let middle = GaryxRoutePresentationIdentity.entry(entry(2).id)

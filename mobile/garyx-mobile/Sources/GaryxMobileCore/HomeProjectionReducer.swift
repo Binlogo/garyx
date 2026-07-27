@@ -35,14 +35,12 @@ enum HomeProjectionEvent: Sendable {
         basedOnSeq: Int
     )
     case selectedThreadChanged(threadId: String?)
-    case loadingChanged(isLoading: Bool)
     case homeVisibilityChanged(isVisible: Bool)
 }
 
 struct HomeSnapshot: Equatable, Sendable {
     var appliedSeq: Int
     var sections: GaryxHomeThreadSections
-    var isLoadingThreads: Bool
     var isHomeVisible: Bool
     var selectedRecentFilter: GaryxRecentThreadFilter
     var recentFeedPresentation: GaryxRecentThreadFeedPresentation
@@ -50,14 +48,12 @@ struct HomeSnapshot: Equatable, Sendable {
     init(
         appliedSeq: Int = 0,
         sections: GaryxHomeThreadSections = GaryxHomeThreadSections(),
-        isLoadingThreads: Bool = false,
         isHomeVisible: Bool = false,
         selectedRecentFilter: GaryxRecentThreadFilter = .all,
-        recentFeedPresentation: GaryxRecentThreadFeedPresentation = .init(isPrimed: true)
+        recentFeedPresentation: GaryxRecentThreadFeedPresentation = .init(headPhase: .ready)
     ) {
         self.appliedSeq = appliedSeq
         self.sections = sections
-        self.isLoadingThreads = isLoadingThreads
         self.isHomeVisible = isHomeVisible
         self.selectedRecentFilter = selectedRecentFilter
         self.recentFeedPresentation = recentFeedPresentation
@@ -72,10 +68,9 @@ struct HomeProjectionState: Equatable, Sendable {
     var favoritedThreadIds: [String] = []
     var recentThreadIds: [String] = []
     var selectedThreadId: String?
-    var isLoadingThreads = false
     var isHomeVisible = false
     var selectedRecentFilter: GaryxRecentThreadFilter = .all
-    var recentFeedPresentation = GaryxRecentThreadFeedPresentation(isPrimed: true)
+    var recentFeedPresentation = GaryxRecentThreadFeedPresentation(headPhase: .ready)
 
     fileprivate(set) var appliedSeq = 0
     fileprivate(set) var baseSections = GaryxHomeThreadSections()
@@ -108,7 +103,6 @@ struct HomeProjectionState: Equatable, Sendable {
         GaryxHomeThreadListInput(
             sectionsInput: sectionsInput,
             runningThreadIds: resolvedRunningThreadIds,
-            isLoadingThreads: isLoadingThreads,
             isHomeVisible: isHomeVisible,
             selectedRecentFilter: selectedRecentFilter,
             recentFeedPresentation: recentFeedPresentation
@@ -206,23 +200,11 @@ enum HomeProjectionReducer {
             rebuildSnapshotFromBase(&next)
             evaluatesRowDifference = true
 
-        case let .loadingChanged(isLoading):
-            next.isLoadingThreads = isLoading
-            next.snapshot = HomeSnapshot(
-                appliedSeq: next.appliedSeq,
-                sections: next.snapshot.sections,
-                isLoadingThreads: next.isLoadingThreads,
-                isHomeVisible: next.isHomeVisible,
-                selectedRecentFilter: next.selectedRecentFilter,
-                recentFeedPresentation: next.recentFeedPresentation
-            )
-
         case let .homeVisibilityChanged(isVisible):
             next.isHomeVisible = isVisible
             next.snapshot = HomeSnapshot(
                 appliedSeq: next.appliedSeq,
                 sections: next.snapshot.sections,
-                isLoadingThreads: next.isLoadingThreads,
                 isHomeVisible: next.isHomeVisible,
                 selectedRecentFilter: next.selectedRecentFilter,
                 recentFeedPresentation: next.recentFeedPresentation
@@ -261,7 +243,6 @@ enum HomeProjectionReducer {
                 state.baseSections,
                 runningThreadIds: state.resolvedRunningThreadIds
             ),
-            isLoadingThreads: state.isLoadingThreads,
             isHomeVisible: state.isHomeVisible,
             selectedRecentFilter: state.selectedRecentFilter,
             recentFeedPresentation: state.recentFeedPresentation

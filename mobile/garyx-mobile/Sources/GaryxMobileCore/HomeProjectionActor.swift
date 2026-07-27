@@ -8,7 +8,6 @@ struct HomeProjectionCapture: Equatable, Sendable {
     var pinnedThreadIds: [String]
     var favoritedThreadIds: [String]
     var selectedThreadId: String?
-    var isLoadingThreads: Bool
     var isHomeVisible: Bool
     var selectedRecentFilter: GaryxRecentThreadFilter
     var recentFeedPresentation: GaryxRecentThreadFeedPresentation
@@ -23,10 +22,9 @@ struct HomeProjectionCapture: Equatable, Sendable {
         pinnedThreadIds: [String],
         favoritedThreadIds: [String] = [],
         selectedThreadId: String?,
-        isLoadingThreads: Bool,
         isHomeVisible: Bool,
         selectedRecentFilter: GaryxRecentThreadFilter = .all,
-        recentFeedPresentation: GaryxRecentThreadFeedPresentation = .init(isPrimed: true),
+        recentFeedPresentation: GaryxRecentThreadFeedPresentation = .init(headPhase: .ready),
         runTrackerBusyThreadIds: Set<String> = [],
         committedRunStateBusyByThreadId: [String: Bool] = [:]
     ) {
@@ -37,7 +35,6 @@ struct HomeProjectionCapture: Equatable, Sendable {
         self.pinnedThreadIds = pinnedThreadIds
         self.favoritedThreadIds = favoritedThreadIds
         self.selectedThreadId = selectedThreadId
-        self.isLoadingThreads = isLoadingThreads
         self.isHomeVisible = isHomeVisible
         self.selectedRecentFilter = selectedRecentFilter
         self.recentFeedPresentation = recentFeedPresentation
@@ -58,7 +55,6 @@ struct HomeProjectionCapture: Equatable, Sendable {
             pinnedThreadIds: input.sectionsInput.pinnedThreadIds,
             favoritedThreadIds: input.sectionsInput.favoritedThreadIds,
             selectedThreadId: input.sectionsInput.selectedThreadId,
-            isLoadingThreads: input.isLoadingThreads,
             isHomeVisible: input.isHomeVisible,
             selectedRecentFilter: input.selectedRecentFilter,
             recentFeedPresentation: input.recentFeedPresentation,
@@ -100,9 +96,6 @@ struct HomeProjectionCapture: Equatable, Sendable {
         }
         if previous?.selectedThreadId != selectedThreadId {
             events.append(.selectedThreadChanged(threadId: selectedThreadId))
-        }
-        if previous?.isLoadingThreads != isLoadingThreads {
-            events.append(.loadingChanged(isLoading: isLoadingThreads))
         }
         if previous?.isHomeVisible != isHomeVisible {
             events.append(.homeVisibilityChanged(isVisible: isHomeVisible))

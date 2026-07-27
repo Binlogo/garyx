@@ -419,6 +419,18 @@ final class GaryxGatewayRequestTokenTests: XCTestCase {
 /// interleavings with an in-process URL loading stub.
 @MainActor
 final class GaryxHomeThreadListRefreshCommitTests: XCTestCase {
+    private var homeFeedTestModels: [GaryxMobileModel] = []
+
+    override func tearDown() {
+        for model in homeFeedTestModels {
+            model.homeFeedSyncCoordinator.deactivateScope()
+            model.cancelThreadFavoritesSnapshotTransport()
+            model.sceneRefreshTask?.cancel()
+        }
+        homeFeedTestModels.removeAll()
+        GaryxRecentThreadsURLProtocolStub.requestHandler = nil
+        super.tearDown()
+    }
 
     func testCommitDoesNotResurrectThreadArchivedDuringBackfillAwait() throws {
         let model = makeModel()
@@ -431,7 +443,7 @@ final class GaryxHomeThreadListRefreshCommitTests: XCTestCase {
 
         // The refresh ticket is captured before the archive races the
         // pre-await page snapshot.
-        let ticket = model.recentThreadFeeds.requestRefresh(filter: .all)!
+        let ticket = try issueRecentHead(model, filter: .all)
 
         // Pre-await captures, exactly like refreshThreads: the page and the
         // pins arrived while `thread-pinned` was still live.
@@ -445,17 +457,19 @@ final class GaryxHomeThreadListRefreshCommitTests: XCTestCase {
 
         // The refresh resumes, but the filter-owned pager rejects every
         // pre-await snapshot before the app-layer commit can run.
-        let completion = model.recentThreadFeeds.completeRefresh(
+        let completion = model.recentThreadFeeds.completeHead(
             ticket,
-            bundle: makeGaryxTestRecentRefreshBundle(
-                threadIds: page.threads.map(\.id),
-                storeIncarnationId: page.storeIncarnationId,
-                serverBootId: page.serverBootId,
-                hasMore: page.hasMore,
-                nextCursor: page.nextCursor
+            result: .page(
+                makeGaryxTestRecentRefreshBundle(
+                    threadIds: page.threads.map(\.id),
+                    storeIncarnationId: page.storeIncarnationId,
+                    serverBootId: page.serverBootId,
+                    hasMore: page.hasMore,
+                    nextCursor: page.nextCursor
+                )
             )
         )
-        XCTAssertEqual(completion, .abandonedLocalMutation)
+        XCTAssertEqual(completion.outcome, .abandonedLocalMutation)
 
         XCTAssertFalse(
             model.pinnedThreadIds.contains(pinned.id),
@@ -479,18 +493,20 @@ final class GaryxHomeThreadListRefreshCommitTests: XCTestCase {
         let recent = makeThread(id: "thread-recent", title: "Recent chat")
         let page = try makeRecentThreadsPage(threads: [pinned, recent])
 
-        let ticket = model.recentThreadFeeds.requestRefresh(filter: .all)!
-        let completion = model.recentThreadFeeds.completeRefresh(
+        let ticket = try issueRecentHead(model, filter: .all)
+        let completion = model.recentThreadFeeds.completeHead(
             ticket,
-            bundle: makeGaryxTestRecentRefreshBundle(
-                threadIds: page.threads.map(\.id),
-                storeIncarnationId: page.storeIncarnationId,
-                serverBootId: page.serverBootId,
-                hasMore: page.hasMore,
-                nextCursor: page.nextCursor
+            result: .page(
+                makeGaryxTestRecentRefreshBundle(
+                    threadIds: page.threads.map(\.id),
+                    storeIncarnationId: page.storeIncarnationId,
+                    serverBootId: page.serverBootId,
+                    hasMore: page.hasMore,
+                    nextCursor: page.nextCursor
+                )
             )
         )
-        XCTAssertEqual(completion, .applied)
+        XCTAssertEqual(completion.outcome, .applied)
 
         model.commitRefreshedRecentThreadsPage(
             pinsPageThreadIds: [pinned.id],
@@ -620,16 +636,16 @@ final class GaryxHomeThreadListRefreshCommitTests: XCTestCase {
 
         let model = makeModel(session: session)
         model.recentThreadFeeds.select(.nonTask)
+        model.connectionState = .ready(version: "test")
         let selectedRefresh = Task { @MainActor in
-            await model.refreshThreads(source: .userPullToRefresh)
+            await model.requestHomeFeedRefresh(source: .userPullToRefresh)
         }
 
         await fulfillment(of: [auxiliaryStarted], timeout: 2)
-        let auxiliaryTask = try XCTUnwrap(model.auxiliaryAllRecentThreadsRefreshTask)
         await selectedRefresh.value
 
         XCTAssertEqual(model.visibleRecentThreadIds, ["thread-chat"])
-        XCTAssertFalse(model.recentThreadFeeds.selectedPresentation.isRefreshingHead)
+        XCTAssertFalse(model.selectedRecentFeedPresentation.isRefreshingHead)
         XCTAssertTrue(
             model.recentThreadFeeds.allFeed.presentation.isRefreshingHead,
             "the selected pull spinner must finish while the independent All request is still in flight"
@@ -637,11 +653,15 @@ final class GaryxHomeThreadListRefreshCommitTests: XCTestCase {
 
         // A second selected refresh is allowed, but the filter-owned All gate
         // must coalesce its auxiliary request.
-        await model.refreshThreads(source: .userPullToRefresh)
+        await model.requestHomeFeedRefresh(source: .userPullToRefresh)
         XCTAssertEqual(allRequestCount.value, 1)
 
         auxiliaryGate.signal()
-        await auxiliaryTask.value
+        let auxiliarySettled = await waitUntil {
+            model.allRecentThreadIds == ["thread-task", "thread-chat"]
+                && !model.recentThreadFeeds.allFeed.presentation.isRefreshingHead
+        }
+        XCTAssertTrue(auxiliarySettled)
 
         XCTAssertEqual(model.allRecentThreadIds, ["thread-task", "thread-chat"])
         XCTAssertEqual(
@@ -655,6 +675,7 @@ final class GaryxHomeThreadListRefreshCommitTests: XCTestCase {
     func testChatsAuxiliaryFailureOnlyMarksAllFeed() async throws {
         let auxiliaryStarted = expectation(description: "failing auxiliary All request started")
         let auxiliaryGate = DispatchSemaphore(value: 0)
+        let auxiliaryRequests = GaryxLockedCounter()
         let chatsPage = try makeRecentThreadsPageData(rows: [
             (id: "thread-chat", title: "Chat thread"),
         ])
@@ -670,9 +691,11 @@ final class GaryxHomeThreadListRefreshCommitTests: XCTestCase {
             }
             let tasks = components.queryItems?.first(where: { $0.name == "tasks" })?.value
             if tasks == GaryxRecentThreadFilter.all.tasksQueryValue {
-                auxiliaryStarted.fulfill()
-                guard auxiliaryGate.wait(timeout: .now() + 5) == .success else {
-                    throw GaryxRefreshStubError.timedOut
+                if auxiliaryRequests.increment() == 1 {
+                    auxiliaryStarted.fulfill()
+                    guard auxiliaryGate.wait(timeout: .now() + 5) == .success else {
+                        throw GaryxRefreshStubError.timedOut
+                    }
                 }
                 return try garyxStubResponse(
                     request,
@@ -690,16 +713,19 @@ final class GaryxHomeThreadListRefreshCommitTests: XCTestCase {
 
         let model = makeModel(session: session)
         model.recentThreadFeeds.select(.nonTask)
+        model.connectionState = .ready(version: "test")
         let selectedRefresh = Task { @MainActor in
-            await model.refreshThreads(source: .userPullToRefresh)
+            await model.requestHomeFeedRefresh(source: .userPullToRefresh)
         }
         await fulfillment(of: [auxiliaryStarted], timeout: 2)
-        let auxiliaryTask = try XCTUnwrap(model.auxiliaryAllRecentThreadsRefreshTask)
         await selectedRefresh.value
         let selectedPresentation = model.recentThreadFeeds.selectedPresentation
 
         auxiliaryGate.signal()
-        await auxiliaryTask.value
+        let auxiliarySettled = await waitUntil {
+            model.recentThreadFeeds.allFeed.headFailure
+        }
+        XCTAssertTrue(auxiliarySettled)
 
         XCTAssertNil(model.lastError)
         XCTAssertEqual(model.visibleRecentThreadIds, ["thread-chat"])
@@ -744,12 +770,13 @@ final class GaryxHomeThreadListRefreshCommitTests: XCTestCase {
         }
 
         let model = makeModel(session: session)
+        let oldCoordinator = model.homeFeedSyncCoordinator
         model.recentThreadFeeds.select(.nonTask)
+        model.connectionState = .ready(version: "test")
         let selectedRefresh = Task { @MainActor in
-            await model.refreshThreads(source: .userPullToRefresh)
+            await model.requestHomeFeedRefresh(source: .userPullToRefresh)
         }
         await fulfillment(of: [auxiliaryStarted], timeout: 2)
-        let auxiliaryTask = try XCTUnwrap(model.auxiliaryAllRecentThreadsRefreshTask)
         await selectedRefresh.value
 
         let oldGeneration = model.gatewayRequestToken
@@ -758,13 +785,16 @@ final class GaryxHomeThreadListRefreshCommitTests: XCTestCase {
         XCTAssertEqual(model.recentThreadFeeds.selectedFilter, .nonTask)
 
         auxiliaryGate.signal()
-        await auxiliaryTask.value
+        await oldCoordinator.waitForTransportIdleForTesting()
 
         XCTAssertNil(
             model.lastError,
             "an old gateway failure must be dropped while reset preserves the selected filter"
         )
-        XCTAssertEqual(model.recentThreadFeeds.selectedPresentation, GaryxRecentThreadFeedPresentation())
+        XCTAssertEqual(
+            model.recentThreadFeeds.selectedPresentation?.headPhase,
+            .primingOwed(.supersededByReset, .immediate)
+        )
     }
 
     func testRestoredChatsFilterOwnsInitialSnapshotAndFirstVisibleRefresh() async throws {
@@ -819,14 +849,19 @@ final class GaryxHomeThreadListRefreshCommitTests: XCTestCase {
             "model init must not publish an intermediate All snapshot"
         )
 
+        model.connectionState = .ready(version: "test")
         let refresh = Task { @MainActor in
-            await model.refreshThreads(source: .userPullToRefresh)
+            await model.requestHomeFeedRefresh(source: .userPullToRefresh)
         }
         await fulfillment(of: [selectedRequestStarted], timeout: 2)
         await refresh.value
-        if let auxiliaryTask = model.auxiliaryAllRecentThreadsRefreshTask {
-            await auxiliaryTask.value
+        let auxiliarySettled = await waitUntil {
+            model.allRecentThreadIds == [
+                "thread-restored-task",
+                "thread-restored-chat",
+            ]
         }
+        XCTAssertTrue(auxiliarySettled)
 
         XCTAssertEqual(model.visibleRecentThreadIds, ["thread-restored-chat"])
         XCTAssertEqual(
@@ -848,6 +883,7 @@ final class GaryxHomeThreadListRefreshCommitTests: XCTestCase {
         let pinsStarted = expectation(description: "pins request started")
         let favoritesSnapshots = GaryxLockedCounter()
         let allRecentRequests = GaryxLockedCounter()
+        let pinsRequests = GaryxLockedCounter()
         let unexpectedRecentRequests = GaryxLockedCounter()
         let allPage = try makeRecentThreadsPageData(rows: [
             (id: "thread-favorite", title: "Favorite thread"),
@@ -867,7 +903,9 @@ final class GaryxHomeThreadListRefreshCommitTests: XCTestCase {
                 )
             }
             if request.httpMethod == "GET", components.path == "/api/thread-pins" {
-                pinsStarted.fulfill()
+                if pinsRequests.increment() == 1 {
+                    pinsStarted.fulfill()
+                }
                 return try garyxStubResponse(
                     request,
                     data: try garyxPinsPageData(ids: ["thread-favorite"], revision: 3)
@@ -893,16 +931,15 @@ final class GaryxHomeThreadListRefreshCommitTests: XCTestCase {
 
         let model = makeModel(defaults: defaults, session: session)
         model.selectRecentThreadFilter(.favorites)
+        model.connectionState = .ready(version: "test")
 
         await fulfillment(
             of: [favoritesSnapshotStarted, allRecentStarted, pinsStarted],
             timeout: 2
         )
-        if let auxiliaryTask = model.auxiliaryAllRecentThreadsRefreshTask {
-            await auxiliaryTask.value
-        }
         let favoritesSettled = await waitUntil {
             model.threadFavoritesState.rawThreadIds == ["thread-favorite"]
+                && model.allRecentThreadIds == ["thread-favorite", "thread-other"]
         }
         XCTAssertTrue(favoritesSettled)
 
@@ -917,6 +954,88 @@ final class GaryxHomeThreadListRefreshCommitTests: XCTestCase {
         XCTAssertEqual(model.visibleRecentThreadIds, ["thread-favorite"])
         XCTAssertEqual(model.allRecentThreadIds, ["thread-favorite", "thread-other"])
         XCTAssertEqual(model.pinnedThreadIds, ["thread-favorite"])
+        await stopHomeFeedTestModel(model)
+    }
+
+    func testChatsFavoritesChatsRefreshesNonTaskOnReturn() async throws {
+        let favoritesRequests = GaryxLockedCounter()
+        let allRequests = GaryxLockedCounter()
+        let nonTaskRequests = GaryxLockedCounter()
+        let session = makeStubSession { request in
+            let url = try XCTUnwrap(request.url)
+            switch (request.httpMethod, url.path) {
+            case ("GET", "/api/thread-summaries"):
+                return try garyxStubResponse(request, statusCode: 404, data: Data())
+            case ("GET", "/api/thread-favorites/snapshot"):
+                favoritesRequests.increment()
+                return try garyxStubResponse(
+                    request,
+                    data: try garyxFavoritesSnapshotData(ids: [])
+                )
+            case ("GET", "/api/thread-pins"):
+                return try garyxStubResponse(
+                    request,
+                    data: try garyxPinsPageData(ids: [], revision: 1)
+                )
+            case ("GET", "/api/recent-threads"):
+                let components = try XCTUnwrap(
+                    URLComponents(url: url, resolvingAgainstBaseURL: false)
+                )
+                let tasks = components.queryItems?
+                    .first(where: { $0.name == "tasks" })?
+                    .value
+                if tasks == GaryxRecentThreadFilter.nonTask.tasksQueryValue {
+                    nonTaskRequests.increment()
+                    return try garyxStubResponse(
+                        request,
+                        data: try garyxRecentThreadsData(ids: ["thread-chat-current"])
+                    )
+                }
+                XCTAssertEqual(tasks, GaryxRecentThreadFilter.all.tasksQueryValue)
+                allRequests.increment()
+                return try garyxStubResponse(
+                    request,
+                    data: try garyxRecentThreadsData(ids: ["thread-all-current"])
+                )
+            default:
+                return try garyxStubResponse(request, statusCode: 400, data: Data())
+            }
+        }
+        defer {
+            GaryxRecentThreadsURLProtocolStub.requestHandler = nil
+            session.invalidateAndCancel()
+        }
+
+        let model = makeModel(session: session)
+        await settleInitialFavoritesSnapshot(model)
+        model.recentThreadFeeds.select(.nonTask)
+        primeRecentFeed(model, ids: ["thread-chat-cached"], filter: .nonTask)
+        primeRecentFeed(model, ids: ["thread-all-cached"], filter: .all)
+        let coordinator = installHomeFeedCoordinator(model)
+
+        model.selectRecentThreadFilter(.favorites)
+        coordinator.updateConnection(.ready(version: "test"))
+        let favoritesSettled = await waitUntil {
+            favoritesRequests.value >= 1
+                && allRequests.value > 0
+                && model.threadFavoritesState.headPhase == .ready
+        }
+        XCTAssertTrue(favoritesSettled)
+        XCTAssertEqual(nonTaskRequests.value, 0)
+
+        model.selectRecentThreadFilter(.nonTask)
+        let chatsSettled = await waitUntil {
+            nonTaskRequests.value > 0
+                && model.recentThreadFeeds.nonTaskFeed.headPhase == .ready
+                && model.visibleRecentThreadIds.first == "thread-chat-current"
+        }
+        XCTAssertTrue(chatsSettled)
+        XCTAssertEqual(model.recentThreadFeeds.selectedFilter, .nonTask)
+        XCTAssertEqual(
+            model.homeThreadListStore.presentationSnapshot.recentPlaceholder,
+            .none
+        )
+        await stopHomeFeedTestModel(model)
     }
 
     func testFavoritesSnapshotFailureSurfacesUnavailableAndManualRetryRecovers() async throws {
@@ -946,7 +1065,7 @@ final class GaryxHomeThreadListRefreshCommitTests: XCTestCase {
 
         let model = makeModel(session: session)
         model.recentThreadFeeds.select(.favorites)
-        model.refreshThreadFavoritesSnapshot()
+        model.connectionState = .ready(version: "test")
         let failed = await waitUntil {
             model.threadFavoritesState.snapshotFailed
         }
@@ -968,6 +1087,7 @@ final class GaryxHomeThreadListRefreshCommitTests: XCTestCase {
     func testAwaitableFavoritesSnapshotWaitsForNetworkSettlement() async throws {
         let snapshotStarted = expectation(description: "favorites snapshot started")
         let snapshotGate = DispatchSemaphore(value: 0)
+        let snapshots = GaryxLockedCounter()
         let settled = GaryxLockedCounter()
         let session = makeStubSession { request in
             let url = try XCTUnwrap(request.url)
@@ -975,9 +1095,11 @@ final class GaryxHomeThreadListRefreshCommitTests: XCTestCase {
                 return try garyxStubResponse(request, statusCode: 404, data: Data())
             }
             if request.httpMethod == "GET", url.path == "/api/thread-favorites/snapshot" {
-                snapshotStarted.fulfill()
-                guard snapshotGate.wait(timeout: .now() + 5) == .success else {
-                    throw GaryxRefreshStubError.timedOut
+                if snapshots.increment() == 1 {
+                    snapshotStarted.fulfill()
+                    guard snapshotGate.wait(timeout: .now() + 5) == .success else {
+                        throw GaryxRefreshStubError.timedOut
+                    }
                 }
                 return try garyxStubResponse(
                     request,
@@ -993,6 +1115,7 @@ final class GaryxHomeThreadListRefreshCommitTests: XCTestCase {
         }
 
         let model = makeModel(session: session)
+        model.connectionState = .ready(version: "test")
         let refresh = Task { @MainActor in
             await model.refreshThreadFavoritesSnapshotAndWait()
             settled.increment()
@@ -1007,26 +1130,47 @@ final class GaryxHomeThreadListRefreshCommitTests: XCTestCase {
         XCTAssertEqual(model.threadFavoritesState.rawThreadIds, ["thread-favorite"])
     }
 
-    func testFavoritesIncarnationChangeResetsAnInFlightRecentLane() async throws {
+    func testFavoritesIncarnationChangeOwnsImmediateRecentReplacement() async throws {
         let firstIncarnation = "11111111-1111-4111-8111-111111111111"
         let secondIncarnation = "33333333-3333-4333-8333-333333333333"
         let snapshots = GaryxLockedCounter()
+        let recentRequests = GaryxLockedCounter()
         let session = makeStubSession { request in
             let url = try XCTUnwrap(request.url)
-            guard request.httpMethod == "GET",
-                  url.path == "/api/thread-favorites/snapshot" else {
+            switch (request.httpMethod, url.path) {
+            case ("GET", "/api/thread-summaries"):
+                return try garyxStubResponse(request, statusCode: 404, data: Data())
+            case ("GET", "/api/thread-pins"):
+                return try garyxStubResponse(
+                    request,
+                    data: try garyxPinsPageData(ids: [], revision: 1)
+                )
+            case ("GET", "/api/recent-threads"):
+                recentRequests.increment()
+                let incarnation = snapshots.value < 2
+                    ? firstIncarnation
+                    : secondIncarnation
+                return try garyxStubResponse(
+                    request,
+                    data: try garyxRecentThreadsData(
+                        ids: ["thread-current"],
+                        storeIncarnationId: incarnation
+                    )
+                )
+            case ("GET", "/api/thread-favorites/snapshot"):
+                let incarnation = snapshots.increment() == 1
+                    ? firstIncarnation
+                    : secondIncarnation
+                return try garyxStubResponse(
+                    request,
+                    data: try garyxFavoritesSnapshotData(
+                        ids: [],
+                        storeIncarnationId: incarnation
+                    )
+                )
+            default:
                 return try garyxStubResponse(request, statusCode: 400, data: Data())
             }
-            let incarnation = snapshots.increment() == 1
-                ? firstIncarnation
-                : secondIncarnation
-            return try garyxStubResponse(
-                request,
-                data: try garyxFavoritesSnapshotData(
-                    ids: [],
-                    storeIncarnationId: incarnation
-                )
-            )
         }
         defer {
             GaryxRecentThreadsURLProtocolStub.requestHandler = nil
@@ -1034,41 +1178,992 @@ final class GaryxHomeThreadListRefreshCommitTests: XCTestCase {
         }
 
         let model = makeModel(session: session)
-        model.refreshThreadFavoritesSnapshot()
+        model.connectionState = .ready(version: "test")
         let firstSnapshotSettled = await waitUntil {
             model.threadFavoritesState.storeIncarnationId == firstIncarnation
         }
         XCTAssertTrue(firstSnapshotSettled)
+        await model.homeFeedSyncCoordinator.waitForTransportIdleForTesting()
         primeRecentFeed(model, ids: ["old-thread"], filter: .all)
         let oldEpoch = model.threadFavoritesState.runtimeEpoch
-        let interrupted = try XCTUnwrap(model.recentThreadFeeds.requestRefresh(
-            filter: .all,
-            gatewayScope: model.threadFavoritesState.gatewayScope,
-            runtimeEpoch: oldEpoch
-        ))
+        let interrupted = try issueRecentHead(model, filter: .all)
         XCTAssertTrue(model.recentThreadFeeds.allFeed.pager.isRefreshingHead)
+        let recentRequestsBeforeReset = recentRequests.value
 
         model.refreshThreadFavoritesSnapshot()
         let replacementSnapshotSettled = await waitUntil {
             model.threadFavoritesState.runtimeEpoch == oldEpoch + 1
                 && model.threadFavoritesState.storeIncarnationId == secondIncarnation
+                && model.recentThreadFeeds.allFeed.headPhase == .ready
+                && recentRequests.value > recentRequestsBeforeReset
         }
         XCTAssertTrue(replacementSnapshotSettled)
 
         XCTAssertFalse(model.recentThreadFeeds.allFeed.pager.isRefreshingHead)
-        XCTAssertTrue(model.recentThreadFeeds.allFeed.orderedThreadIds.isEmpty)
         XCTAssertEqual(
-            model.recentThreadFeeds.completeRefresh(
+            model.recentThreadFeeds.allFeed.orderedThreadIds,
+            ["thread-current"]
+        )
+        XCTAssertEqual(
+            model.recentThreadFeeds.completeHead(
                 interrupted,
-                bundle: makeGaryxTestRecentRefreshBundle(threadIds: ["stale-thread"])
-            ),
+                result: .page(
+                    makeGaryxTestRecentRefreshBundle(threadIds: ["stale-thread"])
+                )
+            ).outcome,
             .abandonedStaleEpoch
         )
-        XCTAssertNotNil(model.recentThreadFeeds.requestRefresh(
-            filter: .all,
-            gatewayScope: model.threadFavoritesState.gatewayScope,
-            runtimeEpoch: model.threadFavoritesState.runtimeEpoch
-        ))
+        XCTAssertEqual(
+            model.recentThreadFeeds.allFeed.headPhase,
+            .ready,
+            "identity replacement must automatically execute and settle its recovery obligation"
+        )
+    }
+
+    func testLegacyColdStartInstallsFavoritesScopeBeforeFastSnapshotCanRaceRecent() async throws {
+        let suiteName = "GaryxColdStartScopeOrderingTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        defaults.set(
+            "http://gateway.example.test/",
+            forKey: GaryxMobileSettingsKeys.legacyGatewayURL
+        )
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let recentStarted = expectation(description: "cold-start Recent request started")
+        let recentGate = DispatchSemaphore(value: 0)
+        let recentRequests = GaryxLockedCounter()
+        let session = makeStubSession { request in
+            let url = try XCTUnwrap(request.url)
+            switch (request.httpMethod, url.path) {
+            case ("GET", "/api/thread-summaries"):
+                return try garyxStubResponse(
+                    request,
+                    data: try garyxTask2783ThreadSummariesCaptureData(
+                        generation: .beforeRotation
+                    )
+                )
+            case ("GET", "/api/thread-favorites/snapshot"):
+                return try garyxStubResponse(
+                    request,
+                    data: try garyxTask2783FavoritesSnapshotCaptureData(
+                        generation: .beforeRotation
+                    )
+                )
+            case ("GET", "/api/thread-pins"):
+                return try garyxStubResponse(
+                    request,
+                    data: try garyxPinsPageData(ids: [], revision: 29)
+                )
+            case ("GET", "/api/recent-threads"):
+                if recentRequests.increment() == 1 {
+                    recentStarted.fulfill()
+                    guard recentGate.wait(timeout: .now() + 5) == .success else {
+                        throw GaryxRefreshStubError.timedOut
+                    }
+                }
+                return try garyxStubResponse(
+                    request,
+                    data: try garyxTask2783RecentThreadsCaptureData(
+                        generation: .beforeRotation
+                    )
+                )
+            default:
+                return try garyxStubResponse(request, statusCode: 400, data: Data())
+            }
+        }
+        defer {
+            recentGate.signal()
+            GaryxRecentThreadsURLProtocolStub.requestHandler = nil
+            session.invalidateAndCancel()
+        }
+
+        let model = GaryxMobileModel(
+            defaults: defaults,
+            gatewayClientFactory: { configuration in
+                GaryxGatewayClient(
+                    configuration: configuration,
+                    session: session,
+                    retryPolicy: .disabled
+                )
+            }
+        )
+        homeFeedTestModels.append(model)
+        let expectedScope = "http://gateway.example.test"
+        XCTAssertEqual(model.gatewayURL, "http://gateway.example.test/")
+        XCTAssertEqual(model.threadFavoritesState.gatewayScope, expectedScope)
+        XCTAssertFalse(model.threadFavoritesState.gatewayScope.isEmpty)
+        let runtimeEpochAtInitCompletion = model.threadFavoritesState.runtimeEpoch
+        let pagerEpochAtInitCompletion = model.recentThreadFeeds.allFeed.pager.epoch
+
+        model.connectionState = .ready(version: "test")
+        await fulfillment(of: [recentStarted], timeout: 2)
+        let fastFavoritesSnapshotSettled = await waitUntil {
+            model.threadFavoritesState.storeIncarnationId
+                == GaryxTask2783CapturedGeneration.beforeRotation.storeIncarnationId
+        }
+        XCTAssertTrue(fastFavoritesSnapshotSettled)
+
+        XCTAssertEqual(model.threadFavoritesState.gatewayScope, expectedScope)
+        XCTAssertEqual(model.threadFavoritesState.runtimeEpoch, runtimeEpochAtInitCompletion)
+        XCTAssertEqual(
+            model.recentThreadFeeds.allFeed.pager.epoch,
+            pagerEpochAtInitCompletion,
+            "the fast Favorites lane must not reset the already-scoped cold-start Recent ticket"
+        )
+        XCTAssertTrue(model.recentThreadFeeds.allFeed.pager.isRefreshingHead)
+
+        recentGate.signal()
+        let recentSettled = await waitUntil {
+            model.selectedRecentFeedPresentation.isPrimed
+                && !model.selectedRecentFeedPresentation.isRefreshingHead
+        }
+        XCTAssertTrue(recentSettled)
+        await model.homeProjectionGateway.waitForIdleForTesting()
+
+        XCTAssertTrue(model.selectedRecentFeedPresentation.isPrimed)
+        XCTAssertFalse(model.selectedRecentFeedPresentation.isRefreshingHead)
+        XCTAssertFalse(model.selectedRecentFeedPresentation.headFailure)
+        XCTAssertEqual(
+            model.homeThreadListStore.presentationSnapshot.recentPlaceholder,
+            .none
+        )
+    }
+
+    func testColdStartHomeVisibilityFalseThenTrueRearmsModelReconcileLoop() async throws {
+        let session = makeStubSession { request in
+            try garyxStubResponse(request, statusCode: 503, data: Data())
+        }
+        defer {
+            GaryxRecentThreadsURLProtocolStub.requestHandler = nil
+            session.invalidateAndCancel()
+        }
+        let model = makeModel(session: session)
+        XCTAssertFalse(GaryxHomeThreadListSnapshot.empty.isHomeVisible)
+
+        await model.homeProjectionGateway.waitForIdleForTesting()
+        XCTAssertTrue(
+            model.homeThreadListStore.snapshot.isHomeVisible,
+            "the model's init-time actor capture must project Home before a ready shell can mount"
+        )
+
+        model.connectionState = .ready(version: "test")
+        let headSettled = await waitUntil {
+            model.selectedRecentFeedPresentation.headFailure
+        }
+        XCTAssertTrue(headSettled)
+        model.startBackgroundCommittedRunReconcileLoop()
+        XCTAssertNotNil(model.backgroundCommittedRunReconcileTask)
+
+        let restoredThread = makeThread(
+            id: "thread::1000000150",
+            title: "Synthetic restored thread"
+        )
+        _ = model.showSelectedThread(
+            restoredThread,
+            invalidatesPendingThreadOpen: false,
+            source: .replace
+        )
+        await model.homeProjectionGateway.waitForIdleForTesting()
+
+        XCTAssertFalse(model.isHomeVisible)
+        XCTAssertFalse(model.homeThreadListStore.snapshot.isHomeVisible)
+        XCTAssertNil(
+            model.backgroundCommittedRunReconcileTask,
+            "the restored conversation must disarm the Home-only 15-second loop"
+        )
+
+        model.returnHome()
+        // An attached production route container invokes this projection at
+        // renderer-idle after the pop. The headless test drives that same
+        // callback explicitly.
+        model.applyCanonicalRouteProjection(model.productionRouteStore.path)
+        await model.homeProjectionGateway.waitForIdleForTesting()
+
+        XCTAssertTrue(model.isHomeVisible)
+        XCTAssertTrue(
+            model.homeThreadListStore.snapshot.isHomeVisible,
+            "the same false -> true value used by .task(id:) must be published after the pop"
+        )
+        XCTAssertNotNil(
+            model.backgroundCommittedRunReconcileTask,
+            "the Home projection must rearm the model-side reconcile loop"
+        )
+        model.cancelBackgroundCommittedRunReconcileLoop()
+    }
+
+    func testColdStartRestoreSuccessPrimesBeforePushAndManualReturnRearmsHome() async throws {
+        let restoredThreadId = "thread::1000000001"
+        let session = makeStubSession { request in
+            let url = try XCTUnwrap(request.url)
+            switch (request.httpMethod, url.path) {
+            case ("GET", "/api/thread-summaries"):
+                return try garyxStubResponse(
+                    request,
+                    data: try garyxTask2783ThreadSummariesCaptureData(
+                        generation: .beforeRotation
+                    )
+                )
+            case ("GET", "/api/thread-favorites/snapshot"):
+                return try garyxStubResponse(
+                    request,
+                    data: try garyxTask2783FavoritesSnapshotCaptureData(
+                        generation: .beforeRotation
+                    )
+                )
+            case ("GET", "/api/thread-pins"):
+                return try garyxStubResponse(
+                    request,
+                    data: try garyxPinsPageData(ids: [], revision: 29)
+                )
+            case ("GET", "/api/recent-threads"):
+                return try garyxStubResponse(
+                    request,
+                    data: try garyxTask2783RecentThreadsCaptureData(
+                        generation: .beforeRotation
+                    )
+                )
+            case ("GET", "/api/threads/history"):
+                return try garyxStubResponse(
+                    request,
+                    data: Data(
+                        #"{"ok":true,"messages":[],"pending_user_inputs":[]}"#.utf8
+                    )
+                )
+            default:
+                return try garyxStubResponse(request, statusCode: 404, data: Data())
+            }
+        }
+        defer {
+            GaryxRecentThreadsURLProtocolStub.requestHandler = nil
+            session.invalidateAndCancel()
+        }
+
+        let model = makeModel(session: session)
+        model.persistLastOpenedThreadId(restoredThreadId)
+        model.persistLastSessionRestorable(true)
+        model.connectionState = .ready(version: "test")
+        let feedPrimed = await waitUntil {
+            model.selectedRecentFeedPresentation.isPrimed
+        }
+        XCTAssertTrue(feedPrimed)
+
+        await model.restoreLastOpenedThreadIfNeeded()
+        await model.homeProjectionGateway.waitForIdleForTesting()
+
+        XCTAssertTrue(
+            model.selectedRecentFeedPresentation.isPrimed,
+            "the real restore path refreshes Recent before it pushes an uncached thread"
+        )
+        XCTAssertEqual(
+            model.homeThreadListStore.presentationSnapshot.recentPlaceholder,
+            .none
+        )
+        XCTAssertFalse(model.isHomeVisible)
+        XCTAssertFalse(model.homeThreadListStore.snapshot.isHomeVisible)
+
+        model.returnHome()
+        // The production route renderer publishes this committed pop at idle.
+        model.applyCanonicalRouteProjection(model.productionRouteStore.path)
+        await model.homeProjectionGateway.waitForIdleForTesting()
+
+        XCTAssertTrue(model.isHomeVisible)
+        XCTAssertTrue(model.homeThreadListStore.snapshot.isHomeVisible)
+        XCTAssertEqual(
+            model.homeThreadListStore.presentationSnapshot.recentPlaceholder,
+            .none,
+            "returning Home reveals the page that the restore refresh already primed"
+        )
+        model.connectionState = .ready(version: "test")
+        model.startBackgroundCommittedRunReconcileLoop()
+        XCTAssertNotNil(model.backgroundCommittedRunReconcileTask)
+        model.cancelBackgroundCommittedRunReconcileLoop()
+    }
+
+    func testColdStartRestoreFailureStillLoadsHomeFeed() async throws {
+        let recentStarted = expectation(description: "cold Home head started")
+        let recentGate = DispatchSemaphore(value: 0)
+        let recentRequests = GaryxLockedCounter()
+        let pointThreadReads = GaryxLockedCounter()
+        let missingRestoreThreadId = "thread::missing-restore"
+        let session = makeStubSession { request in
+            let url = try XCTUnwrap(request.url)
+            switch (request.httpMethod, url.path) {
+            case ("GET", "/api/thread-summaries"):
+                return try garyxStubResponse(
+                    request,
+                    data: try garyxTask2783ThreadSummariesCaptureData(
+                        generation: .beforeRotation
+                    )
+                )
+            case ("GET", "/api/thread-favorites/snapshot"):
+                return try garyxStubResponse(
+                    request,
+                    data: try garyxTask2783FavoritesSnapshotCaptureData(
+                        generation: .beforeRotation
+                    )
+                )
+            case ("GET", "/api/thread-pins"):
+                return try garyxStubResponse(
+                    request,
+                    data: try garyxPinsPageData(ids: [], revision: 29)
+                )
+            case ("GET", "/api/recent-threads"):
+                if recentRequests.increment() == 1 {
+                    recentStarted.fulfill()
+                    guard recentGate.wait(timeout: .now() + 5) == .success else {
+                        throw GaryxRefreshStubError.timedOut
+                    }
+                }
+                return try garyxStubResponse(
+                    request,
+                    data: try garyxTask2783RecentThreadsCaptureData(
+                        generation: .beforeRotation
+                    )
+                )
+            case ("GET", let path) where path == "/api/threads/\(missingRestoreThreadId)":
+                pointThreadReads.increment()
+                return try garyxStubResponse(request, statusCode: 404, data: Data())
+            default:
+                return try garyxStubResponse(request, statusCode: 404, data: Data())
+            }
+        }
+        defer {
+            recentGate.signal()
+            GaryxRecentThreadsURLProtocolStub.requestHandler = nil
+            session.invalidateAndCancel()
+        }
+
+        let model = makeModel(session: session)
+        model.persistLastOpenedThreadId(missingRestoreThreadId)
+        model.persistLastSessionRestorable(true)
+        model.connectionState = .ready(version: "test")
+        await fulfillment(of: [recentStarted], timeout: 2)
+        XCTAssertFalse(model.selectedRecentFeedPresentation.isPrimed)
+        XCTAssertNotNil(model.selectedRecentFeedPresentation.headPhase.activeAttempt)
+
+        await model.restoreLastOpenedThreadIfNeeded()
+        XCTAssertEqual(pointThreadReads.value, 1)
+        XCTAssertFalse(
+            model.selectedRecentFeedPresentation.isPrimed,
+            "the missing restore settles while the independent cold Home head is still in flight"
+        )
+
+        recentGate.signal()
+        let feedPrimed = await waitUntil {
+            model.selectedRecentFeedPresentation.headPhase == .ready
+        }
+        XCTAssertTrue(feedPrimed)
+        await model.homeProjectionGateway.waitForIdleForTesting()
+
+        XCTAssertEqual(pointThreadReads.value, 1)
+        XCTAssertEqual(recentRequests.value, 2)
+        XCTAssertTrue(model.isHomeVisible)
+        XCTAssertTrue(model.homeThreadListStore.snapshot.isHomeVisible)
+        XCTAssertTrue(model.selectedRecentFeedPresentation.isPrimed)
+        XCTAssertFalse(model.selectedRecentFeedPresentation.isRefreshingHead)
+        XCTAssertFalse(model.selectedRecentFeedPresentation.headFailure)
+        XCTAssertEqual(model.allRecentThreadIds, ["thread::1000000001"])
+        XCTAssertEqual(
+            model.homeThreadListStore.presentationSnapshot.recentPlaceholder,
+            .none,
+            "a deleted restore target cannot prevent the independent Home owner from loading data"
+        )
+        model.connectionState = .ready(version: "test")
+        model.startBackgroundCommittedRunReconcileLoop()
+        XCTAssertNotNil(model.backgroundCommittedRunReconcileTask)
+        model.cancelBackgroundCommittedRunReconcileLoop()
+    }
+
+    func testColdStartRecentFailureStaysHomeWithUnavailableNotSkeleton() async throws {
+        let session = makeStubSession { request in
+            let url = try XCTUnwrap(request.url)
+            switch (request.httpMethod, url.path) {
+            case ("GET", "/api/thread-summaries"):
+                return try garyxStubResponse(
+                    request,
+                    data: try garyxTask2783ThreadSummariesCaptureData(
+                        generation: .beforeRotation
+                    )
+                )
+            case ("GET", "/api/thread-favorites/snapshot"):
+                return try garyxStubResponse(
+                    request,
+                    data: try garyxTask2783FavoritesSnapshotCaptureData(
+                        generation: .beforeRotation
+                    )
+                )
+            case ("GET", "/api/thread-pins"):
+                return try garyxStubResponse(
+                    request,
+                    data: try garyxPinsPageData(ids: [], revision: 29)
+                )
+            case ("GET", "/api/recent-threads"):
+                return try garyxStubResponse(
+                    request,
+                    statusCode: 503,
+                    data: Data(#"{"error":"temporarily unavailable"}"#.utf8)
+                )
+            default:
+                return try garyxStubResponse(request, statusCode: 404, data: Data())
+            }
+        }
+        defer {
+            GaryxRecentThreadsURLProtocolStub.requestHandler = nil
+            session.invalidateAndCancel()
+        }
+
+        let model = makeModel(session: session)
+        model.connectionState = .ready(version: "test")
+        let feedFailed = await waitUntil {
+            model.selectedRecentFeedPresentation.headFailure
+        }
+        XCTAssertTrue(feedFailed)
+        await model.homeProjectionGateway.waitForIdleForTesting()
+
+        XCTAssertTrue(model.isHomeVisible)
+        XCTAssertTrue(model.homeThreadListStore.snapshot.isHomeVisible)
+        XCTAssertFalse(model.selectedRecentFeedPresentation.isPrimed)
+        XCTAssertFalse(model.selectedRecentFeedPresentation.isRefreshingHead)
+        XCTAssertTrue(model.selectedRecentFeedPresentation.headFailure)
+        XCTAssertEqual(
+            model.homeThreadListStore.presentationSnapshot.recentPlaceholder,
+            .unavailable,
+            "a failed cold head must become an explicit retry surface, never idle loading"
+        )
+    }
+
+    func testColdStartRestoreCancellationStaysHomeWithRefreshGateReleased() async throws {
+        let recentStarted = expectation(description: "restore Recent request started")
+        let recentGate = DispatchSemaphore(value: 0)
+        let recentRequests = GaryxLockedCounter()
+        let session = makeStubSession { request in
+            let url = try XCTUnwrap(request.url)
+            switch (request.httpMethod, url.path) {
+            case ("GET", "/api/thread-summaries"):
+                return try garyxStubResponse(
+                    request,
+                    data: try garyxTask2783ThreadSummariesCaptureData(
+                        generation: .beforeRotation
+                    )
+                )
+            case ("GET", "/api/thread-favorites/snapshot"):
+                return try garyxStubResponse(
+                    request,
+                    data: try garyxTask2783FavoritesSnapshotCaptureData(
+                        generation: .beforeRotation
+                    )
+                )
+            case ("GET", "/api/thread-pins"):
+                return try garyxStubResponse(
+                    request,
+                    data: try garyxPinsPageData(ids: [], revision: 29)
+                )
+            case ("GET", "/api/recent-threads"):
+                if recentRequests.increment() == 1 {
+                    recentStarted.fulfill()
+                    guard recentGate.wait(timeout: .now() + 5) == .success else {
+                        throw GaryxRefreshStubError.timedOut
+                    }
+                }
+                return try garyxStubResponse(
+                    request,
+                    data: try garyxTask2783RecentThreadsCaptureData(
+                        generation: .beforeRotation
+                    )
+                )
+            default:
+                return try garyxStubResponse(request, statusCode: 404, data: Data())
+            }
+        }
+        defer {
+            recentGate.signal()
+            GaryxRecentThreadsURLProtocolStub.requestHandler = nil
+            session.invalidateAndCancel()
+        }
+
+        let model = makeModel(session: session)
+        model.persistLastOpenedThreadId("thread::1000000001")
+        model.persistLastSessionRestorable(true)
+        model.connectionState = .ready(version: "test")
+        let restore = Task { @MainActor in
+            await model.restoreLastOpenedThreadIfNeeded()
+        }
+        await fulfillment(of: [recentStarted], timeout: 2)
+
+        restore.cancel()
+        recentGate.signal()
+        await restore.value
+        let ownerSettled = await waitUntil {
+            model.selectedRecentFeedPresentation.isPrimed
+                && !model.selectedRecentFeedPresentation.isRefreshingHead
+        }
+        XCTAssertTrue(ownerSettled)
+        await model.homeProjectionGateway.waitForIdleForTesting()
+
+        XCTAssertTrue(model.isHomeVisible)
+        XCTAssertTrue(model.homeThreadListStore.snapshot.isHomeVisible)
+        XCTAssertFalse(model.selectedRecentFeedPresentation.isRefreshingHead)
+        XCTAssertNotEqual(
+            model.homeThreadListStore.presentationSnapshot.recentPlaceholder,
+            .loadingSkeleton(rowCount: 6),
+            "Task cancellation must settle the owned request instead of leaving an idle skeleton"
+        )
+        model.connectionState = .ready(version: "test")
+        model.startBackgroundCommittedRunReconcileLoop()
+        XCTAssertNotNil(model.backgroundCommittedRunReconcileTask)
+        model.cancelBackgroundCommittedRunReconcileLoop()
+    }
+
+    func testHomeFeedSelfConvergesWithoutThreadBackedBotRefreshSideEffect() async throws {
+        let coldHeadStarted = expectation(description: "cold Home head started")
+        let coldHeadGate = DispatchSemaphore(value: 0)
+        let allRecentRequests = GaryxLockedCounter()
+        let pointThreadReads = GaryxLockedCounter()
+        let botThreadId = "thread::bot-cache-miss"
+        let session = makeStubSession { request in
+            let url = try XCTUnwrap(request.url)
+            switch (request.httpMethod, url.path) {
+            case ("GET", "/api/thread-summaries"):
+                return try garyxStubResponse(
+                    request,
+                    data: try garyxTask2783ThreadSummariesCaptureData(
+                        generation: .beforeRotation
+                    )
+                )
+            case ("GET", "/api/thread-favorites/snapshot"):
+                return try garyxStubResponse(
+                    request,
+                    data: try garyxTask2783FavoritesSnapshotCaptureData(
+                        generation: .beforeRotation
+                    )
+                )
+            case ("GET", "/api/thread-pins"):
+                return try garyxStubResponse(
+                    request,
+                    data: try garyxPinsPageData(ids: [], revision: 29)
+                )
+            case ("GET", "/api/recent-threads"):
+                let components = try XCTUnwrap(
+                    URLComponents(url: url, resolvingAgainstBaseURL: false)
+                )
+                let tasks = components.queryItems?
+                    .first(where: { $0.name == "tasks" })?
+                    .value
+                if tasks == GaryxRecentThreadFilter.all.tasksQueryValue,
+                   allRecentRequests.increment() == 1 {
+                    coldHeadStarted.fulfill()
+                    guard coldHeadGate.wait(timeout: .now() + 5) == .success else {
+                        throw GaryxRefreshStubError.timedOut
+                    }
+                }
+                return try garyxStubResponse(
+                    request,
+                    data: try garyxTask2783RecentThreadsCaptureData(
+                        generation: .beforeRotation
+                    )
+                )
+            case ("GET", let path) where path == "/api/threads/\(botThreadId)":
+                pointThreadReads.increment()
+                return try garyxStubResponse(
+                    request,
+                    data: Data(
+                        #"""
+                        {
+                          "thread_id":"thread::bot-cache-miss",
+                          "label":"Cache-miss bot thread",
+                          "thread_type":"chat",
+                          "message_count":0
+                        }
+                        """#.utf8
+                    )
+                )
+            case ("GET", "/api/threads/history"):
+                return try garyxStubResponse(
+                    request,
+                    data: Data(
+                        #"{"ok":true,"messages":[],"pending_user_inputs":[]}"#.utf8
+                    )
+                )
+            default:
+                return try garyxStubResponse(request, statusCode: 404, data: Data())
+            }
+        }
+        defer {
+            coldHeadGate.signal()
+            GaryxRecentThreadsURLProtocolStub.requestHandler = nil
+            session.invalidateAndCancel()
+        }
+
+        let model = makeModel(session: session)
+        await model.homeProjectionGateway.waitForIdleForTesting()
+        XCTAssertEqual(
+            model.homeThreadListStore.presentationSnapshot.recentPlaceholder,
+            .loadingSkeleton(rowCount: 6)
+        )
+        model.connectionState = .ready(version: "test")
+        await fulfillment(of: [coldHeadStarted], timeout: 2)
+        XCTAssertFalse(model.selectedRecentFeedPresentation.isPrimed)
+        XCTAssertNotNil(
+            model.selectedRecentFeedPresentation.headPhase.activeAttempt,
+            "the cache-miss bot path must begin while the cold Home head is genuinely in flight"
+        )
+        let group = GaryxMobileBotGroup(
+            id: "test-channel::test-account",
+            channel: "test-channel",
+            channelDisplayName: "Test Channel",
+            accountId: "test-account",
+            title: "Test Bot",
+            subtitle: "Test Channel Bot",
+            agentId: nil,
+            rootBehavior: "open_main",
+            status: "idle",
+            endpointCount: 1,
+            boundEndpointCount: 1,
+            workspaceDir: nil,
+            mainThreadId: botThreadId,
+            defaultOpenThreadId: botThreadId,
+            endpoints: [],
+            conversationNodes: [],
+            iconDataUrl: nil
+        )
+
+        await model.openBotGroup(group)
+        XCTAssertEqual(
+            pointThreadReads.value,
+            1,
+            "the test must exercise the uncached point-read branch that used to own a hidden refresh"
+        )
+        XCTAssertEqual(
+            allRecentRequests.value,
+            1,
+            "opening the bot must not start or queue another All refresh"
+        )
+        XCTAssertFalse(model.isHomeVisible)
+
+        coldHeadGate.signal()
+        let feedPrimed = await waitUntil {
+            model.selectedRecentFeedPresentation.headPhase == .ready
+                && model.allRecentThreadIds == ["thread::1000000001"]
+        }
+        XCTAssertTrue(feedPrimed)
+        await model.homeFeedSyncCoordinator.waitForTransportIdleForTesting()
+        XCTAssertEqual(
+            allRecentRequests.value,
+            2,
+            "the coordinator owns exactly one primary + verification cycle; the bot owns none"
+        )
+
+        model.returnHome()
+        model.applyCanonicalRouteProjection(model.productionRouteStore.path)
+        await model.homeProjectionGateway.waitForIdleForTesting()
+
+        XCTAssertTrue(model.selectedRecentFeedPresentation.isPrimed)
+        XCTAssertEqual(
+            model.homeThreadListStore.presentationSnapshot.recentPlaceholder,
+            .none,
+            "the gateway-scope owner converges while Home is hidden and remains ready on return"
+        )
+    }
+
+    func testColdStartRecentIdentityInterruptionSchedulesAReplacementRefresh() async throws {
+        let recentStarted = expectation(description: "cold-start recent request started")
+        let recentGate = DispatchSemaphore(value: 0)
+        let replacementGate = DispatchSemaphore(value: 0)
+        let recentRequests = GaryxLockedCounter()
+        let snapshotRequests = GaryxLockedCounter()
+        let session = makeStubSession { request in
+            let url = try XCTUnwrap(request.url)
+            switch (request.httpMethod, url.path) {
+            case ("GET", "/api/thread-summaries"):
+                return try garyxStubResponse(
+                    request,
+                    data: try garyxTask2783ThreadSummariesCaptureData(
+                        generation: .beforeRotation
+                    )
+                )
+            case ("GET", "/api/thread-favorites/snapshot"):
+                let generation: GaryxTask2783CapturedGeneration =
+                    snapshotRequests.increment() == 1 ? .beforeRotation : .afterRotation
+                return try garyxStubResponse(
+                    request,
+                    data: try garyxTask2783FavoritesSnapshotCaptureData(
+                        generation: generation
+                    )
+                )
+            case ("GET", "/api/thread-pins"):
+                return try garyxStubResponse(
+                    request,
+                    data: try garyxPinsPageData(ids: [], revision: 29)
+                )
+            case ("GET", "/api/recent-threads"):
+                switch recentRequests.increment() {
+                case 1:
+                    recentStarted.fulfill()
+                    guard recentGate.wait(timeout: .now() + 5) == .success else {
+                        throw GaryxRefreshStubError.timedOut
+                    }
+                case 2:
+                    guard replacementGate.wait(timeout: .now() + 5) == .success else {
+                        throw GaryxRefreshStubError.timedOut
+                    }
+                default:
+                    break
+                }
+                return try garyxStubResponse(
+                    request,
+                    data: try garyxTask2783RecentThreadsCaptureData(
+                        generation: .afterRotation
+                    )
+                )
+            default:
+                return try garyxStubResponse(request, statusCode: 400, data: Data())
+            }
+        }
+        defer {
+            recentGate.signal()
+            replacementGate.signal()
+            GaryxRecentThreadsURLProtocolStub.requestHandler = nil
+            session.invalidateAndCancel()
+        }
+
+        let model = makeModel(session: session)
+        XCTAssertNil(
+            model.threadFavoritesState.storeIncarnationId,
+            "the reproduction must begin at the real cold-start identity state"
+        )
+        model.connectionState = .ready(version: "test")
+        await fulfillment(of: [recentStarted], timeout: 2)
+        let interruptedAttempt = try XCTUnwrap(
+            model.recentThreadFeeds.allFeed.headPhase.activeAttempt
+        )
+        let favoritesEstablishedIdentity = await waitUntil {
+            model.threadFavoritesState.storeIncarnationId
+                == GaryxTask2783CapturedGeneration.beforeRotation.storeIncarnationId
+        }
+        XCTAssertTrue(favoritesEstablishedIdentity)
+
+        recentGate.signal()
+        let identityRecoverySettled = await waitUntil {
+            model.threadFavoritesState.storeIncarnationId
+                == GaryxTask2783CapturedGeneration.afterRotation.storeIncarnationId
+                && model.threadFavoritesState.activeSnapshotTicket == nil
+                && model.threadFavoritesSnapshotTask == nil
+        }
+        XCTAssertTrue(identityRecoverySettled)
+
+        let replacementIssued = await waitUntil(timeout: 0.5) {
+            guard let activeAttempt =
+                model.recentThreadFeeds.allFeed.headPhase.activeAttempt else {
+                return false
+            }
+            return activeAttempt != interruptedAttempt
+        }
+        let presentation = model.selectedRecentFeedPresentation
+        let placeholder = model.homeThreadListStore.presentationSnapshot.recentPlaceholder
+        XCTAssertTrue(
+            replacementIssued,
+            """
+            REPRO: the cold-start recent response was identity-interrupted and \
+            terminated with placeholder=\(placeholder), \
+            isRefreshingHead=\(presentation.isRefreshingHead), \
+            recentRequests=\(recentRequests.value). No replacement refresh was scheduled.
+            """
+        )
+        if replacementIssued {
+            replacementGate.signal()
+            let replacementSettled = await waitUntil {
+                model.recentThreadFeeds.allFeed.refreshCycle == 1
+                    && model.recentThreadFeeds.allFeed.headPhase == .ready
+            }
+            XCTAssertTrue(replacementSettled)
+        }
+        await model.homeProjectionGateway.waitForIdleForTesting()
+        model.homeFeedSyncCoordinator.deactivateScope()
+        await model.homeFeedSyncCoordinator.waitForTransportIdleForTesting()
+    }
+
+    func testColdStartMatchingCapturedIdentitiesPrimeRecentWithoutInterruption() async throws {
+        let allRecentRequests = GaryxLockedCounter()
+        let nonTaskRecentRequests = GaryxLockedCounter()
+        let snapshotRequests = GaryxLockedCounter()
+        let session = makeStubSession { request in
+            let url = try XCTUnwrap(request.url)
+            switch (request.httpMethod, url.path) {
+            case ("GET", "/api/thread-summaries"):
+                return try garyxStubResponse(
+                    request,
+                    data: try garyxTask2783ThreadSummariesCaptureData(
+                        generation: .beforeRotation
+                    )
+                )
+            case ("GET", "/api/thread-favorites/snapshot"):
+                snapshotRequests.increment()
+                return try garyxStubResponse(
+                    request,
+                    data: try garyxTask2783FavoritesSnapshotCaptureData(
+                        generation: .beforeRotation
+                    )
+                )
+            case ("GET", "/api/thread-pins"):
+                return try garyxStubResponse(
+                    request,
+                    data: try garyxPinsPageData(ids: [], revision: 29)
+                )
+            case ("GET", "/api/recent-threads"):
+                let components = try XCTUnwrap(
+                    URLComponents(url: url, resolvingAgainstBaseURL: false)
+                )
+                let tasks = components.queryItems?
+                    .first(where: { $0.name == "tasks" })?
+                    .value
+                if tasks == GaryxRecentThreadFilter.all.tasksQueryValue {
+                    allRecentRequests.increment()
+                } else if tasks == GaryxRecentThreadFilter.nonTask.tasksQueryValue {
+                    nonTaskRecentRequests.increment()
+                } else {
+                    XCTFail("cold-start Recent request must declare its feed filter")
+                }
+                return try garyxStubResponse(
+                    request,
+                    data: try garyxTask2783RecentThreadsCaptureData(
+                        generation: .beforeRotation
+                    )
+                )
+            default:
+                return try garyxStubResponse(request, statusCode: 400, data: Data())
+            }
+        }
+        defer {
+            GaryxRecentThreadsURLProtocolStub.requestHandler = nil
+            session.invalidateAndCancel()
+        }
+
+        let model = makeModel(session: session)
+        XCTAssertNil(model.threadFavoritesState.storeIncarnationId)
+        model.connectionState = .ready(version: "test")
+        let settled = await waitUntil {
+            model.threadFavoritesState.storeIncarnationId
+                == GaryxTask2783CapturedGeneration.beforeRotation.storeIncarnationId
+                && model.threadFavoritesState.activeSnapshotTicket == nil
+                && model.threadFavoritesSnapshotTask == nil
+                && model.selectedRecentFeedPresentation.isPrimed
+        }
+        XCTAssertTrue(settled)
+        await model.homeProjectionGateway.waitForIdleForTesting()
+
+        XCTAssertEqual(model.recentThreadFeeds.allFeed.refreshCycle, 1)
+        XCTAssertEqual(
+            allRecentRequests.value,
+            2,
+            "one owned head cycle performs its primary read plus head verification"
+        )
+        XCTAssertEqual(nonTaskRecentRequests.value, 0)
+        XCTAssertEqual(snapshotRequests.value, 1)
+        XCTAssertFalse(model.selectedRecentFeedPresentation.isRefreshingHead)
+        XCTAssertFalse(model.selectedRecentFeedPresentation.headFailure)
+        XCTAssertEqual(
+            model.homeThreadListStore.presentationSnapshot.recentPlaceholder,
+            .none,
+            "matching identities on both cold-start lanes must render the captured recent row"
+        )
+    }
+
+    func testColdStartFavoritesIdentityResetSchedulesAReplacementRefresh() async throws {
+        let snapshotStarted = expectation(description: "cold-start favorites snapshot started")
+        let snapshotGate = DispatchSemaphore(value: 0)
+        let recentRequests = GaryxLockedCounter()
+        let snapshotRequests = GaryxLockedCounter()
+        let session = makeStubSession { request in
+            let url = try XCTUnwrap(request.url)
+            switch (request.httpMethod, url.path) {
+            case ("GET", "/api/thread-summaries"):
+                return try garyxStubResponse(
+                    request,
+                    data: try garyxTask2783ThreadSummariesCaptureData(
+                        generation: .beforeRotation
+                    )
+                )
+            case ("GET", "/api/thread-favorites/snapshot"):
+                if snapshotRequests.increment() == 1 {
+                    snapshotStarted.fulfill()
+                    guard snapshotGate.wait(timeout: .now() + 5) == .success else {
+                        throw GaryxRefreshStubError.timedOut
+                    }
+                }
+                return try garyxStubResponse(
+                    request,
+                    data: try garyxTask2783FavoritesSnapshotCaptureData(
+                        generation: .afterRotation
+                    )
+                )
+            case ("GET", "/api/thread-pins"):
+                return try garyxStubResponse(
+                    request,
+                    data: try garyxPinsPageData(ids: [], revision: 29)
+                )
+            case ("GET", "/api/recent-threads"):
+                recentRequests.increment()
+                return try garyxStubResponse(
+                    request,
+                    data: try garyxTask2783RecentThreadsCaptureData(
+                        generation: .beforeRotation
+                    )
+                )
+            default:
+                return try garyxStubResponse(request, statusCode: 400, data: Data())
+            }
+        }
+        defer {
+            snapshotGate.signal()
+            GaryxRecentThreadsURLProtocolStub.requestHandler = nil
+            session.invalidateAndCancel()
+        }
+
+        let model = makeModel(session: session)
+        XCTAssertNil(
+            model.threadFavoritesState.storeIncarnationId,
+            "the reproduction must begin at the real cold-start identity state"
+        )
+        model.connectionState = .ready(version: "test")
+        await fulfillment(of: [snapshotStarted], timeout: 2)
+        let recentPrimed = await waitUntil {
+            model.selectedRecentFeedPresentation.isPrimed
+        }
+        XCTAssertTrue(
+            recentPrimed,
+            "the recent lane must commit before the delayed favorites snapshot resets it"
+        )
+        let recentRequestsAtReset = recentRequests.value
+
+        snapshotGate.signal()
+        let identityRecoverySettled = await waitUntil {
+            model.threadFavoritesState.storeIncarnationId
+                == GaryxTask2783CapturedGeneration.afterRotation.storeIncarnationId
+                && model.threadFavoritesState.activeSnapshotTicket == nil
+                && model.threadFavoritesSnapshotTask == nil
+        }
+        XCTAssertTrue(identityRecoverySettled)
+        await model.homeProjectionGateway.waitForIdleForTesting()
+
+        let replacementIssued = await waitUntil(timeout: 0.5) {
+            recentRequests.value > recentRequestsAtReset
+        }
+        let presentation = model.selectedRecentFeedPresentation
+        let placeholder = model.homeThreadListStore.presentationSnapshot.recentPlaceholder
+        XCTAssertTrue(
+            replacementIssued,
+            """
+            REPRO: the delayed cold-start favorites snapshot reset the primed \
+            recent feed and terminated with placeholder=\(placeholder), \
+            isRefreshingHead=\(presentation.isRefreshingHead), \
+            recentRequestsBeforeReset=\(recentRequestsAtReset), \
+            recentRequestsAfterReset=\(recentRequests.value). \
+            No replacement refresh was scheduled.
+            """
+        )
+        model.homeFeedSyncCoordinator.deactivateScope()
+        await model.homeFeedSyncCoordinator.waitForTransportIdleForTesting()
     }
 
     func testCommittedArchiveFiltersALateFavoritesSnapshotEverywhere() async throws {
@@ -1095,6 +2190,7 @@ final class GaryxHomeThreadListRefreshCommitTests: XCTestCase {
         let model = makeModel(session: session)
         model.pendingThreadArchives.commitArchive(threadId: archivedId)
         model.recentThreadFeeds.select(.favorites)
+        model.connectionState = .ready(version: "test")
         model.refreshThreadFavoritesSnapshot()
         let snapshotSettled = await waitUntil {
             model.threadFavoritesState.rawThreadIds == [archivedId]
@@ -1130,17 +2226,19 @@ final class GaryxHomeThreadListRefreshCommitTests: XCTestCase {
 
         primeRecentFeed(model, ids: ["thread-task", "thread-chat"], filter: .all)
         primeRecentFeed(model, ids: ["thread-chat"], filter: .nonTask)
-        let staleTicket = try XCTUnwrap(model.recentThreadFeeds.requestRefresh(filter: .nonTask))
+        let staleTicket = try issueRecentHead(model, filter: .nonTask)
         model.resetGatewayRuntimeState()
 
         XCTAssertEqual(model.recentThreadFeeds.selectedFilter, .nonTask)
         XCTAssertTrue(model.recentThreadFeeds.allFeed.orderedThreadIds.isEmpty)
         XCTAssertTrue(model.recentThreadFeeds.nonTaskFeed.orderedThreadIds.isEmpty)
         XCTAssertEqual(
-            model.recentThreadFeeds.completeRefresh(
+            model.recentThreadFeeds.completeHead(
                 staleTicket,
-                bundle: makeGaryxTestRecentRefreshBundle(threadIds: ["stale-thread"])
-            ),
+                result: .page(
+                    makeGaryxTestRecentRefreshBundle(threadIds: ["stale-thread"])
+                )
+            ).outcome,
             .abandonedStaleEpoch
         )
 
@@ -1148,7 +2246,7 @@ final class GaryxHomeThreadListRefreshCommitTests: XCTestCase {
         let relaunchedModel = makeModel(defaults: defaults)
         XCTAssertEqual(relaunchedModel.recentThreadFeeds.selectedFilter, .nonTask)
         XCTAssertEqual(
-            try XCTUnwrap(relaunchedModel.recentThreadFeeds.requestRefresh()).filter,
+            try issueRecentHead(relaunchedModel).filter,
             .nonTask
         )
     }
@@ -1198,6 +2296,8 @@ final class GaryxHomeThreadListRefreshCommitTests: XCTestCase {
 
         let model = makeModel(session: session)
         model.lifecycleRetryDelayOverrideNanoseconds = 0
+        await settleInitialFavoritesSnapshot(model)
+        favoritesSnapshots.reset()
         let archived = makeThread(id: "thread-archived", title: "Archived thread")
         let survivor = makeThread(id: "thread-survivor", title: "Surviving thread")
         model.seedThreadSummariesForTesting([archived, survivor])
@@ -1214,16 +2314,16 @@ final class GaryxHomeThreadListRefreshCommitTests: XCTestCase {
 
         // A refresh may finish while the remote operation is still pending.
         // It must keep the existing row visible until the archive commits.
-        let concurrentRefresh = try XCTUnwrap(
-            model.recentThreadFeeds.requestRefresh(filter: .all)
-        )
+        let concurrentRefresh = try issueRecentHead(model, filter: .all)
         XCTAssertEqual(
-            model.recentThreadFeeds.completeRefresh(
+            model.recentThreadFeeds.completeHead(
                 concurrentRefresh,
-                bundle: makeGaryxTestRecentRefreshBundle(
-                    threadIds: [archived.id, survivor.id]
+                result: .page(
+                    makeGaryxTestRecentRefreshBundle(
+                        threadIds: [archived.id, survivor.id]
+                    )
                 )
-            ),
+            ).outcome,
             .applied
         )
         model.commitRefreshedRecentThreadsPage(
@@ -1256,7 +2356,14 @@ final class GaryxHomeThreadListRefreshCommitTests: XCTestCase {
         )
 
         archiveGate.signal()
+        let archiveExhausted = await waitUntil {
+            archiveAttempts.value == 6
+        }
+        XCTAssertTrue(archiveExhausted)
+        await waitForAllRecentReplacementToQueue(model)
+        model.homeFeedSyncCoordinator.updateConnection(.ready(version: "test"))
         await archiveTask.value
+        await model.homeFeedSyncCoordinator.waitForTransportIdleForTesting()
         await model.homeProjectionGateway.waitForIdleForTesting()
 
         XCTAssertFalse(model.pendingThreadArchives.contains(threadId: archived.id))
@@ -1334,6 +2441,8 @@ final class GaryxHomeThreadListRefreshCommitTests: XCTestCase {
 
         let model = makeModel(session: session)
         model.lifecycleRetryDelayOverrideNanoseconds = 0
+        await settleInitialFavoritesSnapshot(model)
+        favoritesSnapshots.reset()
         let deleted = makeThread(id: visibleIds[0], title: "Delete candidate")
         let survivor = makeThread(id: visibleIds[1], title: "Survivor")
         model.seedThreadSummariesForTesting([deleted, survivor])
@@ -1341,7 +2450,17 @@ final class GaryxHomeThreadListRefreshCommitTests: XCTestCase {
         primeRecentFeed(model, ids: visibleIds, filter: .all)
         primeRecentFeed(model, ids: visibleIds, filter: .nonTask)
 
-        await model.deleteThread(deleted)
+        let deleteTask = Task { @MainActor in
+            await model.deleteThread(deleted)
+        }
+        let deleteExhausted = await waitUntil {
+            deleteAttempts.value == 6
+        }
+        XCTAssertTrue(deleteExhausted)
+        await waitForAllRecentReplacementToQueue(model)
+        model.homeFeedSyncCoordinator.updateConnection(.ready(version: "test"))
+        await deleteTask.value
+        await model.homeFeedSyncCoordinator.waitForTransportIdleForTesting()
         let reconstructed = await waitUntil {
             favoritesSnapshots.value == 1
                 && allRequests.value == 2
@@ -1417,7 +2536,16 @@ final class GaryxHomeThreadListRefreshCommitTests: XCTestCase {
         primeRecentFeed(model, ids: [archived.id, survivor.id], filter: .all)
         primeRecentFeed(model, ids: [archived.id, survivor.id], filter: .nonTask)
 
-        await model.archiveThreadRecord(threadId: archived.id)
+        let archiveTask = Task { @MainActor in
+            await model.archiveThreadRecord(threadId: archived.id)
+        }
+        let archiveCommitted = await waitUntil {
+            model.pendingThreadArchives.isCommitted(threadId: archived.id)
+        }
+        XCTAssertTrue(archiveCommitted)
+        model.homeFeedSyncCoordinator.updateConnection(.ready(version: "test"))
+        await archiveTask.value
+        await model.homeFeedSyncCoordinator.waitForTransportIdleForTesting()
 
         XCTAssertEqual(recorder.values.count, 2)
         XCTAssertEqual(Set(recorder.values.map(\.operationId)).count, 1)
@@ -1493,12 +2621,9 @@ final class GaryxHomeThreadListRefreshCommitTests: XCTestCase {
         let favoritesSnapshots = GaryxLockedCounter()
         let allRequests = GaryxLockedCounter()
         let chatsRequests = GaryxLockedCounter()
+        let initialIncarnation = "11111111-1111-4111-8111-111111111111"
         let replacementIncarnation = "33333333-3333-4333-8333-333333333333"
         let visibleIds = ["thread-archive", "thread-survivor"]
-        let recentData = try garyxRecentThreadsData(
-            ids: visibleIds,
-            storeIncarnationId: replacementIncarnation
-        )
         let session = makeStubSession { request in
             let components = try XCTUnwrap(
                 URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)
@@ -1527,7 +2652,9 @@ final class GaryxHomeThreadListRefreshCommitTests: XCTestCase {
                     request,
                     data: try garyxFavoritesSnapshotData(
                         ids: [],
-                        storeIncarnationId: replacementIncarnation
+                        storeIncarnationId: archiveAttempts.value == 0
+                            ? initialIncarnation
+                            : replacementIncarnation
                     )
                 )
             }
@@ -1537,7 +2664,15 @@ final class GaryxHomeThreadListRefreshCommitTests: XCTestCase {
                 case "exclude": chatsRequests.increment()
                 default: break
                 }
-                return try garyxStubResponse(request, data: recentData)
+                return try garyxStubResponse(
+                    request,
+                    data: try garyxRecentThreadsData(
+                        ids: visibleIds,
+                        storeIncarnationId: archiveAttempts.value == 0
+                            ? initialIncarnation
+                            : replacementIncarnation
+                    )
+                )
             }
             if request.httpMethod == "GET", components.path == "/api/thread-pins" {
                 return try garyxStubResponse(
@@ -1554,20 +2689,52 @@ final class GaryxHomeThreadListRefreshCommitTests: XCTestCase {
 
         let model = makeModel(session: session)
         model.lifecycleRetryDelayOverrideNanoseconds = 0
+        let initialFavoritesTicket = try XCTUnwrap(
+            model.threadFavoritesState.activeSnapshotTicket
+        )
+        let initialFavorites = model.threadFavoritesProvider.completeSnapshot(
+            ticket: initialFavoritesTicket,
+            snapshot: GaryxFavoriteSnapshot(
+                page: GaryxFavoritePage(
+                    storeIncarnationId: initialIncarnation,
+                    serverBootId: "22222222-2222-4222-8222-222222222222",
+                    revision: 1,
+                    threadIds: []
+                ),
+                rows: []
+            )
+        )
+        XCTAssertTrue(initialFavorites.accepted)
+        model.runThreadFavoritesEffects(initialFavorites.effects)
         let archived = makeThread(id: visibleIds[0], title: "Archive candidate")
         let survivor = makeThread(id: visibleIds[1], title: "Survivor")
         model.seedThreadSummariesForTesting([archived, survivor])
         primeRecentFeed(model, ids: visibleIds, filter: .all)
         primeRecentFeed(model, ids: visibleIds, filter: .nonTask)
 
-        await model.archiveThreadRecord(threadId: archived.id)
+        let archiveTask = Task { @MainActor in
+            await model.archiveThreadRecord(threadId: archived.id)
+        }
+        let archiveRejected = await waitUntil {
+            archiveAttempts.value == 1
+        }
+        XCTAssertTrue(archiveRejected)
+        await waitForAllRecentReplacementToQueue(model)
+        model.homeFeedSyncCoordinator.updateConnection(.ready(version: "test"))
+        await archiveTask.value
+        await model.homeFeedSyncCoordinator.waitForTransportIdleForTesting()
         let reconstructed = await waitUntil {
-            favoritesSnapshots.value == 1
+            favoritesSnapshots.value == 2
                 && allRequests.value >= 1
                 && chatsRequests.value >= 1
         }
 
         XCTAssertTrue(reconstructed)
+        XCTAssertEqual(
+            favoritesSnapshots.value,
+            2,
+            "the identity-changing snapshot owns one trailing snapshot in the replacement epoch"
+        )
         XCTAssertEqual(archiveAttempts.value, 1)
         XCTAssertFalse(model.pendingThreadArchives.contains(threadId: archived.id))
         XCTAssertEqual(model.homeThreadListStore.rowMotion(threadId: archived.id), .stable)
@@ -1753,6 +2920,8 @@ final class GaryxHomeThreadListRefreshCommitTests: XCTestCase {
 
         let model = makeModel(session: session)
         model.lifecycleRetryDelayOverrideNanoseconds = 0
+        await settleInitialFavoritesSnapshot(model)
+        favoritesSnapshots.reset()
         let deleted = makeThread(id: visibleIds[0], title: "Delete candidate")
         let survivor = makeThread(id: visibleIds[1], title: "Survivor")
         model.seedThreadSummariesForTesting([deleted, survivor])
@@ -1760,7 +2929,17 @@ final class GaryxHomeThreadListRefreshCommitTests: XCTestCase {
         primeRecentFeed(model, ids: visibleIds, filter: .all)
         primeRecentFeed(model, ids: visibleIds, filter: .nonTask)
 
-        await model.deleteThread(deleted)
+        let deleteTask = Task { @MainActor in
+            await model.deleteThread(deleted)
+        }
+        let deleteRejected = await waitUntil {
+            deleteAttempts.value == 1
+        }
+        XCTAssertTrue(deleteRejected)
+        await waitForAllRecentReplacementToQueue(model)
+        model.homeFeedSyncCoordinator.updateConnection(.ready(version: "test"))
+        await deleteTask.value
+        await model.homeFeedSyncCoordinator.waitForTransportIdleForTesting()
         let reconstructed = await waitUntil {
             favoritesSnapshots.value == 1
                 && allRequests.value == 2
@@ -1845,7 +3024,7 @@ final class GaryxHomeThreadListRefreshCommitTests: XCTestCase {
 
         // The request is pending but has not changed the List. Its single
         // success commit must invalidate this pre-commit server page.
-        let staleTicket = try XCTUnwrap(model.recentThreadFeeds.requestRefresh(filter: .all))
+        let staleTicket = try issueRecentHead(model, filter: .all)
         archiveGate.signal()
         let archiveCommitted = await waitUntil {
             model.pendingThreadArchives.isCommitted(threadId: archived.id)
@@ -1863,17 +3042,22 @@ final class GaryxHomeThreadListRefreshCommitTests: XCTestCase {
             chatsMutationSequence + 1
         )
 
-        let completion = model.recentThreadFeeds.completeRefresh(
+        let completion = model.recentThreadFeeds.completeHead(
             staleTicket,
-            bundle: makeGaryxTestRecentRefreshBundle(
-                threadIds: [archived.id, survivor.id]
+            result: .page(
+                makeGaryxTestRecentRefreshBundle(
+                    threadIds: [archived.id, survivor.id]
+                )
             )
         )
-        XCTAssertEqual(completion, .abandonedLocalMutation)
+        XCTAssertEqual(completion.outcome, .abandonedLocalMutation)
+        model.homeFeedSyncCoordinator.runRecentFeedEffects(completion.effects)
         XCTAssertEqual(model.allRecentThreadIds, [survivor.id])
         XCTAssertNil(model.cachedThreadSummary(for: archived.id))
 
+        model.homeFeedSyncCoordinator.updateConnection(.ready(version: "test"))
         await archiveTask.value
+        await model.homeFeedSyncCoordinator.waitForTransportIdleForTesting()
         await model.homeProjectionGateway.waitForIdleForTesting()
         XCTAssertEqual(model.homeThreadListStore.rowMotion(threadId: archived.id), .stable)
         XCTAssertFalse(
@@ -2272,6 +3456,7 @@ final class GaryxHomeThreadListRefreshCommitTests: XCTestCase {
         let putGate = DispatchSemaphore(value: 0)
         let getGate = DispatchSemaphore(value: 0)
         let puts = GaryxLockedPinsPutRecorder()
+        let pinsGets = GaryxLockedCounter()
         let recent = try garyxRecentThreadsData(ids: ["thread-a", "thread-b"])
         let ack = try garyxPinsPageData(ids: ["thread-b", "thread-a"], revision: 12)
         let stale = try garyxPinsPageData(ids: ["thread-a", "thread-b"], revision: 11)
@@ -2289,9 +3474,11 @@ final class GaryxHomeThreadListRefreshCommitTests: XCTestCase {
                 return try garyxStubResponse(request, data: recent)
             }
             if request.httpMethod == "GET", path == "/api/thread-pins" {
-                staleGetStarted.fulfill()
-                guard getGate.wait(timeout: .now() + 5) == .success else {
-                    throw GaryxRefreshStubError.timedOut
+                if pinsGets.increment() == 1 {
+                    staleGetStarted.fulfill()
+                    guard getGate.wait(timeout: .now() + 5) == .success else {
+                        throw GaryxRefreshStubError.timedOut
+                    }
                 }
                 return try garyxStubResponse(request, data: stale)
             }
@@ -2311,8 +3498,9 @@ final class GaryxHomeThreadListRefreshCommitTests: XCTestCase {
         model.acceptPinnedOrderDrop()
         await fulfillment(of: [putStarted], timeout: 2)
 
+        model.connectionState = .ready(version: "test")
         let refresh = Task { @MainActor in
-            await model.refreshThreads(source: .backgroundLoop)
+            await model.requestHomeFeedRefresh(source: .backgroundLoop)
         }
         await fulfillment(of: [staleGetStarted], timeout: 2)
         putGate.signal()
@@ -2382,7 +3570,8 @@ final class GaryxHomeThreadListRefreshCommitTests: XCTestCase {
         model.acceptPinnedOrderDrop()
         await fulfillment(of: [firstPutStarted], timeout: 2)
 
-        await model.refreshThreads(source: .backgroundLoop)
+        model.connectionState = .ready(version: "test")
+        await model.requestHomeFeedRefresh(source: .backgroundLoop)
         XCTAssertEqual(model.homeThreadListStore.pinnedOrderState.highestObservedRevision, 12)
         XCTAssertEqual(puts.values.count, 1, "the high page cannot dispatch beside the old flight")
 
@@ -2448,7 +3637,8 @@ final class GaryxHomeThreadListRefreshCommitTests: XCTestCase {
         model.resetGatewayRuntimeState()
         model.gatewayURL = "http://new-gateway.example.test"
         model.loadGatewayScopedUserState(fallbackToLegacy: false)
-        await model.refreshThreads(source: .backgroundLoop)
+        model.connectionState = .ready(version: "test")
+        await model.requestHomeFeedRefresh(source: .backgroundLoop)
 
         XCTAssertEqual(model.homeThreadListStore.pinnedOrderState.highestObservedRevision, 0)
         XCTAssertEqual(model.homeThreadListStore.pinnedOrderState.presentedOrder, ["thread-new"])
@@ -2501,7 +3691,8 @@ final class GaryxHomeThreadListRefreshCommitTests: XCTestCase {
         model.unpinThread("thread-b")
         await fulfillment(of: [unpinStarted], timeout: 2)
 
-        await model.refreshThreads(source: .backgroundLoop)
+        model.connectionState = .ready(version: "test")
+        await model.requestHomeFeedRefresh(source: .backgroundLoop)
         XCTAssertEqual(model.homeThreadListStore.pinnedOrderState.presentedOrder, ["thread-a"])
         XCTAssertEqual(model.homeThreadListStore.pinnedOrderState.highestObservedRevision, 12)
 
@@ -2770,7 +3961,8 @@ final class GaryxHomeThreadListRefreshCommitTests: XCTestCase {
             )
         )
 
-        await model.refreshThreads(source: .backgroundLoop)
+        model.connectionState = .ready(version: "test")
+        await model.requestHomeFeedRefresh(source: .backgroundLoop)
         XCTAssertEqual(model.pinnedThreadIds, ["thread-b", "thread-a"])
         XCTAssertEqual(puts.values.count, 2)
     }
@@ -2902,12 +4094,13 @@ final class GaryxHomeThreadListRefreshCommitTests: XCTestCase {
         XCTAssertEqual(model.pinnedThreadIds, ["thread-b", "thread-a"])
         XCTAssertEqual(model.homeThreadListStore.pinnedOrderSyncStatusLabel, "Sync pending")
 
-        await model.refreshThreads(source: .backgroundLoop)
+        model.connectionState = .ready(version: "test")
+        await model.requestHomeFeedRefresh(source: .backgroundLoop)
         XCTAssertEqual(puts.values.count, 1)
         XCTAssertEqual(model.pinnedThreadIds, ["thread-b", "thread-a"])
         XCTAssertNotNil(model.homeThreadListStore.pinnedOrderState.outbox)
 
-        await model.refreshThreads(source: .userPullToRefresh)
+        await model.requestHomeFeedRefresh(source: .userPullToRefresh)
         let settled = await waitUntil {
             model.homeThreadListStore.pinnedOrderState.outbox == nil
         }
@@ -2973,7 +4166,8 @@ final class GaryxHomeThreadListRefreshCommitTests: XCTestCase {
         let restoredModel = makeModel(defaults: defaults, session: session)
         XCTAssertEqual(restoredModel.pinnedThreadIds, ["thread-b", "thread-a"])
         XCTAssertEqual(restoredModel.homeThreadListStore.pinnedOrderState.pendingSync, .ready)
-        await restoredModel.refreshThreads(source: .backgroundLoop)
+        restoredModel.connectionState = .ready(version: "test")
+        await restoredModel.requestHomeFeedRefresh(source: .backgroundLoop)
         let settled = await waitUntil {
             restoredModel.homeThreadListStore.pinnedOrderState.outbox == nil
         }
@@ -2986,6 +4180,819 @@ final class GaryxHomeThreadListRefreshCommitTests: XCTestCase {
         )
     }
 
+    func testScopeOwnerTrailsAutomaticHeadImmediatelyAfterLoadMore() async throws {
+        let loadMoreStarted = expectation(description: "load-more transport started")
+        let loadMoreGate = DispatchSemaphore(value: 0)
+        let loadMoreRequests = GaryxLockedCounter()
+        let headRequests = GaryxLockedCounter()
+        let session = makeStubSession { request in
+            let components = try XCTUnwrap(
+                URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)
+            )
+            switch (request.httpMethod, components.path) {
+            case ("GET", "/api/thread-summaries"):
+                return try garyxStubResponse(request, statusCode: 404, data: Data())
+            case ("GET", "/api/thread-favorites/snapshot"):
+                return try garyxStubResponse(
+                    request,
+                    data: try garyxFavoritesSnapshotData(ids: [])
+                )
+            case ("GET", "/api/thread-pins"):
+                return try garyxStubResponse(
+                    request,
+                    data: try garyxPinsPageData(ids: [], revision: 1)
+                )
+            case ("GET", "/api/recent-threads"):
+                let cursor = components.queryItems?.first { $0.name == "cursor" }?.value
+                if cursor != nil {
+                    if loadMoreRequests.increment() == 1 {
+                        loadMoreStarted.fulfill()
+                        guard loadMoreGate.wait(timeout: .now() + 5) == .success else {
+                            throw GaryxRefreshStubError.timedOut
+                        }
+                    }
+                    return try garyxStubResponse(
+                        request,
+                        data: try garyxRecentThreadsData(ids: ["thread-tail"])
+                    )
+                }
+                headRequests.increment()
+                return try garyxStubResponse(
+                    request,
+                    data: try garyxRecentThreadsData(ids: ["thread-head", "thread-seed"])
+                )
+            default:
+                return try garyxStubResponse(request, statusCode: 400, data: Data())
+            }
+        }
+        defer {
+            loadMoreGate.signal()
+            GaryxRecentThreadsURLProtocolStub.requestHandler = nil
+            session.invalidateAndCancel()
+        }
+
+        let model = makeModel(session: session)
+        await settleInitialFavoritesSnapshot(model)
+        let initial = try issueRecentHead(model, filter: .all)
+        XCTAssertEqual(
+            model.recentThreadFeeds.completeHead(
+                initial,
+                result: .page(
+                    makeGaryxTestRecentRefreshBundle(
+                        threadIds: ["thread-seed"],
+                        hasMore: true,
+                        nextCursor: "cursor-1"
+                    )
+                )
+            ).outcome,
+            .applied
+        )
+        let coordinator = installHomeFeedCoordinator(model)
+
+        let loadMore = Task { @MainActor in
+            await model.loadMoreThreads(trigger: .nearTail)
+        }
+        await fulfillment(of: [loadMoreStarted], timeout: 2)
+        coordinator.updateConnection(.ready(version: "test"))
+        let trailed = await waitUntil {
+            model.recentThreadFeeds.allFeed.pendingHeadRequest != nil
+        }
+        XCTAssertTrue(trailed)
+        XCTAssertEqual(headRequests.value, 0)
+
+        loadMoreGate.signal()
+        await loadMore.value
+        let converged = await waitUntil {
+            headRequests.value == 2
+                && model.recentThreadFeeds.allFeed.headPhase == .ready
+        }
+        XCTAssertTrue(converged)
+        XCTAssertEqual(
+            model.recentThreadFeeds.allFeed.orderedThreadIds,
+            ["thread-head", "thread-seed", "thread-tail"]
+        )
+        await stopHomeFeedTestModel(model)
+    }
+
+    func testUserPullDuringActiveHeadLeavesOneTrailingReplacement() async throws {
+        let firstHeadStarted = expectation(description: "first head transport started")
+        let firstHeadGate = DispatchSemaphore(value: 0)
+        let recentRequests = GaryxLockedCounter()
+        let session = makeStubSession { request in
+            let path = try XCTUnwrap(request.url?.path)
+            switch (request.httpMethod, path) {
+            case ("GET", "/api/thread-summaries"):
+                return try garyxStubResponse(request, statusCode: 404, data: Data())
+            case ("GET", "/api/thread-favorites/snapshot"):
+                return try garyxStubResponse(
+                    request,
+                    data: try garyxFavoritesSnapshotData(ids: [])
+                )
+            case ("GET", "/api/thread-pins"):
+                return try garyxStubResponse(
+                    request,
+                    data: try garyxPinsPageData(ids: [], revision: 1)
+                )
+            case ("GET", "/api/recent-threads"):
+                if recentRequests.increment() == 1 {
+                    firstHeadStarted.fulfill()
+                    guard firstHeadGate.wait(timeout: .now() + 5) == .success else {
+                        throw GaryxRefreshStubError.timedOut
+                    }
+                }
+                return try garyxStubResponse(
+                    request,
+                    data: try garyxRecentThreadsData(ids: ["thread-refreshed"])
+                )
+            default:
+                return try garyxStubResponse(request, statusCode: 400, data: Data())
+            }
+        }
+        defer {
+            firstHeadGate.signal()
+            GaryxRecentThreadsURLProtocolStub.requestHandler = nil
+            session.invalidateAndCancel()
+        }
+
+        let model = makeModel(session: session)
+        await settleInitialFavoritesSnapshot(model)
+        primeRecentFeed(model, ids: ["thread-cached"], filter: .all)
+        let coordinator = installHomeFeedCoordinator(model)
+        coordinator.updateConnection(.ready(version: "test"))
+        await fulfillment(of: [firstHeadStarted], timeout: 2)
+
+        let pull = Task { @MainActor in
+            await model.requestHomeFeedRefresh(source: .userPullToRefresh)
+        }
+        let trailed = await waitUntil {
+            model.recentThreadFeeds.allFeed.pendingHeadRequest?.source
+                == .userPullToRefresh
+        }
+        XCTAssertTrue(trailed)
+
+        firstHeadGate.signal()
+        await pull.value
+        await coordinator.waitForTransportIdleForTesting()
+        XCTAssertEqual(recentRequests.value, 4, "two complete head cycles must run")
+        XCTAssertEqual(model.recentThreadFeeds.allFeed.headPhase, .ready)
+        XCTAssertEqual(model.allRecentThreadIds, ["thread-refreshed"])
+        await stopHomeFeedTestModel(model)
+    }
+
+    func testBackgroundSuspendsIntentAndVisibilityPulseCannotKillOwner() async throws {
+        let recentRequests = GaryxLockedCounter()
+        let session = makeStubSession { request in
+            let path = try XCTUnwrap(request.url?.path)
+            switch (request.httpMethod, path) {
+            case ("GET", "/api/thread-summaries"):
+                return try garyxStubResponse(request, statusCode: 404, data: Data())
+            case ("GET", "/api/thread-favorites/snapshot"):
+                return try garyxStubResponse(
+                    request,
+                    data: try garyxFavoritesSnapshotData(ids: [])
+                )
+            case ("GET", "/api/thread-pins"):
+                return try garyxStubResponse(
+                    request,
+                    data: try garyxPinsPageData(ids: [], revision: 1)
+                )
+            case ("GET", "/api/recent-threads"):
+                recentRequests.increment()
+                return try garyxStubResponse(
+                    request,
+                    data: try garyxRecentThreadsData(ids: ["thread-foreground"])
+                )
+            default:
+                return try garyxStubResponse(request, statusCode: 400, data: Data())
+            }
+        }
+        defer {
+            GaryxRecentThreadsURLProtocolStub.requestHandler = nil
+            session.invalidateAndCancel()
+        }
+
+        let model = makeModel(session: session)
+        await settleInitialFavoritesSnapshot(model)
+        primeRecentFeed(model, ids: ["thread-cached"], filter: .all)
+        let coordinator = installHomeFeedCoordinator(model)
+        coordinator.updateSceneBackgrounded(true)
+        coordinator.updateHomeVisibility(false)
+        coordinator.updateHomeVisibility(true)
+        coordinator.updateConnection(.ready(version: "test"))
+
+        let intent = Task { @MainActor in
+            await model.requestHomeFeedRefresh(source: .userAction)
+        }
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(recentRequests.value, 0)
+        XCTAssertEqual(model.allRecentThreadIds, ["thread-cached"])
+        XCTAssertEqual(model.selectedRecentFeedPresentation.headPhase, .ready)
+        XCTAssertTrue(coordinator === model.homeFeedSyncCoordinator)
+
+        coordinator.updateSceneBackgrounded(false)
+        await intent.value
+        await coordinator.waitForTransportIdleForTesting()
+        XCTAssertEqual(recentRequests.value, 2)
+        XCTAssertEqual(
+            model.allRecentThreadIds,
+            ["thread-foreground", "thread-cached"]
+        )
+        XCTAssertTrue(coordinator === model.homeFeedSyncCoordinator)
+        await stopHomeFeedTestModel(model)
+    }
+
+    func testShortAndLongBackgroundClassesEachRefreshOnForeground() async throws {
+        let selectedRecentRequests = GaryxLockedCounter()
+        let session = makeStubSession { request in
+            let url = try XCTUnwrap(request.url)
+            switch (request.httpMethod, url.path) {
+            case ("GET", "/api/thread-summaries"):
+                return try garyxStubResponse(request, statusCode: 404, data: Data())
+            case ("GET", "/api/thread-favorites/snapshot"):
+                return try garyxStubResponse(
+                    request,
+                    data: try garyxFavoritesSnapshotData(ids: [])
+                )
+            case ("GET", "/api/thread-pins"):
+                return try garyxStubResponse(
+                    request,
+                    data: try garyxPinsPageData(ids: [], revision: 1)
+                )
+            case ("GET", "/api/recent-threads"):
+                let components = try XCTUnwrap(
+                    URLComponents(url: url, resolvingAgainstBaseURL: false)
+                )
+                let tasks = components.queryItems?
+                    .first(where: { $0.name == "tasks" })?
+                    .value
+                if tasks == GaryxRecentThreadFilter.all.tasksQueryValue {
+                    let requestIndex = selectedRecentRequests.increment()
+                    return try garyxStubResponse(
+                        request,
+                        data: try garyxRecentThreadsData(
+                            ids: ["thread-foreground-\(requestIndex)"]
+                        )
+                    )
+                }
+                return try garyxStubResponse(
+                    request,
+                    data: try garyxRecentThreadsData(ids: ["thread-chat"])
+                )
+            default:
+                // Foreground synchronization has independent auxiliary
+                // domains. Their failures do not own the Home feed contract.
+                return try garyxStubResponse(request, statusCode: 404, data: Data())
+            }
+        }
+        defer {
+            GaryxRecentThreadsURLProtocolStub.requestHandler = nil
+            session.invalidateAndCancel()
+        }
+
+        let model = makeModel(session: session)
+        model.connectionState = .ready(version: "test")
+        let initialSettled = await waitUntil {
+            model.recentThreadFeeds.allFeed.headPhase == .ready
+                && selectedRecentRequests.value > 0
+        }
+        XCTAssertTrue(initialSettled)
+        await model.homeFeedSyncCoordinator.waitForTransportIdleForTesting()
+        selectedRecentRequests.reset()
+
+        // Elapsed background duration is deliberately not an input to the
+        // foreground contract. Exercise both duration classes as two separate
+        // background -> active occurrences without a wall-clock sleep.
+        model.handleScenePhase(.background)
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(selectedRecentRequests.value, 0)
+        model.handleScenePhase(.active)
+        let shortSettled = await waitUntil {
+            selectedRecentRequests.value > 0
+                && model.recentThreadFeeds.allFeed.headPhase == .ready
+        }
+        XCTAssertTrue(shortSettled)
+        let requestsAfterShortBackground = selectedRecentRequests.value
+        XCTAssertEqual(
+            model.homeThreadListStore.presentationSnapshot.recentPlaceholder,
+            .none
+        )
+
+        model.handleScenePhase(.background)
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(
+            selectedRecentRequests.value,
+            requestsAfterShortBackground
+        )
+        model.handleScenePhase(.active)
+        let longSettled = await waitUntil {
+            selectedRecentRequests.value > requestsAfterShortBackground
+                && model.recentThreadFeeds.allFeed.headPhase == .ready
+        }
+        XCTAssertTrue(longSettled)
+        XCTAssertEqual(
+            model.homeThreadListStore.presentationSnapshot.recentPlaceholder,
+            .none
+        )
+        await model.sceneRefreshTask?.value
+        await stopHomeFeedTestModel(model)
+    }
+
+    func testImmediateDebtDowngradesToRetryAndDropsQueuedTransportAtDeadline() async throws {
+        let session = makeStubSession { request in
+            let path = try XCTUnwrap(request.url?.path)
+            if path == "/api/thread-favorites/snapshot" {
+                return try garyxStubResponse(
+                    request,
+                    statusCode: 500,
+                    data: Data(#"{"error":"offline"}"#.utf8)
+                )
+            }
+            return try garyxStubResponse(request, statusCode: 400, data: Data())
+        }
+        defer {
+            GaryxRecentThreadsURLProtocolStub.requestHandler = nil
+            session.invalidateAndCancel()
+        }
+
+        let model = makeModel(session: session)
+        await settleInitialFavoritesSnapshot(model)
+        let coordinator = installHomeFeedCoordinator(
+            model,
+            initialEffects: [
+                .requestHead(
+                    GaryxRecentHeadRequest(
+                        filter: .all,
+                        source: .userAction,
+                        forceReplacement: true
+                    )
+                ),
+            ],
+            immediateDemandTimeout: 0.05
+        )
+
+        let downgraded = await waitUntil {
+            model.recentThreadFeeds.allFeed.headPhase
+                == .primingOwed(.supersededByReset, .userAction)
+        }
+        XCTAssertTrue(downgraded)
+        XCTAssertTrue(model.selectedRecentFeedPresentation.headFailure)
+        XCTAssertFalse(model.selectedRecentFeedPresentation.showsInitialSkeleton)
+        XCTAssertFalse(coordinator.hasQueuedHeadRequestForTesting(.all))
+        XCTAssertNil(model.recentThreadFeeds.allFeed.headPhase.activeAttempt)
+        await stopHomeFeedTestModel(model)
+    }
+
+    func testThreeSecondColdHeadKeepsAttemptProofUntilRowsArrive() async throws {
+        let headStarted = expectation(description: "slow head transport started")
+        let headGate = DispatchSemaphore(value: 0)
+        let recentRequests = GaryxLockedCounter()
+        let session = makeStubSession { request in
+            let path = try XCTUnwrap(request.url?.path)
+            switch (request.httpMethod, path) {
+            case ("GET", "/api/thread-summaries"):
+                return try garyxStubResponse(request, statusCode: 404, data: Data())
+            case ("GET", "/api/thread-favorites/snapshot"):
+                return try garyxStubResponse(
+                    request,
+                    data: try garyxFavoritesSnapshotData(ids: [])
+                )
+            case ("GET", "/api/thread-pins"):
+                return try garyxStubResponse(
+                    request,
+                    data: try garyxPinsPageData(ids: [], revision: 1)
+                )
+            case ("GET", "/api/recent-threads"):
+                if recentRequests.increment() == 1 {
+                    headStarted.fulfill()
+                    guard headGate.wait(timeout: .now() + 5) == .success else {
+                        throw GaryxRefreshStubError.timedOut
+                    }
+                }
+                return try garyxStubResponse(
+                    request,
+                    data: try garyxRecentThreadsData(ids: ["thread-slow"])
+                )
+            default:
+                return try garyxStubResponse(request, statusCode: 400, data: Data())
+            }
+        }
+        defer {
+            headGate.signal()
+            GaryxRecentThreadsURLProtocolStub.requestHandler = nil
+            session.invalidateAndCancel()
+        }
+
+        let model = makeModel(session: session)
+        await settleInitialFavoritesSnapshot(model)
+        let coordinator = installHomeFeedCoordinator(
+            model,
+            initialEffects: [
+                .requestHead(
+                    GaryxRecentHeadRequest(
+                        filter: .all,
+                        source: .userAction,
+                        forceReplacement: true
+                    )
+                ),
+            ]
+        )
+        coordinator.updateConnection(.ready(version: "test"))
+        await fulfillment(of: [headStarted], timeout: 2)
+        XCTAssertNotNil(model.recentThreadFeeds.allFeed.headPhase.activeAttempt)
+        XCTAssertTrue(model.selectedRecentFeedPresentation.showsInitialSkeleton)
+
+        try await Task.sleep(nanoseconds: 3_000_000_000)
+        XCTAssertNotNil(model.recentThreadFeeds.allFeed.headPhase.activeAttempt)
+        XCTAssertTrue(model.selectedRecentFeedPresentation.showsInitialSkeleton)
+
+        headGate.signal()
+        let converged = await waitUntil {
+            model.recentThreadFeeds.allFeed.headPhase == .ready
+                && model.allRecentThreadIds == ["thread-slow"]
+        }
+        XCTAssertTrue(converged)
+        XCTAssertEqual(recentRequests.value, 2)
+        await stopHomeFeedTestModel(model)
+    }
+
+    func testGatewayScopeRebuildCancelsOldOwnerAndRejectsLateRows() async throws {
+        let suiteName = "GaryxHomeFeedScopeOwnerTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        defaults.set(
+            "http://gateway-a.example.test",
+            forKey: GaryxMobileSettingsKeys.gatewayUrl
+        )
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let oldHeadStarted = expectation(description: "gateway A head started")
+        let oldHeadGate = DispatchSemaphore(value: 0)
+        let oldRequests = GaryxLockedCounter()
+        let newRequests = GaryxLockedCounter()
+        let session = makeStubSession { request in
+            let url = try XCTUnwrap(request.url)
+            switch (request.httpMethod, url.path) {
+            case ("GET", "/api/thread-summaries"):
+                return try garyxStubResponse(request, statusCode: 404, data: Data())
+            case ("GET", "/api/thread-favorites/snapshot"):
+                return try garyxStubResponse(
+                    request,
+                    data: try garyxFavoritesSnapshotData(ids: [])
+                )
+            case ("GET", "/api/thread-pins"):
+                return try garyxStubResponse(
+                    request,
+                    data: try garyxPinsPageData(ids: [], revision: 1)
+                )
+            case ("GET", "/api/recent-threads") where url.host == "gateway-a.example.test":
+                if oldRequests.increment() == 1 {
+                    oldHeadStarted.fulfill()
+                    guard oldHeadGate.wait(timeout: .now() + 5) == .success else {
+                        throw GaryxRefreshStubError.timedOut
+                    }
+                }
+                return try garyxStubResponse(
+                    request,
+                    data: try garyxRecentThreadsData(ids: ["thread-from-a"])
+                )
+            case ("GET", "/api/recent-threads") where url.host == "gateway-b.example.test":
+                newRequests.increment()
+                return try garyxStubResponse(
+                    request,
+                    data: try garyxRecentThreadsData(ids: ["thread-from-b"])
+                )
+            default:
+                return try garyxStubResponse(request, statusCode: 400, data: Data())
+            }
+        }
+        defer {
+            oldHeadGate.signal()
+            GaryxRecentThreadsURLProtocolStub.requestHandler = nil
+            session.invalidateAndCancel()
+        }
+
+        let model = makeModel(defaults: defaults, session: session)
+        await settleInitialFavoritesSnapshot(model)
+        let oldCoordinator = model.homeFeedSyncCoordinator
+        model.connectionState = .ready(version: "gateway-a")
+        await fulfillment(of: [oldHeadStarted], timeout: 2)
+
+        model.resetGatewayRuntimeState()
+        model.gatewayURL = "http://gateway-b.example.test"
+        model.loadGatewayScopedUserState(fallbackToLegacy: false)
+        let newCoordinator = model.homeFeedSyncCoordinator
+        XCTAssertFalse(oldCoordinator === newCoordinator)
+        model.connectionState = .ready(version: "gateway-b")
+        let newScopeConverged = await waitUntil {
+            model.allRecentThreadIds == ["thread-from-b"]
+                && model.recentThreadFeeds.allFeed.headPhase == .ready
+        }
+        XCTAssertTrue(newScopeConverged)
+        XCTAssertEqual(newRequests.value, 2)
+
+        oldHeadGate.signal()
+        await oldCoordinator.waitForTransportIdleForTesting()
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(model.allRecentThreadIds, ["thread-from-b"])
+        XCTAssertTrue(newCoordinator === model.homeFeedSyncCoordinator)
+        await stopHomeFeedTestModel(model)
+    }
+
+    func testScopeOwnerQueuesFavoritesUntilConnectionIsReady() async throws {
+        let favoritesRequests = GaryxLockedCounter()
+        let selectedRecentRequests = GaryxLockedCounter()
+        let session = makeStubSession { request in
+            let url = try XCTUnwrap(request.url)
+            let path = url.path
+            switch (request.httpMethod, path) {
+            case ("GET", "/api/thread-summaries"):
+                return try garyxStubResponse(request, statusCode: 404, data: Data())
+            case ("GET", "/api/thread-favorites/snapshot"):
+                favoritesRequests.increment()
+                return try garyxStubResponse(
+                    request,
+                    data: try garyxFavoritesSnapshotData(ids: [])
+                )
+            case ("GET", "/api/thread-pins"):
+                return try garyxStubResponse(
+                    request,
+                    data: try garyxPinsPageData(ids: [], revision: 1)
+                )
+            case ("GET", "/api/recent-threads"):
+                let components = try XCTUnwrap(
+                    URLComponents(url: url, resolvingAgainstBaseURL: false)
+                )
+                if components.queryItems?
+                    .first(where: { $0.name == "tasks" })?
+                    .value == GaryxRecentThreadFilter.all.tasksQueryValue {
+                    selectedRecentRequests.increment()
+                }
+                return try garyxStubResponse(
+                    request,
+                    data: try garyxRecentThreadsData(ids: [])
+                )
+            default:
+                return try garyxStubResponse(request, statusCode: 400, data: Data())
+            }
+        }
+        defer {
+            GaryxRecentThreadsURLProtocolStub.requestHandler = nil
+            session.invalidateAndCancel()
+        }
+
+        let model = makeModel(session: session)
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(favoritesRequests.value, 0)
+        XCTAssertEqual(selectedRecentRequests.value, 0)
+        XCTAssertNotNil(model.threadFavoritesState.headPhase.activeAttempt)
+        XCTAssertNotNil(model.threadFavoritesState.activeSnapshotTicket)
+
+        // Reproduce root-task / scene-phase connect overlap plus the stale
+        // post-ready guard. The prime obligation belongs to the scope owner,
+        // so these caller transitions can only wake it, never consume it.
+        model.connectionState = .checking
+        model.connectionState = .ready(version: "first")
+        model.connectionState = .checking
+        model.connectionState = .ready(version: "second")
+        let settled = await waitUntil {
+            favoritesRequests.value == 1
+                && model.threadFavoritesState.headPhase == .ready
+                && selectedRecentRequests.value == 2
+                && model.recentThreadFeeds.allFeed.headPhase == .ready
+        }
+        XCTAssertTrue(settled)
+        await model.homeFeedSyncCoordinator.waitForTransportIdleForTesting()
+        XCTAssertEqual(favoritesRequests.value, 1)
+        XCTAssertEqual(model.recentThreadFeeds.allFeed.refreshCycle, 1)
+        XCTAssertEqual(selectedRecentRequests.value, 2)
+        await stopHomeFeedTestModel(model)
+    }
+
+    func testStalePostReadyConnectGuardCannotConsumeHomePrime() async throws {
+        let agentRefreshStarted = expectation(
+            description: "connect reached its post-ready agent refresh"
+        )
+        let agentRefreshGate = DispatchSemaphore(value: 0)
+        let agentRefreshRequests = GaryxLockedCounter()
+        let allRecentRequests = GaryxLockedCounter()
+        let session = makeStubSession { request in
+            let url = try XCTUnwrap(request.url)
+            switch (request.httpMethod, url.path) {
+            case ("GET", "/api/status"):
+                return try garyxStubResponse(
+                    request,
+                    data: Data(#"{"status":"ok","version":"test"}"#.utf8)
+                )
+            case ("GET", "/api/chat/health"):
+                return try garyxStubResponse(
+                    request,
+                    data: Data(
+                        #"{"status":"ok","channel":"api","bridge_ready":true}"#.utf8
+                    )
+                )
+            case ("GET", "/api/custom-agents"):
+                if agentRefreshRequests.increment() == 1 {
+                    agentRefreshStarted.fulfill()
+                    guard agentRefreshGate.wait(timeout: .now() + 5) == .success else {
+                        throw GaryxRefreshStubError.timedOut
+                    }
+                }
+                return try garyxStubResponse(
+                    request,
+                    data: Data(#"{"agents":[]}"#.utf8)
+                )
+            case ("GET", "/api/thread-summaries"):
+                return try garyxStubResponse(request, statusCode: 404, data: Data())
+            case ("GET", "/api/thread-favorites/snapshot"):
+                return try garyxStubResponse(
+                    request,
+                    data: try garyxFavoritesSnapshotData(ids: [])
+                )
+            case ("GET", "/api/thread-pins"):
+                return try garyxStubResponse(
+                    request,
+                    data: try garyxPinsPageData(ids: [], revision: 1)
+                )
+            case ("GET", "/api/recent-threads"):
+                let components = try XCTUnwrap(
+                    URLComponents(url: url, resolvingAgainstBaseURL: false)
+                )
+                if components.queryItems?
+                    .first(where: { $0.name == "tasks" })?
+                    .value == GaryxRecentThreadFilter.all.tasksQueryValue {
+                    allRecentRequests.increment()
+                }
+                return try garyxStubResponse(
+                    request,
+                    data: try garyxRecentThreadsData(ids: ["thread-ready-owner"])
+                )
+            default:
+                return try garyxStubResponse(request, statusCode: 404, data: Data())
+            }
+        }
+        defer {
+            agentRefreshGate.signal()
+            GaryxRecentThreadsURLProtocolStub.requestHandler = nil
+            session.invalidateAndCancel()
+        }
+
+        let model = makeModel(session: session)
+        let connect = Task { @MainActor in
+            await model.connectAndRefresh()
+        }
+        await fulfillment(of: [agentRefreshStarted], timeout: 2)
+        guard case .ready = model.connectionState else {
+            return XCTFail("connect must publish ready before the stale post-ready guard")
+        }
+
+        let successorRequestId = UUID()
+        model.connectRefreshRequestId = successorRequestId
+        agentRefreshGate.signal()
+        await connect.value
+
+        let converged = await waitUntil {
+            model.recentThreadFeeds.allFeed.headPhase == .ready
+                && model.allRecentThreadIds == ["thread-ready-owner"]
+        }
+        XCTAssertTrue(converged)
+        await model.homeFeedSyncCoordinator.waitForTransportIdleForTesting()
+        XCTAssertEqual(allRecentRequests.value, 2)
+        XCTAssertEqual(
+            model.connectRefreshRequestId,
+            successorRequestId,
+            "the stale connect returned at its guard instead of clearing its successor"
+        )
+        await stopHomeFeedTestModel(model)
+    }
+
+    func testForegroundDuringColdConnectLeavesPrimeOwnedUntilReady() async throws {
+        let statusStarted = expectation(description: "cold connect status started")
+        let statusGate = DispatchSemaphore(value: 0)
+        let allRecentRequests = GaryxLockedCounter()
+        let session = makeStubSession { request in
+            let url = try XCTUnwrap(request.url)
+            switch (request.httpMethod, url.path) {
+            case ("GET", "/api/status"):
+                statusStarted.fulfill()
+                guard statusGate.wait(timeout: .now() + 5) == .success else {
+                    throw GaryxRefreshStubError.timedOut
+                }
+                return try garyxStubResponse(
+                    request,
+                    data: Data(#"{"status":"ok","version":"test"}"#.utf8)
+                )
+            case ("GET", "/api/chat/health"):
+                return try garyxStubResponse(
+                    request,
+                    data: Data(
+                        #"{"status":"ok","channel":"api","bridge_ready":true}"#.utf8
+                    )
+                )
+            case ("GET", "/api/custom-agents"):
+                return try garyxStubResponse(
+                    request,
+                    data: Data(#"{"agents":[]}"#.utf8)
+                )
+            case ("GET", "/api/thread-summaries"):
+                return try garyxStubResponse(request, statusCode: 404, data: Data())
+            case ("GET", "/api/thread-favorites/snapshot"):
+                return try garyxStubResponse(
+                    request,
+                    data: try garyxFavoritesSnapshotData(ids: [])
+                )
+            case ("GET", "/api/thread-pins"):
+                return try garyxStubResponse(
+                    request,
+                    data: try garyxPinsPageData(ids: [], revision: 1)
+                )
+            case ("GET", "/api/recent-threads"):
+                let components = try XCTUnwrap(
+                    URLComponents(url: url, resolvingAgainstBaseURL: false)
+                )
+                if components.queryItems?
+                    .first(where: { $0.name == "tasks" })?
+                    .value == GaryxRecentThreadFilter.all.tasksQueryValue {
+                    allRecentRequests.increment()
+                }
+                return try garyxStubResponse(
+                    request,
+                    data: try garyxRecentThreadsData(ids: ["thread-after-connect"])
+                )
+            default:
+                return try garyxStubResponse(request, statusCode: 404, data: Data())
+            }
+        }
+        defer {
+            statusGate.signal()
+            GaryxRecentThreadsURLProtocolStub.requestHandler = nil
+            session.invalidateAndCancel()
+        }
+
+        let model = makeModel(session: session)
+        model.handleScenePhase(.background)
+        let connect = Task { @MainActor in
+            await model.connectAndRefresh()
+        }
+        await fulfillment(of: [statusStarted], timeout: 2)
+        guard case .checking = model.connectionState else {
+            return XCTFail("the foreground collision must occur during the cold connect")
+        }
+        let ownerAtCollision = model.homeFeedSyncCoordinator
+
+        model.handleScenePhase(.active)
+        XCTAssertTrue(ownerAtCollision === model.homeFeedSyncCoordinator)
+        XCTAssertEqual(allRecentRequests.value, 0)
+        XCTAssertTrue(
+            model.recentThreadFeeds.allFeed.headPhase.owesImmediateRequest,
+            "foregrounding while connect is checking must preserve the initial obligation"
+        )
+
+        statusGate.signal()
+        await connect.value
+        await model.sceneRefreshTask?.value
+        let converged = await waitUntil {
+            model.recentThreadFeeds.allFeed.headPhase == .ready
+                && model.allRecentThreadIds == ["thread-after-connect"]
+        }
+        XCTAssertTrue(converged)
+        await model.homeFeedSyncCoordinator.waitForTransportIdleForTesting()
+        XCTAssertEqual(allRecentRequests.value, 2)
+        XCTAssertTrue(ownerAtCollision === model.homeFeedSyncCoordinator)
+        await stopHomeFeedTestModel(model)
+    }
+
+    func testUnreachableGatewayPresentsSetupInsteadOfHomeSkeleton() async throws {
+        let session = makeStubSession { request in
+            let path = try XCTUnwrap(request.url?.path)
+            if path == "/api/status" {
+                throw URLError(.cannotConnectToHost)
+            }
+            return try garyxStubResponse(request, statusCode: 404, data: Data())
+        }
+        defer {
+            GaryxRecentThreadsURLProtocolStub.requestHandler = nil
+            session.invalidateAndCancel()
+        }
+
+        let model = makeModel(session: session)
+        await model.connectAndRefresh()
+
+        guard case .failed = model.connectionState else {
+            return XCTFail("an unreachable gateway must settle connectionState to failed")
+        }
+        XCTAssertEqual(
+            model.homeObservationStore.rootSurface,
+            .gatewaySetup,
+            "the root branch must hide the unprimed Home feed behind connection setup"
+        )
+        XCTAssertEqual(
+            model.homeThreadListStore.presentationSnapshot.recentPlaceholder,
+            .loadingSkeleton(rowCount: 6),
+            "the Home reducer may retain its owned bootstrap debt, but it is not the visible root"
+        )
+        await stopHomeFeedTestModel(model)
+    }
+
     private func primePinnedModel(
         _ model: GaryxMobileModel,
         ids: [String],
@@ -2994,6 +5001,32 @@ final class GaryxHomeThreadListRefreshCommitTests: XCTestCase {
         model.seedThreadSummariesForTesting(ids.map { makeThread(id: $0, title: $0) })
         model.applyPinnedThreadIds(ids, revision: revision)
         primeRecentFeed(model, ids: ids, filter: .all)
+    }
+
+    private func installHomeFeedCoordinator(
+        _ model: GaryxMobileModel,
+        initialEffects: [GaryxRecentFeedEffect] = [],
+        immediateDemandTimeout: TimeInterval = GaryxMobileModel.homeFeedImmediateDemandTimeout
+    ) -> GaryxHomeFeedSyncCoordinator {
+        model.homeFeedSyncCoordinator.deactivateScope()
+        let coordinator = GaryxHomeFeedSyncCoordinator(
+            initialEffects: initialEffects,
+            immediateDemandTimeout: immediateDemandTimeout,
+            scopeToken: model.gatewayRequestToken
+        )
+        model.homeFeedSyncCoordinator = coordinator
+        coordinator.attach(model)
+        coordinator.updateHomeVisibility(model.isHomeVisible)
+        return coordinator
+    }
+
+    private func stopHomeFeedTestModel(_ model: GaryxMobileModel) async {
+        let favoritesTask = model.threadFavoritesSnapshotTask
+        model.homeFeedSyncCoordinator.deactivateScope()
+        model.cancelThreadFavoritesSnapshotTransport()
+        favoritesTask?.cancel()
+        await favoritesTask?.value
+        await model.homeFeedSyncCoordinator.waitForTransportIdleForTesting()
     }
 
     private func makeModel(
@@ -3023,7 +5056,36 @@ final class GaryxHomeThreadListRefreshCommitTests: XCTestCase {
                 )
             }
         }
-        return GaryxMobileModel(defaults: resolvedDefaults, gatewayClientFactory: clientFactory)
+        let model = GaryxMobileModel(
+            defaults: resolvedDefaults,
+            gatewayClientFactory: clientFactory
+        )
+        homeFeedTestModels.append(model)
+        return model
+    }
+
+    private func settleInitialFavoritesSnapshot(_ model: GaryxMobileModel) async {
+        if let ticket = model.threadFavoritesState.activeSnapshotTicket {
+            model.runThreadFavoritesEffects(
+                model.threadFavoritesProvider.failSnapshot(ticket: ticket)
+            )
+        }
+        while let task = model.threadFavoritesSnapshotTask {
+            await task.value
+        }
+        let settled = await waitUntil {
+            let phase = model.threadFavoritesState.headPhase
+            return phase.activeAttempt == nil && !phase.owesImmediateRequest
+        }
+        XCTAssertTrue(settled, "the scope-owned Favorites bootstrap must reach a terminal phase")
+    }
+
+    private func waitForAllRecentReplacementToQueue(_ model: GaryxMobileModel) async {
+        let queued = await waitUntil {
+            model.homeFeedSyncCoordinator.hasQueuedHeadRequestForTesting(.all)
+                && model.homeFeedSyncCoordinator.hasQueuedHeadRequestForTesting(.nonTask)
+        }
+        XCTAssertTrue(queued, "both Recent replacement effects must reach the scope owner")
     }
 
     private func makeThread(id: String, title: String) -> GaryxThreadSummary {
@@ -3049,13 +5111,37 @@ final class GaryxHomeThreadListRefreshCommitTests: XCTestCase {
         ids: [String],
         filter: GaryxRecentThreadFilter
     ) {
-        var feeds = model.recentThreadFeeds
-        let ticket = feeds.requestRefresh(filter: filter)!
-        feeds.completeRefresh(
+        let ticket = try! issueRecentHead(model, filter: filter)
+        _ = model.recentThreadFeeds.completeHead(
             ticket,
-            bundle: makeGaryxTestRecentRefreshBundle(threadIds: ids)
+            result: .page(
+                makeGaryxTestRecentRefreshBundle(threadIds: ids)
+            )
         )
-        model.recentThreadFeeds = feeds
+    }
+
+    private func issueRecentHead(
+        _ model: GaryxMobileModel,
+        filter: GaryxRecentThreadFilter? = nil
+    ) throws -> GaryxRecentThreadRefreshTicket {
+        let effects = model.recentThreadFeeds.requestHeadEffects(
+            filter: filter,
+            source: .userAction
+        )
+        var queuedRequest: GaryxRecentHeadRequest?
+        for effect in effects {
+            guard case .requestHead(let candidate) = effect else { continue }
+            queuedRequest = candidate
+            break
+        }
+        let request = try XCTUnwrap(queuedRequest)
+        return try XCTUnwrap(
+            model.recentThreadFeeds.beginHeadRequest(
+                request,
+                gatewayScope: model.threadFavoritesState.gatewayScope,
+                runtimeEpoch: model.threadFavoritesState.runtimeEpoch
+            )
+        )
     }
 
     /// Decodes the same wire shape the gateway returns so the commit sees a
@@ -3159,7 +5245,9 @@ private func garyxPinsPageData(ids: [String], revision: Int64) throws -> Data {
 
 private func garyxRecentThreadsData(
     ids: [String],
-    storeIncarnationId: String = "11111111-1111-4111-8111-111111111111"
+    storeIncarnationId: String = "11111111-1111-4111-8111-111111111111",
+    hasMore: Bool = false,
+    nextCursor: String? = nil
 ) throws -> Data {
     try JSONSerialization.data(
         withJSONObject: [
@@ -3175,8 +5263,8 @@ private func garyxRecentThreadsData(
             "count": ids.count,
             "limit": 30,
             "total": ids.count,
-            "has_more": false,
-            "next_cursor": NSNull(),
+            "has_more": hasMore,
+            "next_cursor": nextCursor ?? NSNull(),
             "store_incarnation_id": storeIncarnationId,
             "server_boot_id": "22222222-2222-4222-8222-222222222222",
         ]
@@ -3213,6 +5301,95 @@ private func garyxFavoritesSnapshotData(
                 "total": rows.count,
                 "truncated": false,
             ],
+        ]
+    )
+}
+
+/// Sanitized envelopes captured from the same SQLite store immediately before
+/// and after `garyx gateway rotate-store-incarnation`. User rows are replaced
+/// with public synthetic values; the wire keys and identity pairs are exact.
+private struct GaryxTask2783CapturedGeneration {
+    var storeIncarnationId: String
+    var serverBootId: String
+
+    static let beforeRotation = Self(
+        storeIncarnationId: "40bb509a-1ba9-4367-9b02-185b0f225d14",
+        serverBootId: "1b117b9d-ad35-4a9c-af1b-4a17de0420ef"
+    )
+    static let afterRotation = Self(
+        storeIncarnationId: "520bea32-bc35-4ba2-a232-d875bd0f30fb",
+        serverBootId: "7c0ced65-bc8f-46df-9324-9af560562cf3"
+    )
+}
+
+private func garyxTask2783ThreadSummariesCaptureData(
+    generation: GaryxTask2783CapturedGeneration
+) throws -> Data {
+    try JSONSerialization.data(
+        withJSONObject: [
+            "store_incarnation_id": generation.storeIncarnationId,
+            "server_boot_id": generation.serverBootId,
+            "threads": [],
+            "has_more": false,
+            "next_cursor": NSNull(),
+        ]
+    )
+}
+
+private func garyxTask2783RecentThreadsCaptureData(
+    generation: GaryxTask2783CapturedGeneration
+) throws -> Data {
+    let threadId = "thread::1000000001"
+    return try JSONSerialization.data(
+        withJSONObject: [
+            "threads": [[
+                "active_run_id": NSNull(),
+                "activity_seq": 1,
+                "agent_id": "test-agent",
+                "last_active_at": "2026-07-27T00:00:00Z",
+                "last_message_preview": "Synthetic capture row",
+                "message_count": 1,
+                "provider_type": "codex_app_server",
+                "recent_run_id": NSNull(),
+                "recorded_at": "2026-07-27T00:00:00Z",
+                "root_workspace_path": "/workspace/test",
+                "run_state": NSNull(),
+                "thread_id": threadId,
+                "thread_runtime": NSNull(),
+                "thread_type": "task",
+                "title": "Test Thread",
+                "updated_at": "2026-07-27T00:00:00Z",
+                "workspace_dir": "/workspace/test",
+                "workspace_origin": "explicit",
+            ]],
+            "count": 1,
+            "limit": 30,
+            "total": 1,
+            "has_more": false,
+            "next_cursor": NSNull(),
+            "store_incarnation_id": generation.storeIncarnationId,
+            "server_boot_id": generation.serverBootId,
+        ]
+    )
+}
+
+private func garyxTask2783FavoritesSnapshotCaptureData(
+    generation: GaryxTask2783CapturedGeneration
+) throws -> Data {
+    try JSONSerialization.data(
+        withJSONObject: [
+            "store_incarnation_id": generation.storeIncarnationId,
+            "server_boot_id": generation.serverBootId,
+            "revision": 29,
+            "thread_ids": [],
+            "favorites": [],
+            "recent": [
+                "threads": [],
+                "total": 0,
+                "truncated": false,
+            ],
+            "summaries": [],
+            "summaries_truncated": false,
         ]
     )
 }
@@ -3282,6 +5459,13 @@ private final class GaryxLockedCounter: @unchecked Sendable {
         defer { lock.unlock() }
         return count
     }
+
+    func reset() {
+        lock.lock()
+        count = 0
+        lock.unlock()
+    }
+
 }
 
 private struct GaryxRecordedLifecycleRequest: Equatable {

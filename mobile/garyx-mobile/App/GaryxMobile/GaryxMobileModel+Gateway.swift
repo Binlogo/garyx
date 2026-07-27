@@ -50,6 +50,7 @@ extension GaryxMobileModel {
             scope: scope,
             activationSequence: nextGatewayActivationSequence
         )
+        rebuildHomeFeedSyncCoordinator(for: gatewayRequestToken)
         refreshHomeThreadSearchRowsStore()
         let key = activeComposerPayloadKey
         Task { [weak self] in
@@ -59,6 +60,7 @@ extension GaryxMobileModel {
     }
 
     func exitCurrentGatewayScope(_ exit: GaryxGatewayScopeExit) {
+        homeFeedSyncCoordinator.deactivateScope()
         let scope = gatewayRequestToken.scope
         switch exit {
         case .suspend:
@@ -129,7 +131,9 @@ extension GaryxMobileModel {
         if threadFavoritesState.gatewayScope != favoritesScope {
             cancelThreadFavoritesSnapshotTransport()
         }
-        _ = threadFavoritesProvider.replaceGatewayScope(favoritesScope)
+        runThreadFavoritesEffects(
+            threadFavoritesProvider.replaceGatewayScope(favoritesScope)
+        )
         catalogSnapshotRestored = false
         let workspaceKey = scopedSettingsKey(GaryxMobileSettingsKeys.newThreadWorkspaceSelection)
         let workspaceModeKey = scopedSettingsKey(GaryxMobileSettingsKeys.newThreadWorkspaceMode)
@@ -406,6 +410,9 @@ extension GaryxMobileModel {
     func handleScenePhase(_ phase: ScenePhase) {
         switch phase {
         case .active:
+            homeFeedSceneIsBackgrounded = false
+            homeFeedSyncCoordinator.updateSceneBackgrounded(false)
+            homeFeedSyncCoordinator.updateHomeVisibility(isHomeVisible)
             productionRouteStore.sceneDidBecomeActive()
             composerPayloadCoordinator.sceneDidBecomeActive()
             capsulePreviewSceneSignal.publish(.active)
@@ -436,7 +443,10 @@ extension GaryxMobileModel {
                 startBackgroundCommittedRunReconcileLoop()
                 startSelectedThreadReconcileLoop()
                 async let agentTargetsRefresh: Void = refreshAgentTargets()
-                await refreshThreads(source: .userAction, forceReplacement: true)
+                await requestHomeFeedRefresh(
+                    source: .userAction,
+                    forceReplacement: true
+                )
                 await agentTargetsRefresh
                 guard !Task.isCancelled else { return }
                 if plan.resyncOpenThread, let selectedThreadId, selectedThread?.id == selectedThreadId {
@@ -458,6 +468,9 @@ extension GaryxMobileModel {
             composerPayloadCoordinator.cancelPendingInput(.sceneInactive)
             capsulePreviewSceneSignal.publish(.inactive)
         case .background:
+            homeFeedSceneIsBackgrounded = true
+            homeFeedSyncCoordinator.updateHomeVisibility(isHomeVisible)
+            homeFeedSyncCoordinator.updateSceneBackgrounded(true)
             forceTerminalGlobalRevealInteractions(.sceneInactive)
             productionRouteStore.sceneDidBecomeInactive()
             composerPayloadCoordinator.sceneDidBecomeInactive()
@@ -577,9 +590,7 @@ extension GaryxMobileModel {
             guard isCurrentConnectRefresh(requestId, runtimeGeneration: runtimeGeneration, scopeId: gatewayScopeId) else {
                 return
             }
-            async let agentTargetsRefresh: Void = refreshAgentTargets()
-            await refreshThreads(source: .userAction)
-            await agentTargetsRefresh
+            await refreshAgentTargets()
             await refreshRemoteState()
             guard isCurrentConnectRefresh(requestId, runtimeGeneration: runtimeGeneration, scopeId: gatewayScopeId) else {
                 return

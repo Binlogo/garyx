@@ -9,14 +9,16 @@ extension GaryxMobileModel {
 
     var selectedRecentFeedPresentation: GaryxRecentThreadFeedPresentation {
         guard recentThreadFeeds.selectedFilter == .favorites else {
-            return recentThreadFeeds.selectedPresentation
+            switch recentThreadFeeds.selectedFilter {
+            case .all:
+                return recentThreadFeeds.allFeed.presentation
+            case .nonTask:
+                return recentThreadFeeds.nonTaskFeed.presentation
+            case .favorites:
+                preconditionFailure("handled above")
+            }
         }
-        return GaryxRecentThreadFeedPresentation(
-            isPrimed: threadFavoritesProvider.snapshot.isPrimed,
-            isRefreshingHead: threadFavoritesProvider.snapshot.isRefreshing,
-            headFailure: threadFavoritesProvider.snapshot.headFailure,
-            footerState: .hidden
-        )
+        return threadFavoritesState.presentation
     }
 
     func threadIsFavorite(_ threadId: String) -> Bool {
@@ -47,9 +49,7 @@ extension GaryxMobileModel {
 
     func refreshThreadFavoritesSnapshotAndWait() async {
         await requestThreadFavoritesSnapshot()
-        while let task = threadFavoritesSnapshotTask {
-            await task.value
-        }
+        await homeFeedSyncCoordinator.waitForFavoritesConvergence()
     }
 
     private func requestThreadFavoritesSnapshot() async {
@@ -82,7 +82,9 @@ extension GaryxMobileModel {
         )
         runThreadFavoritesEffects(result.effects)
         if result.decision == .scopeClear {
-            recentThreadFeeds.resetFeedData()
+            homeFeedSyncCoordinator.runRecentFeedEffects(
+                recentThreadFeeds.resetFeedData()
+            )
         }
         publishThreadSummaryState()
         return result.decision
@@ -91,7 +93,6 @@ extension GaryxMobileModel {
     func clearThreadFavoritesRuntime() {
         cancelThreadFavoritesSnapshotTransport()
         runThreadFavoritesEffects(threadFavoritesProvider.replaceGatewayScope(""))
-        recentThreadFeeds.resetFeedData()
         publishThreadSummaryState()
     }
 
@@ -100,7 +101,9 @@ extension GaryxMobileModel {
         guard threadFavoritesState.gatewayScope != scope else { return }
         cancelThreadFavoritesSnapshotTransport()
         runThreadFavoritesEffects(threadFavoritesProvider.replaceGatewayScope(scope))
-        recentThreadFeeds.resetFeedData()
+        homeFeedSyncCoordinator.runRecentFeedEffects(
+            recentThreadFeeds.resetFeedData()
+        )
     }
 
     func runThreadFavoritesEffects(_ effects: [GaryxFavoritesEffect]) {
@@ -116,56 +119,7 @@ extension GaryxMobileModel {
                     publishThreadSummaryState()
                 }
             case .snapshot(let ticket):
-                threadFavoritesSnapshotTask?.cancel()
-                let taskToken = UUID()
-                threadFavoritesSnapshotTaskToken = taskToken
-                threadFavoritesSnapshotTask = Task { [weak self] in
-                    guard let self else { return }
-                    defer {
-                        if threadFavoritesSnapshotTaskToken == taskToken {
-                            threadFavoritesSnapshotTask = nil
-                            threadFavoritesSnapshotTaskToken = nil
-                        }
-                    }
-                    do {
-                        let snapshot = try await client().threadFavoritesSnapshot(
-                            includeSummaries: ticket.requestFlavor == .enhanced
-                        )
-                        var acceptedSnapshot = GaryxFavoriteSnapshot(snapshot)
-                        acceptedSnapshot.rows = pendingThreadArchives.visibleThreads(
-                            acceptedSnapshot.rows
-                        )
-                        if let summaries = acceptedSnapshot.summaryLookupRows {
-                            acceptedSnapshot.summaryLookupRows = pendingThreadArchives
-                                .visibleThreads(summaries)
-                        }
-                        let previousFavoritesRuntimeEpoch = threadFavoritesState.runtimeEpoch
-                        let completion = threadFavoritesProvider.completeSnapshot(
-                            ticket: ticket,
-                            snapshot: acceptedSnapshot
-                        )
-                        let identityReset = threadFavoritesState.runtimeEpoch
-                            != previousFavoritesRuntimeEpoch
-                        if identityReset {
-                            recentThreadFeeds.resetFeedData()
-                            refreshRecentThreadLeases()
-                        }
-                        runThreadFavoritesEffects(completion.effects)
-                        if completion.accepted {
-                            refreshRecentThreadLeases()
-                            publishThreadSummaryState()
-                            persistRecentThreadsWidgetSnapshot()
-                        } else if identityReset {
-                            publishThreadSummaryState()
-                            persistRecentThreadsWidgetSnapshot()
-                        }
-                    } catch {
-                        runThreadFavoritesEffects(
-                            threadFavoritesProvider.failSnapshot(ticket: ticket)
-                        )
-                        publishThreadSummaryState()
-                    }
-                }
+                homeFeedSyncCoordinator.enqueueFavoritesSnapshot(ticket)
             case .mutate(let ticket):
                 Task { [weak self] in
                     guard let self else { return }
@@ -215,6 +169,67 @@ extension GaryxMobileModel {
                 }
             }
         }
+        homeFeedSyncCoordinator.homeDomainDidChange()
+    }
+
+    func startThreadFavoritesSnapshot(
+        _ ticket: GaryxFavoritesSnapshotTicket,
+        authority _: GaryxHomeFeedSyncAuthority
+    ) -> Task<Void, Never> {
+        threadFavoritesSnapshotTask?.cancel()
+        let taskToken = UUID()
+        threadFavoritesSnapshotTaskToken = taskToken
+        let task = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                if threadFavoritesSnapshotTaskToken == taskToken {
+                    threadFavoritesSnapshotTask = nil
+                    threadFavoritesSnapshotTaskToken = nil
+                }
+            }
+            do {
+                let snapshot = try await client().threadFavoritesSnapshot(
+                    includeSummaries: ticket.requestFlavor == .enhanced
+                )
+                var acceptedSnapshot = GaryxFavoriteSnapshot(snapshot)
+                acceptedSnapshot.rows = pendingThreadArchives.visibleThreads(
+                    acceptedSnapshot.rows
+                )
+                if let summaries = acceptedSnapshot.summaryLookupRows {
+                    acceptedSnapshot.summaryLookupRows = pendingThreadArchives
+                        .visibleThreads(summaries)
+                }
+                let previousFavoritesRuntimeEpoch = threadFavoritesState.runtimeEpoch
+                let completion = threadFavoritesProvider.completeSnapshot(
+                    ticket: ticket,
+                    snapshot: acceptedSnapshot
+                )
+                let identityReset = threadFavoritesState.runtimeEpoch
+                    != previousFavoritesRuntimeEpoch
+                if identityReset {
+                    homeFeedSyncCoordinator.runRecentFeedEffects(
+                        recentThreadFeeds.resetFeedData()
+                    )
+                    refreshRecentThreadLeases()
+                }
+                runThreadFavoritesEffects(completion.effects)
+                if completion.accepted {
+                    refreshRecentThreadLeases()
+                    publishThreadSummaryState()
+                    persistRecentThreadsWidgetSnapshot()
+                } else if identityReset {
+                    publishThreadSummaryState()
+                    persistRecentThreadsWidgetSnapshot()
+                }
+            } catch {
+                runThreadFavoritesEffects(
+                    threadFavoritesProvider.failSnapshot(ticket: ticket)
+                )
+                publishThreadSummaryState()
+            }
+        }
+        threadFavoritesSnapshotTask = task
+        return task
     }
 
     func nextThreadMutationId(kind: String, threadId: String) -> GaryxThreadMutationID {

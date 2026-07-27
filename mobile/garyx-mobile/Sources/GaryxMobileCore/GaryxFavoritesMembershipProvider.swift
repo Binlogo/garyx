@@ -29,12 +29,16 @@ public final class GaryxFavoritesMembershipProvider: ObservableObject,
         self.ownerId = ownerId
         self.instanceId = max(1, instanceId)
         capabilityRuntimeEpoch = nil
-        state = GaryxFavoritesState(gatewayScope: gatewayScope)
+        let initialState = GaryxFavoritesState(gatewayScope: gatewayScope)
+        state = initialState
         snapshot = GaryxThreadListMembershipSnapshot(
             identity: GaryxThreadListProviderIdentity(
                 kind: .favorites,
                 instanceId: max(1, instanceId)
-            )
+            ),
+            isPrimed: initialState.headPhase.isPrimed,
+            isRefreshing: initialState.headPhase.isRefreshing,
+            headFailure: initialState.headPhase.awaitsUserAction
         )
     }
 
@@ -42,9 +46,10 @@ public final class GaryxFavoritesMembershipProvider: ObservableObject,
         GaryxThreadListProviderIdentity(kind: .favorites, instanceId: instanceId)
     }
 
+    public var headPhase: GaryxRecentHeadPhase { state.headPhase }
+
     /// Cold-start consumers await the shared capability probe, then ask this
     /// owner for the one transport effect appropriate to that resolution.
-    @discardableResult
     public func requestSnapshot(
         for resolution: GaryxThreadSummaryCapabilityResolution
     ) -> GaryxFavoritesCapabilityTransition {
@@ -63,13 +68,13 @@ public final class GaryxFavoritesMembershipProvider: ObservableObject,
             )
         }
         recordCancellation(transition.cancelledTicket)
+        rebuildFromReducerState()
         return transition
     }
 
     /// Applies an unknown/unsupported -> supported transition. The canceled
     /// legacy ticket is immediately unowned; even a racing completion cannot
     /// write cache state before the enhanced replacement arrives.
-    @discardableResult
     public func transitionToSupported(
         capabilityGeneration: UInt64
     ) -> GaryxFavoritesCapabilityTransition {
@@ -77,17 +82,18 @@ public final class GaryxFavoritesMembershipProvider: ObservableObject,
             capabilityGeneration: capabilityGeneration
         )
         recordCancellation(transition.cancelledTicket)
+        rebuildFromReducerState()
         return transition
     }
 
     /// Normal refreshes retain the capability flavor/generation selected by
     /// the shared probe. They use the reducer's existing coalescing fence.
-    @discardableResult
     public func requestRefresh() -> [GaryxFavoritesEffect] {
-        state.requestSnapshot()
+        let effects = state.requestSnapshot()
+        rebuildFromReducerState()
+        return effects
     }
 
-    @discardableResult
     public func completeSnapshot(
         ticket: GaryxFavoritesSnapshotTicket,
         snapshot response: GaryxFavoriteSnapshot
@@ -98,7 +104,10 @@ public final class GaryxFavoritesMembershipProvider: ObservableObject,
             snapshot: response
         )
         state = candidate
-        guard decision.accepted else { return decision }
+        guard decision.accepted else {
+            rebuildFromReducerState()
+            return decision
+        }
 
         // One owner commit: write-through + lease swap + membership replace,
         // followed by exactly one observable publication.
@@ -122,16 +131,15 @@ public final class GaryxFavoritesMembershipProvider: ObservableObject,
         let next = GaryxThreadListMembershipSnapshot(
             identity: identity,
             orderedThreadIds: visibleIds,
-            isPrimed: state.rawRevision != nil,
-            isRefreshing: state.activeSnapshotTicket != nil,
-            headFailure: state.snapshotFailed,
+            isPrimed: state.headPhase.isPrimed,
+            isRefreshing: state.headPhase.isRefreshing,
+            headFailure: state.headPhase.awaitsUserAction,
             footerState: .hidden
         )
         publish(next)
         return decision
     }
 
-    @discardableResult
     public func failSnapshot(
         ticket: GaryxFavoritesSnapshotTicket
     ) -> [GaryxFavoritesEffect] {
@@ -140,7 +148,6 @@ public final class GaryxFavoritesMembershipProvider: ObservableObject,
         return effects
     }
 
-    @discardableResult
     public func observeStoreIdentity(
         stamp: GaryxStoreResponseStamp,
         responseStoreIncarnationId: String
@@ -156,14 +163,12 @@ public final class GaryxFavoritesMembershipProvider: ObservableObject,
         return result
     }
 
-    @discardableResult
     public func toggle(threadId: String, desired: Bool) -> [GaryxFavoritesEffect] {
         let effects = state.toggle(threadId: threadId, desired: desired)
         rebuildFromReducerState()
         return effects
     }
 
-    @discardableResult
     public func settle(
         ticket: GaryxFavoriteMutationTicket,
         settlement: GaryxFavoriteMutationSettlement
@@ -173,32 +178,38 @@ public final class GaryxFavoritesMembershipProvider: ObservableObject,
         return effects
     }
 
-    @discardableResult
     public func fireBackoff(_ stamp: GaryxFavoriteBackoffStamp) -> [GaryxFavoritesEffect] {
         let effects = state.fireBackoff(stamp)
         rebuildFromReducerState()
         return effects
     }
 
-    @discardableResult
     public func replaceGatewayScope(_ gatewayScope: String) -> [GaryxFavoritesEffect] {
         instanceId &+= 1
         capabilityRuntimeEpoch = nil
         leaseOwner.evictFeed(ownerId: ownerId)
         let effects: [GaryxFavoritesEffect]
         if state.gatewayScope == gatewayScope {
-            effects = state.resetGatewayRuntime(requestSnapshot: false)
+            effects = state.resetGatewayRuntime(requestSnapshot: true)
         } else {
-            effects = state.replaceGatewayScope(gatewayScope, requestSnapshot: false)
+            effects = state.replaceGatewayScope(gatewayScope, requestSnapshot: true)
         }
         publish(
             GaryxThreadListMembershipSnapshot(
                 identity: identity,
                 orderedThreadIds: [],
-                isPrimed: false
+                isPrimed: state.headPhase.isPrimed,
+                isRefreshing: state.headPhase.isRefreshing,
+                headFailure: state.headPhase.awaitsUserAction
             )
         )
         return effects
+    }
+
+    public func downgradeImmediateDemandToUserAction() -> Bool {
+        let changed = state.downgradeImmediateDemandToUserAction()
+        rebuildFromReducerState()
+        return changed
     }
 
     private func rebuildFromReducerState() {
@@ -211,9 +222,9 @@ public final class GaryxFavoritesMembershipProvider: ObservableObject,
             GaryxThreadListMembershipSnapshot(
                 identity: identity,
                 orderedThreadIds: visibleIds,
-                isPrimed: state.rawRevision != nil,
-                isRefreshing: state.activeSnapshotTicket != nil,
-                headFailure: state.snapshotFailed,
+                isPrimed: state.headPhase.isPrimed,
+                isRefreshing: state.headPhase.isRefreshing,
+                headFailure: state.headPhase.awaitsUserAction,
                 footerState: .hidden
             )
         )

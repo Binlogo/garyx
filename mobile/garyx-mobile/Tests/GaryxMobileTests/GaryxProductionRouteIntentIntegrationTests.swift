@@ -6,8 +6,13 @@ import XCTest
 
 @MainActor
 final class GaryxProductionRouteIntentIntegrationTests: XCTestCase {
+    private var routePreparationSessionTokens: [String] = []
+
     override func tearDown() {
-        GaryxRoutePreparationURLProtocolStub.requestHandler = nil
+        for token in routePreparationSessionTokens {
+            GaryxRoutePreparationURLProtocolStub.unregister(token: token)
+        }
+        routePreparationSessionTokens.removeAll()
         super.tearDown()
     }
 
@@ -1352,10 +1357,78 @@ final class GaryxProductionRouteIntentIntegrationTests: XCTestCase {
     private func routePreparationSession(
         handler: @escaping (URLRequest) throws -> (HTTPURLResponse, Data)
     ) -> URLSession {
-        GaryxRoutePreparationURLProtocolStub.requestHandler = handler
+        let token = UUID().uuidString
+        routePreparationSessionTokens.append(token)
+        GaryxRoutePreparationURLProtocolStub.register(token: token) { request in
+            if let response = try self.routePreparationHomeFeedResponse(request) {
+                return response
+            }
+            return try handler(request)
+        }
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [GaryxRoutePreparationURLProtocolStub.self]
+        configuration.httpAdditionalHeaders = [
+            GaryxRoutePreparationURLProtocolStub.sessionHeader: token
+        ]
         return URLSession(configuration: configuration)
+    }
+
+    private func routePreparationHomeFeedResponse(
+        _ request: URLRequest
+    ) throws -> (HTTPURLResponse, Data)? {
+        switch request.url?.path {
+        case "/api/thread-summaries":
+            return try routePreparationResponse(
+                request,
+                statusCode: 404,
+                data: Data()
+            )
+        case "/api/thread-favorites/snapshot":
+            return try routePreparationResponse(
+                request,
+                data: Data(
+                    """
+                    {
+                      "store_incarnation_id": "11111111-1111-4111-8111-111111111111",
+                      "server_boot_id": "22222222-2222-4222-8222-222222222222",
+                      "revision": 1,
+                      "thread_ids": [],
+                      "favorites": [],
+                      "recent": {
+                        "threads": [],
+                        "total": 0,
+                        "truncated": false
+                      }
+                    }
+                    """.utf8
+                )
+            )
+        case "/api/thread-pins":
+            return try routePreparationResponse(
+                request,
+                data: Data(#"{"thread_ids":[],"revision":0}"#.utf8)
+            )
+        case "/api/recent-threads":
+            return try routePreparationResponse(
+                request,
+                data: Data(
+                    """
+                    {
+                      "threads": [],
+                      "count": 0,
+                      "limit": 30,
+                      "total": 0,
+                      "has_more": false,
+                      "next_cursor": null,
+                      "store_incarnation_id": "11111111-1111-4111-8111-111111111111",
+                      "server_boot_id": "22222222-2222-4222-8222-222222222222"
+                    }
+                    """.utf8
+                )
+            )
+        default:
+            return nil
+        }
     }
 
     private func routePreparationResponse(
@@ -1465,15 +1538,37 @@ private struct GaryxProductionRouteLifecycleReplacementProbeRoot: View {
 }
 
 private final class GaryxRoutePreparationURLProtocolStub: URLProtocol {
-    nonisolated(unsafe) static var requestHandler: (
-        (URLRequest) throws -> (HTTPURLResponse, Data)
-    )?
+    static let sessionHeader = "X-Garyx-Route-Preparation-Session"
+
+    private nonisolated(unsafe) static var requestHandlers: [
+        String: (URLRequest) throws -> (HTTPURLResponse, Data)
+    ] = [:]
+    private static let requestHandlersLock = NSLock()
+
+    static func register(
+        token: String,
+        handler: @escaping (URLRequest) throws -> (HTTPURLResponse, Data)
+    ) {
+        requestHandlersLock.withLock {
+            requestHandlers[token] = handler
+        }
+    }
+
+    static func unregister(token: String) {
+        requestHandlersLock.withLock {
+            requestHandlers[token] = nil
+        }
+    }
 
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
     override func startLoading() {
-        guard let handler = Self.requestHandler else {
+        let token = request.value(forHTTPHeaderField: Self.sessionHeader)
+        let handler = Self.requestHandlersLock.withLock {
+            token.flatMap { Self.requestHandlers[$0] }
+        }
+        guard let handler else {
             client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse))
             return
         }

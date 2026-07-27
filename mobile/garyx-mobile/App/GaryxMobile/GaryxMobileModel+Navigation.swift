@@ -66,6 +66,9 @@ extension GaryxMobileModel {
     /// Apply legacy observable projections only after the UIKit renderer has
     /// reached its endpoint and removed all transition residue.
     func applyCommittedCanonicalRouteProjection(_ path: [GaryxRouteEntry]) {
+        defer {
+            homeFeedSyncCoordinator.updateHomeVisibility(isHomeVisible)
+        }
         let projectedNavigation = GaryxMobileNavigationState(projecting: path)
         if navigationState != projectedNavigation {
             navigationState = projectedNavigation

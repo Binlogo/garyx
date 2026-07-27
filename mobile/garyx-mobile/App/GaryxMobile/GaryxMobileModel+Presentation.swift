@@ -148,7 +148,6 @@ extension GaryxMobileModel {
             pinnedThreadIds: pinnedThreadIds,
             favoritedThreadIds: threadFavoritesState.presentedThreadIds,
             selectedThreadId: selectedThread?.id,
-            isLoadingThreads: isLoadingThreads,
             isHomeVisible: isHomeVisible,
             selectedRecentFilter: recentThreadFeeds.selectedFilter,
             recentFeedPresentation: selectedRecentFeedPresentation,
@@ -178,7 +177,6 @@ extension GaryxMobileModel {
                 selectedThreadId: selectedThread?.id
             ),
             runningThreadIds: homeThreadRunningThreadIds,
-            isLoadingThreads: isLoadingThreads,
             isHomeVisible: isHomeVisible,
             selectedRecentFilter: recentThreadFeeds.selectedFilter,
             recentFeedPresentation: selectedRecentFeedPresentation

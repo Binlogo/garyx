@@ -76,6 +76,7 @@ final class GaryxMobileModel: ObservableObject {
     static let selectedThreadReconcileIntervalNanos: UInt64 = 1_500_000_000
     static let backgroundCommittedRunReconcileIntervalNanos: UInt64 = 15_000_000_000
     static let backgroundCommittedRunThreadRefreshInterval: TimeInterval = 15
+    nonisolated static let homeFeedImmediateDemandTimeout: TimeInterval = 5
     /// Coalescing window for streamed committed rows: a large catch-up replays many
     /// committed messages back-to-back, so visible run-state, render, and
     /// disk-persist fold into one update per interval instead of flickering the list.
@@ -108,6 +109,7 @@ final class GaryxMobileModel: ObservableObject {
         didSet {
             refreshNavigationDrawerSnapshot()
             refreshHomeObservationConnectionSnapshot()
+            homeFeedSyncCoordinator.updateConnection(connectionState)
         }
     }
     @Published var selectedThread: GaryxThreadSummary? {
@@ -157,9 +159,6 @@ final class GaryxMobileModel: ObservableObject {
         }
     }
     var threadFavoritesState: GaryxFavoritesState { threadFavoritesProvider.state }
-    var isLoadingThreads: Bool {
-        selectedRecentFeedPresentation.showsInitialSkeleton
-    }
     /// Identity for the conversation scroll container (see
     /// GaryxMobileConversationViews). Refreshed on real selection changes,
     /// preserved across draft promotion.
@@ -525,8 +524,6 @@ final class GaryxMobileModel: ObservableObject {
     var pendingThreadArchives = GaryxPendingThreadArchiveState()
     /// Deterministic test seam; production uses the Core policy delay.
     var lifecycleRetryDelayOverrideNanoseconds: UInt64?
-    var auxiliaryAllRecentThreadsRefreshTask: Task<Void, Never>?
-    var auxiliaryAllRecentThreadsRefreshTaskId: UUID?
     /// Durable scope + ephemeral activation CAS captured by every gateway
     /// request. Switching away and back to the same gateway creates a distinct
     /// activation while retaining that scope's composer partition.
@@ -562,6 +559,8 @@ final class GaryxMobileModel: ObservableObject {
     let threadFavoritesProvider: GaryxFavoritesMembershipProvider
     let homeThreadListStore: GaryxHomeThreadListStore
     let homeThreadSearchRowsStore: GaryxHomeThreadSearchRowsStore
+    var homeFeedSyncCoordinator: GaryxHomeFeedSyncCoordinator
+    var homeFeedSceneIsBackgrounded = false
     var threadFeedRegistry = GaryxThreadFeedRegistry()
     var workspaceThreadProviders: [String: GaryxThreadSummaryMembershipProvider] = [:]
     var workspaceThreadStores: [String: GaryxThreadListStore] = [:]
@@ -657,15 +656,20 @@ final class GaryxMobileModel: ObservableObject {
             defaults: defaults,
             key: GaryxMobileSettingsKeys.recentThreadFilter
         )
+        let recentFeedsBootstrap = GaryxRecentThreadFeeds.bootstrap(
+            pageLimit: Self.threadListPageLimit,
+            overlap: Self.threadListPageOverlap,
+            selectedFilter: restoredRecentThreadFilter
+        )
         self.defaults = defaults
         self.keychain = keychain
         self.gatewayClientFactory = gatewayClientFactory
         self.gatewayScopeEpochByIdentity = Self.loadGatewayScopeEpochs(defaults: defaults)
         self.pinnedOrderOutboxStore = GaryxPinnedOrderUserDefaultsStore(defaults: defaults)
-        self.recentThreadFeeds = GaryxRecentThreadFeeds(
-            pageLimit: Self.threadListPageLimit,
-            overlap: Self.threadListPageOverlap,
-            selectedFilter: restoredRecentThreadFilter
+        self.recentThreadFeeds = recentFeedsBootstrap.feeds
+        self.homeFeedSyncCoordinator = GaryxHomeFeedSyncCoordinator(
+            initialEffects: recentFeedsBootstrap.effects,
+            immediateDemandTimeout: Self.homeFeedImmediateDemandTimeout
         )
         let avatarStore = GaryxAvatarDiskStore()
         self.avatarStore = avatarStore

@@ -118,7 +118,6 @@ final class GaryxHomeProductionAcceptanceTests: XCTestCase {
         let initialSnapshot = HomeSnapshot(
             appliedSeq: 1,
             sections: initialSections,
-            isLoadingThreads: false,
             isHomeVisible: true
         )
 
@@ -131,7 +130,6 @@ final class GaryxHomeProductionAcceptanceTests: XCTestCase {
         let sameContentNewerSeq = HomeSnapshot(
             appliedSeq: 2,
             sections: initialSections,
-            isLoadingThreads: false,
             isHomeVisible: true
         )
         XCTAssertFalse(
@@ -148,7 +146,6 @@ final class GaryxHomeProductionAcceptanceTests: XCTestCase {
         let staleChangedSnapshot = HomeSnapshot(
             appliedSeq: 1,
             sections: staleChangedSections,
-            isLoadingThreads: false,
             isHomeVisible: true
         )
         XCTAssertFalse(store.apply(actorSnapshot: staleChangedSnapshot))
@@ -160,7 +157,6 @@ final class GaryxHomeProductionAcceptanceTests: XCTestCase {
         XCTAssertTrue(store.apply(actorSnapshot: HomeSnapshot(
             appliedSeq: 3,
             sections: freshChangedSections,
-            isLoadingThreads: false,
             isHomeVisible: true
         )))
         XCTAssertEqual(store.latestActorAppliedSeq, 3)
@@ -386,13 +382,11 @@ private extension GaryxHomeThreadSectionsInput {
 private extension GaryxHomeThreadListInput {
     init(
         _ input: HomeThreadSectionsReference.Inputs,
-        isLoadingThreads: Bool = false,
         isHomeVisible: Bool = true
     ) {
         self.init(
             sectionsInput: GaryxHomeThreadSectionsInput(input),
             runningThreadIds: input.busyThreadIds,
-            isLoadingThreads: isLoadingThreads,
             isHomeVisible: isHomeVisible
         )
     }

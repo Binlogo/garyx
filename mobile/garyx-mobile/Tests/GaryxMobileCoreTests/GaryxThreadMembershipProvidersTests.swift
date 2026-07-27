@@ -275,8 +275,20 @@ final class GaryxThreadMembershipProvidersTests: XCTestCase {
 
     func testRecentWrapperPreservesExistingFeedSemantics() throws {
         var provider = GaryxRecentThreadMembershipProvider(filter: .all)
+        let effects = provider.takeBootstrapEffects()
+        let requestEffect = try XCTUnwrap(effects.first { effect in
+            guard case .requestHead(let request) = effect else { return false }
+            return request.filter == .all
+        })
+        guard case .requestHead(let request) = requestEffect else {
+            return XCTFail("recent bootstrap request")
+        }
         let ticket = try XCTUnwrap(
-            provider.requestRefresh(gatewayScope: "gateway", runtimeEpoch: 1)
+            provider.beginHeadRequest(
+                request,
+                gatewayScope: "gateway",
+                runtimeEpoch: 1
+            )
         )
         let page = GaryxRecentThreadFeedPage(
             storeIncarnationId: "inc-a",
@@ -288,16 +300,22 @@ final class GaryxThreadMembershipProvidersTests: XCTestCase {
             hasMore: false,
             nextCursor: nil
         )
-        guard case .accepted(let commit) = provider.completeRefresh(
+        let result = provider.completeHead(
             ticket,
-            bundle: GaryxRecentThreadRefreshBundle(
-                primaryPages: [page],
-                verificationPage: page
+            result: .page(
+                GaryxRecentThreadRefreshBundle(
+                    primaryPages: [page],
+                    verificationPage: page
+                )
             ),
             summaryWrites: [thread("thread::a"), thread("thread::b")]
-        ) else { return XCTFail("recent wrapper") }
+        )
+        guard case .accepted(let commit) = result.completion else {
+            return XCTFail("recent wrapper")
+        }
         XCTAssertEqual(commit.snapshot.orderedThreadIds, ["thread::a", "thread::b"])
         XCTAssertTrue(commit.snapshot.isPrimed)
+        XCTAssertEqual(result.effects, [.publish])
     }
 
     func testRegistryWorkspaceLRUFourCancelsEvictedInstanceAndABAReentryIsFresh() throws {
