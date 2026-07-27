@@ -170,6 +170,16 @@ struct GaryxRecentHeadState: Equatable, Sendable {
         stalledBy stall: GaryxRecentHeadStall
     ) {
         guard phase.activeAttempt == nil else { return }
+        switch phase {
+        case .primingOwed(_, .immediate), .readyStale(_, .immediate):
+            // The transition that first established this debt owns its cause.
+            // Draining the already-queued request must not relabel an identity
+            // replacement or local-mutation race as a generic interruption.
+            return
+        case .priming, .primingOwed(_, .userAction), .ready, .refreshing,
+             .readyStale(_, .userAction):
+            break
+        }
         phase = phase.isPrimed
             ? .readyStale(stall, .immediate)
             : .primingOwed(stall, .immediate)
@@ -193,18 +203,21 @@ struct GaryxRecentHeadState: Equatable, Sendable {
     }
 }
 
-/// Shared rendering contract for Recent and Favorites.
-public protocol GaryxRecentHeadDomain: Sendable {
+/// Shared rendering contract for the two reducer-owned domains in this
+/// module. Keeping the protocol and presentation constructors internal seals
+/// rendering to live reducer state: an external caller may inspect an opaque
+/// attempt, but cannot retain it and re-wrap it as a new loading presentation.
+protocol GaryxRecentHeadDomain: Sendable {
     var headPhase: GaryxRecentHeadPhase { get }
     var rows: [String] { get }
     var footerState: GaryxHomeLoadMoreFooterState { get }
 }
 
 public struct GaryxRecentThreadFeedPresentation: Equatable, Sendable {
-    public var headPhase: GaryxRecentHeadPhase
-    public var footerState: GaryxHomeLoadMoreFooterState
+    public private(set) var headPhase: GaryxRecentHeadPhase
+    public private(set) var footerState: GaryxHomeLoadMoreFooterState
 
-    public init(
+    init(
         headPhase: GaryxRecentHeadPhase,
         footerState: GaryxHomeLoadMoreFooterState = .hidden
     ) {
@@ -212,7 +225,7 @@ public struct GaryxRecentThreadFeedPresentation: Equatable, Sendable {
         self.footerState = footerState
     }
 
-    public init<Domain: GaryxRecentHeadDomain>(_ domain: Domain) {
+    init<Domain: GaryxRecentHeadDomain>(_ domain: Domain) {
         self.init(
             headPhase: domain.headPhase,
             footerState: domain.footerState

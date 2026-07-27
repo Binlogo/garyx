@@ -18,7 +18,7 @@ extension GaryxMobileModel {
                 preconditionFailure("handled above")
             }
         }
-        return GaryxRecentThreadFeedPresentation(threadFavoritesState)
+        return threadFavoritesState.presentation
     }
 
     func threadIsFavorite(_ threadId: String) -> Bool {

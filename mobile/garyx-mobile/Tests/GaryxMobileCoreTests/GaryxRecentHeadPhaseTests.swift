@@ -27,6 +27,16 @@ final class GaryxRecentHeadPhaseTests: XCTestCase {
                 effects: bootstrap.effects
             )
         )
+        var bootstrapTimedOut = bootstrap.feeds
+        let bootstrapTimeoutEffects =
+            bootstrapTimedOut.downgradeImmediateDemandToUserAction(filter: .all)
+        records.append(
+            PhaseProvenance(
+                label: "bootstrap owed user action",
+                phase: bootstrapTimedOut.allFeed.headPhase,
+                effects: bootstrapTimeoutEffects
+            )
+        )
 
         var primingFeeds = bootstrap.feeds
         let primingTicket = try begin(
@@ -66,23 +76,34 @@ final class GaryxRecentHeadPhaseTests: XCTestCase {
         )
 
         for stall in stalls {
-            var unprimed = makeBootstrap().feeds
-            let initialEffects = unprimed.requestHeadEffects(
-                filter: .all,
-                source: .userAction
-            )
-            let initial = try begin(effects: initialEffects, in: &unprimed)
-            let unprimedCompletion = unprimed.completeHead(
-                initial,
-                result: .interrupted(stall)
-            )
-            records.append(
-                PhaseProvenance(
-                    label: "unprimed immediate \(stall)",
-                    phase: unprimed.allFeed.headPhase,
-                    effects: unprimedCompletion.effects
+            if stall != .supersededByReset {
+                var unprimed = makeBootstrap().feeds
+                let initialEffects = unprimed.requestHeadEffects(
+                    filter: .all,
+                    source: .userAction
                 )
-            )
+                let initial = try begin(effects: initialEffects, in: &unprimed)
+                let unprimedCompletion = unprimed.completeHead(
+                    initial,
+                    result: .interrupted(stall)
+                )
+                records.append(
+                    PhaseProvenance(
+                        label: "unprimed immediate \(stall)",
+                        phase: unprimed.allFeed.headPhase,
+                        effects: unprimedCompletion.effects
+                    )
+                )
+                let timeoutEffects =
+                    unprimed.downgradeImmediateDemandToUserAction(filter: .all)
+                records.append(
+                    PhaseProvenance(
+                        label: "unprimed user action \(stall)",
+                        phase: unprimed.allFeed.headPhase,
+                        effects: timeoutEffects
+                    )
+                )
+            }
 
             var primed = try makePrimedFeeds()
             let effects = primed.requestHeadEffects(
@@ -101,48 +122,41 @@ final class GaryxRecentHeadPhaseTests: XCTestCase {
                     effects: completion.effects
                 )
             )
+            let timeoutEffects =
+                primed.downgradeImmediateDemandToUserAction(filter: .all)
+            records.append(
+                PhaseProvenance(
+                    label: "ready stale user action \(stall)",
+                    phase: primed.allFeed.headPhase,
+                    effects: timeoutEffects
+                )
+            )
         }
 
-        var failedCold = makeBootstrap().feeds
-        let failedColdEffects = failedCold.requestHeadEffects(
-            filter: .all,
-            source: .userAction
+        var expectedPhaseKeys: Set<String> = [
+            "priming",
+            "ready",
+            "refreshing",
+        ]
+        for stall in stalls {
+            for demand in [
+                GaryxRecentHeadDemand.immediate,
+                .userAction,
+            ] {
+                expectedPhaseKeys.insert("primingOwed:\(stall):\(demand)")
+                expectedPhaseKeys.insert("readyStale:\(stall):\(demand)")
+            }
+        }
+        let observedPhaseKeys = Set(records.map { phaseKey($0.phase) })
+        XCTAssertEqual(
+            observedPhaseKeys,
+            expectedPhaseKeys,
+            "the provenance table must cover every phase family reachable through the production reducer"
         )
-        let failedColdTicket = try begin(
-            effects: failedColdEffects,
-            in: &failedCold
-        )
-        let failedColdCompletion = failedCold.completeHead(
-            failedColdTicket,
-            result: .failed
-        )
-        records.append(
-            PhaseProvenance(
-                label: "unprimed user action failure",
-                phase: failedCold.allFeed.headPhase,
-                effects: failedColdCompletion.effects
-            )
-        )
-
-        var failedWarm = try makePrimedFeeds()
-        let failedWarmEffects = failedWarm.requestHeadEffects(
-            filter: .all,
-            source: .userAction
-        )
-        let failedWarmTicket = try begin(
-            effects: failedWarmEffects,
-            in: &failedWarm
-        )
-        let failedWarmCompletion = failedWarm.completeHead(
-            failedWarmTicket,
-            result: .failed
-        )
-        records.append(
-            PhaseProvenance(
-                label: "ready stale user action failure",
-                phase: failedWarm.allFeed.headPhase,
-                effects: failedWarmCompletion.effects
-            )
+        XCTAssertEqual(
+            records.count,
+            expectedPhaseKeys.count,
+            "duplicate hand-picked records could hide a missing reachable phase"
         )
 
         for record in records {
@@ -159,7 +173,7 @@ final class GaryxRecentHeadPhaseTests: XCTestCase {
         }
     }
 
-    func testPhaseEventMatrixCannotReachUnknownIdleState() {
+    func testPhaseEventMatrixPreservesTypeLevelOwnershipInvariant() {
         let seeds: [(String, () -> GaryxRecentHeadState)] = [
             ("priming owed immediate", makeInitialState),
             ("priming owed user", makePrimingOwedUserState),
@@ -233,7 +247,7 @@ final class GaryxRecentHeadPhaseTests: XCTestCase {
         )
     }
 
-    func testEveryUnifiedCompletionPathReturnsEffects() throws {
+    func testEveryHeadExitProducesItsRequiredConsequence() throws {
         var success = makeBootstrap().feeds
         let successTicket = try begin(
             effects: success.requestHeadEffects(
@@ -242,13 +256,16 @@ final class GaryxRecentHeadPhaseTests: XCTestCase {
             ),
             in: &success
         )
-        assertEffects(
+        assertCompletion(
             success.completeHead(
                 successTicket,
                 result: .page(bundle(page: page()))
             ),
+            outcome: .applied,
+            expectedHeadRequest: nil,
             path: "success"
         )
+        XCTAssertEqual(success.allFeed.headPhase, .ready)
 
         var failed = makeBootstrap().feeds
         let failedTicket = try begin(
@@ -258,9 +275,15 @@ final class GaryxRecentHeadPhaseTests: XCTestCase {
             ),
             in: &failed
         )
-        assertEffects(
+        assertCompletion(
             failed.completeHead(failedTicket, result: .failed),
+            outcome: .failed,
+            expectedHeadRequest: nil,
             path: "failure"
+        )
+        XCTAssertEqual(
+            failed.allFeed.headPhase,
+            .primingOwed(.networkFailure, .userAction)
         )
 
         for stall in stalls {
@@ -272,12 +295,18 @@ final class GaryxRecentHeadPhaseTests: XCTestCase {
                 ),
                 in: &interrupted
             )
-            assertEffects(
+            assertCompletion(
                 interrupted.completeHead(
                     ticket,
                     result: .interrupted(stall)
                 ),
+                outcome: .interrupted(stall),
+                expectedHeadRequest: .all,
                 path: "interrupted \(stall)"
+            )
+            XCTAssertEqual(
+                interrupted.allFeed.headPhase,
+                .primingOwed(stall, .immediate)
             )
         }
 
@@ -289,12 +318,27 @@ final class GaryxRecentHeadPhaseTests: XCTestCase {
             ),
             in: &reset
         )
-        _ = reset.resetFeedData()
-        assertEffects(
+        let resetEffects = reset.resetFeedData()
+        assertPublishAndHeadRequests(
+            resetEffects,
+            expectedFilters: [.all, .nonTask],
+            path: "reset"
+        )
+        XCTAssertEqual(
+            reset.allFeed.headPhase,
+            .primingOwed(.supersededByReset, .immediate)
+        )
+        XCTAssertEqual(
+            reset.nonTaskFeed.headPhase,
+            .primingOwed(.supersededByReset, .immediate)
+        )
+        assertCompletion(
             reset.completeHead(
                 staleTicket,
                 result: .page(bundle(page: page()))
             ),
+            outcome: .abandonedStaleEpoch,
+            expectedHeadRequest: nil,
             path: "stale epoch"
         )
 
@@ -307,12 +351,18 @@ final class GaryxRecentHeadPhaseTests: XCTestCase {
             in: &locallyMutated
         )
         locallyMutated.removeThread("missing")
-        assertEffects(
+        assertCompletion(
             locallyMutated.completeHead(
                 localTicket,
                 result: .page(bundle(page: page()))
             ),
+            outcome: .abandonedLocalMutation,
+            expectedHeadRequest: .all,
             path: "local mutation"
+        )
+        XCTAssertEqual(
+            locallyMutated.allFeed.headPhase,
+            .readyStale(.racedLocalMutation, .immediate)
         )
 
         var identityChanged = try makePrimedFeeds()
@@ -323,7 +373,7 @@ final class GaryxRecentHeadPhaseTests: XCTestCase {
             ),
             in: &identityChanged
         )
-        assertEffects(
+        assertCompletion(
             identityChanged.completeHead(
                 identityTicket,
                 result: .page(
@@ -334,7 +384,29 @@ final class GaryxRecentHeadPhaseTests: XCTestCase {
                     )
                 )
             ),
+            outcome: .forceReplacement,
+            expectedHeadRequest: .all,
             path: "identity replacement"
+        )
+        XCTAssertEqual(
+            identityChanged.allFeed.headPhase,
+            .readyStale(.identityReplacement, .immediate)
+        )
+
+        var resetState = makePrimingState()
+        resetState.reset(stalledBy: .supersededByReset)
+        XCTAssertEqual(
+            resetState.phase,
+            .primingOwed(.supersededByReset, .immediate),
+            "reset invalidates an active attempt into an explicitly owned debt"
+        )
+
+        var invalidatedState = makePrimingState()
+        invalidatedState.invalidate(stalledBy: .identityReplacement)
+        XCTAssertEqual(
+            invalidatedState.phase,
+            .primingOwed(.identityReplacement, .immediate),
+            "invalidation cannot clear an active attempt into unknown idle"
         )
     }
 
@@ -409,15 +481,98 @@ final class GaryxRecentHeadPhaseTests: XCTestCase {
         }
     }
 
-    private func assertEffects(
+    private func phaseKey(_ phase: GaryxRecentHeadPhase) -> String {
+        switch phase {
+        case .priming:
+            return "priming"
+        case .primingOwed(let stall, let demand):
+            return "primingOwed:\(stall):\(demand)"
+        case .ready:
+            return "ready"
+        case .refreshing:
+            return "refreshing"
+        case .readyStale(let stall, let demand):
+            return "readyStale:\(stall):\(demand)"
+        }
+    }
+
+    private func assertCompletion(
         _ completion: GaryxRecentHeadCompletion,
+        outcome: GaryxRecentThreadFeedCompletion,
+        expectedHeadRequest: GaryxRecentThreadFilter?,
         path: String,
         file: StaticString = #filePath,
         line: UInt = #line
     ) {
-        XCTAssertFalse(
-            completion.effects.isEmpty,
-            "\(path) cleared or rejected a lane without an effect",
+        XCTAssertEqual(
+            completion.outcome,
+            outcome,
+            "\(path) returned the wrong settlement",
+            file: file,
+            line: line
+        )
+        let publishCount = completion.effects.reduce(into: 0) { count, effect in
+            if case .publish = effect { count += 1 }
+        }
+        let requests = completion.effects.compactMap { effect -> GaryxRecentHeadRequest? in
+            guard case .requestHead(let request) = effect else { return nil }
+            return request
+        }
+        XCTAssertEqual(
+            publishCount,
+            1,
+            "\(path) must publish its terminal phase exactly once",
+            file: file,
+            line: line
+        )
+        XCTAssertEqual(
+            requests.map(\.filter),
+            expectedHeadRequest.map { [$0] } ?? [],
+            "\(path) returned the wrong replacement request shape",
+            file: file,
+            line: line
+        )
+        XCTAssertEqual(
+            completion.effects.count,
+            1 + requests.count,
+            "\(path) returned an unrecognized side effect",
+            file: file,
+            line: line
+        )
+    }
+
+    private func assertPublishAndHeadRequests(
+        _ effects: [GaryxRecentFeedEffect],
+        expectedFilters: [GaryxRecentThreadFilter],
+        path: String,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        let publishCount = effects.reduce(into: 0) { count, effect in
+            if case .publish = effect { count += 1 }
+        }
+        let requests = effects.compactMap { effect -> GaryxRecentHeadRequest? in
+            guard case .requestHead(let request) = effect else { return nil }
+            return request
+        }
+        XCTAssertEqual(
+            publishCount,
+            expectedFilters.count,
+            "\(path) must publish each invalidated domain",
+            file: file,
+            line: line
+        )
+        XCTAssertEqual(
+            requests.map(\.filter),
+            expectedFilters,
+            "\(path) must transfer every invalidated lane to the executor",
+            file: file,
+            line: line
+        )
+        XCTAssertEqual(
+            effects.count,
+            publishCount + requests.count,
+            "\(path) returned an unrecognized side effect",
             file: file,
             line: line
         )

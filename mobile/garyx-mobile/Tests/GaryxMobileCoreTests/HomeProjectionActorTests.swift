@@ -83,11 +83,12 @@ final class HomeProjectionActorTests: XCTestCase {
         var latest = fixture
         latest.selectedThreadId = "thread-30"
         latest.busyThreadIds = ["thread-30"]
+        let latestHeadPhase = primingPhase()
         gateway.capture(HomeProjectionCapture(
             legacyInput: GaryxHomeThreadListInput(
                 latest,
                 isHomeVisible: false,
-                headPhase: primingPhase()
+                headPhase: latestHeadPhase
             ),
             committedRunStateBusyByThreadId: ["thread-30": true]
         ))
@@ -103,7 +104,11 @@ final class HomeProjectionActorTests: XCTestCase {
                 .presentation
                 .isRunning
         )
-        XCTAssertTrue(result.snapshot.recentFeedPresentation.isRefreshingHead)
+        XCTAssertEqual(
+            result.snapshot.recentFeedPresentation.headPhase,
+            latestHeadPhase,
+            "the actor must preserve the exact attempt-bearing phase, not collapse it to a loading Boolean"
+        )
         XCTAssertFalse(result.snapshot.isHomeVisible)
     }
 

@@ -369,14 +369,19 @@ final class GaryxHomeThreadListPagerTests: XCTestCase {
             ticket,
             result: .interrupted(.identityReplacement)
         )
-        let replacementRequest = try headRequest(in: interruption.effects, filter: .all)
-        _ = try XCTUnwrap(
-            feeds.beginHeadRequest(
-                replacementRequest,
+        // Drive the same effect boundary as the sole App executor without
+        // pre-asserting that a replacement exists. If completeHead stops
+        // emitting requestHead, or beginHeadRequest rejects it, the original
+        // regression assertion below observes owed loading with no active
+        // attempt and turns red.
+        for effect in interruption.effects {
+            guard case .requestHead(let request) = effect else { continue }
+            _ = feeds.beginHeadRequest(
+                request,
                 gatewayScope: "http://gateway.example.test",
                 runtimeEpoch: 1
             )
-        )
+        }
         let presentation = try XCTUnwrap(feeds.selectedPresentation)
         let store = GaryxHomeThreadListStore()
         let input = GaryxHomeThreadListInput(

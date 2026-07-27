@@ -18,17 +18,33 @@ tasks and must not be used as blockers for this implementation.
 | D9 | `shouldRefreshSidebarThreads` rebuilds the full presentation snapshot to read one Boolean. | `GaryxMobileSidebarViews.swift`. Performance cleanup only. |
 | D10 | Pager-level and feed-level lane contracts still describe different concurrency capabilities. | `GaryxHomeThreadListPager.swift` versus `GaryxRecentThreadFeeds.swift`. This task adds the required feed-owned single-flight trailing edge; reconciling the lower-level public contracts remains separate. |
 | D11 | While Favorites remains selected, the resident Chats feed does not receive periodic refreshes. | `GaryxMobileModel+HomeFeedSync.swift`. Returning to Chats now submits and settles an explicit refresh intent; continuous off-selection refresh policy remains separate. |
+| D12 | Defensively harden the Favorites-selected planner against an artificial `.ready` connection paired with an empty gateway scope. That combination is unreachable through the production exit ordering today, but a synthetic caller could otherwise keep planning `.refreshNow` while `selectedHeadRequestIsInternallyQueued` is false. | `GaryxMobileModel+HomeFeedSync.swift`. The adversarial review established that `exitCurrentGatewayScope()` deactivates the owner before clearing Favorites and that production `.ready` implies a configured URL, so this is robustness work, not a current bug or blocker. |
 
 ## Findings added during implementation
 
-No additional adjacent production defect was established. Full app-target
-validation did expose a test-fixture isolation issue: long-lived scope owners
-can outlive a test method, so invalidating that method's `URLSession` before
-deactivating its owner lets a later cadence create a task on an invalidated
-session. The fixture now owns and deactivates every test model and routes
-per-session protocol handlers by an opaque token. This is validation
-infrastructure required by the new lifecycle contract, not deferred product
-debt.
+No additional reachable adjacent production defect was established. D12 records
+an unreachable-state hardening opportunity from adversarial review and remains
+separate.
 
-Disposition: keep D1–D11 in independent follow-up work. Do not expand the
+Two findings were resolved inside the approved type / phase boundary rather
+than deferred:
+
+- A retained stale `GaryxRecentHeadAttempt` could previously be re-wrapped by
+  an external module into a public loading presentation. The raw presentation
+  constructors and `GaryxRecentHeadDomain` are now module-internal, while
+  presentation fields are `private(set)` and Favorites exposes only its
+  domain-derived presentation.
+- Draining a pending head request relabelled an existing specific immediate
+  debt (identity replacement or raced local mutation) as generic interruption.
+  `oweImmediate` now preserves the first specific stall provenance.
+
+Full app-target validation also exposed a test-fixture isolation issue:
+long-lived scope owners can outlive a test method, so invalidating that
+method's `URLSession` before deactivating its owner lets a later cadence create
+a task on an invalidated session. The fixture now owns and deactivates every
+test model and routes per-session protocol handlers by an opaque token. This
+is validation infrastructure required by the new lifecycle contract, not
+deferred product debt.
+
+Disposition: keep D1–D12 in independent follow-up work. Do not expand the
 Home-feed ownership implementation to address them.

@@ -252,6 +252,9 @@ public struct GaryxFavoritesState: Equatable, Sendable, GaryxRecentHeadDomain {
     public var snapshotFailed: Bool { headPhase.awaitsUserAction }
     public var rows: [String] { presentedThreadIds }
     public var footerState: GaryxHomeLoadMoreFooterState { .hidden }
+    public var presentation: GaryxRecentThreadFeedPresentation {
+        GaryxRecentThreadFeedPresentation(self)
+    }
 
     public mutating func downgradeImmediateDemandToUserAction() -> Bool {
         headState.downgradeImmediateDemandToUserAction()

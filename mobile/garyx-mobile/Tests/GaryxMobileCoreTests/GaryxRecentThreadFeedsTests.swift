@@ -132,6 +132,41 @@ final class GaryxRecentThreadFeedsTests: XCTestCase {
         )
     }
 
+    func testInterruptLoadMoreDrainsOwnedTrailingHeadRequest() throws {
+        var feeds = makeFeeds()
+        adoptHead(&feeds, filter: .all, rows: [("old", 100)], hasMore: true)
+        let load = try XCTUnwrap(feeds.requestLoadMore(trigger: .footer))
+        XCTAssertTrue(
+            feeds.requestHeadEffects(
+                filter: .all,
+                source: .userPullToRefresh
+            ).isEmpty
+        )
+        XCTAssertEqual(
+            feeds.allFeed.pendingHeadRequest?.source,
+            .userPullToRefresh
+        )
+
+        let effects = feeds.interruptLoadMore(load)
+        let requests = effects.compactMap { effect -> GaryxRecentHeadRequest? in
+            guard case .requestHead(let request) = effect else { return nil }
+            return request
+        }
+        XCTAssertEqual(
+            effects.reduce(into: 0) { count, effect in
+                if case .publish = effect { count += 1 }
+            },
+            1
+        )
+        XCTAssertEqual(requests.map(\.filter), [.all])
+        XCTAssertEqual(requests.map(\.source), [.userPullToRefresh])
+        XCTAssertFalse(feeds.allFeed.pager.isLoadingMore)
+        XCTAssertEqual(
+            feeds.allFeed.headPhase,
+            .readyStale(.interrupted, .immediate)
+        )
+    }
+
     func testLoadMoreUsesCursorAndDeduplicates() throws {
         var feeds = makeFeeds()
         adoptHead(
