@@ -32,7 +32,7 @@ Catalog request set = the 12 sweep paths: `/api/custom-agents`, `/api/skills`,
 | A6 | TTL boundary is exclusive-stale | lastCompleted = now − exactly ttl | `.startSweep` (age ≥ ttl is stale) | **PASS (2026-07-28)** — `GaryxCatalogRefreshPolicyTests.testTTLBoundaryIsExclusiveStale`. |
 
 Final focused execution: 6/6 passed in
-`/tmp/task-2798-reviewfix-policy.log`; all times are injected and no test
+`/tmp/task-2798-final-policy.log`; all times are injected and no test
 sleeps or reads the wall clock.
 
 ## B. Request-set integration tests (GaryxMobileTests, mocked transport, headless)
@@ -51,13 +51,13 @@ sleeps or reads the wall clock.
 | B10 | In-flight coalescing | hold sweep responses open → trigger forced + stale-gated again | each catalog path hit exactly once; both callers complete when responses release | **PASS (2026-07-28)** — `testB10ConcurrentIntentsCoalesceOntoOneSweep`; deterministic transport gate, each path exactly once and both joiners awaited settlement. |
 | B11 | Superseded sweep does not stamp freshness | start sweep, supersede via runtime-generation bump, then staleGated request | superseded sweep must not update lastCompleted; policy returns `.startSweep` | **PASS (2026-07-28)** — `testB11SupersededSweepDoesNotStampFreshness`; old flight released after generation bump, timestamp stayed nil, next stale-gated sweep ran. |
 | B12 | Home avatar regression | restored catalog cache, then home pull-to-refresh | home rows still resolve agent avatars; no catalog requests issued | **PASS (2026-07-28)** — `testB12RestoredCatalogKeepsHomeAvatarWithoutPullSweep`; restored data-URL avatar resolved and pull issued zero catalog paths. |
-| B13 | Home pull retains canonical Home commit | seed a pinned selected thread with cached runtime → pull All | only the selected Recent feed is requested; cached pinned section remains; runtime carry-over and selected title update still commit | **PASS (2026-07-28)** — `testB13HomePullCommitsSelectedFeedWithoutDroppingPinnedSection`; observed request paths are limited to `/api/recent-threads?tasks=include…`, with no `/api/thread-pins` or summary backfill. |
+| B13 | Home pull retains canonical Home commit | seed a cached pinned thread that is absent from the returned page plus a selected Recent thread with cached runtime → pull All | only the selected Recent feed is requested; the page-external pinned row remains; runtime carry-over and selected title update still commit | **PASS (2026-07-28)** — `testB13HomePullCommitsSelectedFeedWithoutDroppingPinnedSection`; observed request paths are limited to `/api/recent-threads?tasks=include…`, with no `/api/thread-pins` or summary backfill. |
 
 B1–B13 plus the coalesced-intent regression
 `testConcurrentPullDoesNotNarrowQueuedUserAction` were executed together after
-the review fix: 14/14 passed in
-`/tmp/task-2798-reviewfix-b1-b13-final.xcresult` on iPhone 17 Pro Max /
-iOS 26.5.
+the final test-lifecycle fix: 14/14 passed as the first suite in the
+post-commit 77/77 combined run
+`/tmp/task-2798-final-combined.xcresult` on iPhone 17 Pro Max / iOS 26.5.
 The coalesced-intent case proves a concurrent pull cannot narrow a queued
 user action's favorites, refreshed-pins, or secondary-feed work.
 
@@ -65,14 +65,14 @@ user action's favorites, refreshed-pins, or secondary-feed work.
 
 | # | Case | Steps | Expectation | Execution Record |
 |---|---|---|---|---|
-| C1 | Real pull-to-refresh network trace | launch against local gateway, settle, pull home list; capture gateway access pattern for the gesture window | only the feed request hits the gateway; list updates; avatars render | **PASS (2026-07-28)** — real local gateway, iPhone 17 Pro Max / iOS 26.5 / light. `/tmp/task-2798-reviewfix-c1-real-gateway.xcresult` passed; proxy trace `/tmp/task-2798-c1-trace.jsonl` contains 6 successful `/api/recent-threads` page/range-fill requests, 52,487 response bytes, and no pins, summary, or catalog path. Updated list, pinned section, and cached agent avatars are visible in `/tmp/task-2798-reviewfix-c1-home-after-pull.png`. |
-| C2 | Management surface unaffected | open Agents surface, pull-to-refresh | catalog requests observed; surface updates normally | **PASS (2026-07-28)** — same target/configuration. `/tmp/task-2798-reviewfix-c2-real-gateway.xcresult` passed; `/tmp/task-2798-c2-trace.jsonl` contains all 12 catalog paths with 200 responses (plus the Agents surface's 5 subsequent provider-model requests), 665,147 response bytes total. Normal rendered surface: `/tmp/task-2798-reviewfix-c2-agents-after-pull.png`. |
+| C1 | Real pull-to-refresh network trace | launch against local gateway, settle, pull home list; capture gateway access pattern for the gesture window | only the feed request hits the gateway; list updates; avatars render | **PASS (2026-07-28)** — real local gateway, iPhone 17 Pro Max / iOS 26.5 / light. The tracked `Task2798CatalogRefreshE2ETests.testC1HomePullAgainstRealGateway` ran via ordinary `xcodebuild test` after a post-commit clean build; app and UI-test binaries were rebuilt at 02:15:17. `/tmp/task-2798-final-c1.xcresult` passed; proxy trace `/tmp/task-2798-c1-trace.jsonl` contains 6 successful `/api/recent-threads` page/range-fill requests, 52,471 response bytes, and no pins, summary, or catalog path. Updated list, preserved pinned section, and cached agent avatars are visible in `/tmp/task-2798-final-c1-home-after-pull.png`. |
+| C2 | Management surface unaffected | open Agents surface, pull-to-refresh | catalog requests observed; surface updates normally | **PASS (2026-07-28)** — same target/configuration and tracked UI-test source. `/tmp/task-2798-final-c2.xcresult` passed on the post-commit bundle; `/tmp/task-2798-c2-trace.jsonl` contains all 12 catalog paths with 200 responses plus the Agents surface's 5 provider-model requests, all 200, for 665,144 response bytes total. Normal rendered surface: `/tmp/task-2798-final-c2-agents-after-pull.png`. |
 
 ## D. Regression sweep (headless)
 
 | # | Case | Expectation | Execution Record |
 |---|---|---|---|
-| D1 | Existing suites | `GaryxHomeThreadListRefreshCommitTests` and the full `GaryxMobileCoreTests` SwiftPM suite pass unmodified in intent (mechanical fixture updates allowed, behavioral assertions preserved) | **PASS (2026-07-28)** — existing Home refresh regression selection: 63/63 in `/tmp/task-2798-reviewfix-home-refresh-regression.xcresult`; full SwiftPM suite: 1,643/1,643 in `/tmp/task-2798-reviewfix-core-full.log`. |
+| D1 | Existing suites | `GaryxHomeThreadListRefreshCommitTests` and the full `GaryxMobileCoreTests` SwiftPM suite pass unmodified in intent (mechanical fixture updates allowed, behavioral assertions preserved) | **PASS (2026-07-28)** — post-commit B + Home combined selection: 77/77 (B 14/14, Home 63/63) in `/tmp/task-2798-final-combined.xcresult`; its post-B log contains no leaked `thread-home` / `thread-created` stream, invalidated-session exception, or process crash. Full SwiftPM suite: 1,643/1,643 in `/tmp/task-2798-reviewfix-core-full.log`. |
 
 ## Implementation record
 
@@ -84,5 +84,8 @@ initial load. Selected-feed pull tickets use the canonical Home projection
 commit with cached pins, so row/runtime/title reconciliation still runs without
 widening the approved feed-only request set. Merged pending intents retain the
 strongest projection work, so a pull cannot narrow an already queued user
-action. No adjacent pre-existing defect was changed or added to the debt ledger
-during this implementation.
+action. The real-gateway UI harness is tracked in the UI-test target, and the
+mocked integration fixture drains each model's complete gateway runtime before
+invalidating its sessions. The adjacent pre-existing unreachable-gateway test
+timing flake observed during stress repetition is recorded as Debt 3 in
+`docs/design/mobile-home-payload-review-debt.md` and was not changed here.
