@@ -301,7 +301,7 @@ extension GaryxMobileModel {
                 )
             } else if ticket.storeId.hasPrefix("bot:") {
                 let groupId = String(ticket.storeId.dropFirst("bot:".count))
-                await refreshRemoteState()
+                await refreshRemoteState(.staleGated)
                 if let group = mobileBotGroups.first(where: { $0.id == groupId }) {
                     refreshBotThreadList(group: group)
                     let hydrationTasks = botThreadHydrationTasks[groupId]

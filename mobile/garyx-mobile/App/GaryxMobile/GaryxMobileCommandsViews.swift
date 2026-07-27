@@ -11,7 +11,7 @@ struct GaryxCommandsView: View {
         GaryxPanelScaffold(
             title: "Commands",
             subtitle: "\(model.slashCommands.count) shortcuts",
-            onRefresh: { await model.refreshRemoteState() }
+            onRefresh: { await model.refreshRemoteState(.forced) }
         ) {
             GaryxCommandsContent()
         } actions: {

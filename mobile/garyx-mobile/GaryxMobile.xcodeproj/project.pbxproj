@@ -42,6 +42,7 @@
 		1A9B21C59B64584FD4110ACC /* GaryxImagePreviewDismissGesture.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8DAF02663EE5941B743248AE /* GaryxImagePreviewDismissGesture.swift */; };
 		1AD87CB42B4DA41D7CE40882 /* GaryxMobileModel+Messages.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2E36D89B224745FB8CCB97A9 /* GaryxMobileModel+Messages.swift */; };
 		1DDD3FF1FBDB64BEFFD94E60 /* GaryxChromeMorph.swift in Sources */ = {isa = PBXBuildFile; fileRef = 943F19C5774C98CF2AA342C5 /* GaryxChromeMorph.swift */; };
+		279800000000000000000002 /* GaryxCatalogRefreshPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 279800000000000000000001 /* GaryxCatalogRefreshPolicy.swift */; };
 		1E9FB6A88FE93F21ABFE9199 /* GaryxPendingThreadArchiveState.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5E6192C1BAB31FD5C36D79B /* GaryxPendingThreadArchiveState.swift */; };
 		2053562893A71D6856E34DA8 /* GaryxMobileTurnViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0A1C7D2962E494ABE197289 /* GaryxMobileTurnViews.swift */; };
 		2619BE183FBECDDE530AF730 /* GaryxGestureSettleDisplayLink.swift in Sources */ = {isa = PBXBuildFile; fileRef = C811A13C9C5A19D4507CABF6 /* GaryxGestureSettleDisplayLink.swift */; };
@@ -49,6 +50,7 @@
 		267963F45E02F24257D10DC0 /* GaryxMobileComposerViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = F648BB4978C6A1C1465DD118 /* GaryxMobileComposerViews.swift */; };
 		26E39C763B14387CF55856CA /* GaryxModelProviderDefaults.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0DD16F819F23411ECE80E079 /* GaryxModelProviderDefaults.swift */; };
 		278DF20175DECAE88603B580 /* WorkspaceThreadListSmokeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 756F387A8ABF650AB42F4B24 /* WorkspaceThreadListSmokeTests.swift */; };
+		279800000000000000000004 /* GaryxCatalogRefreshIntegrationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 279800000000000000000003 /* GaryxCatalogRefreshIntegrationTests.swift */; };
 		27B275F6DB9904F984954344 /* GaryxMobileFileLinks.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4D9D37980035D4D66832FC48 /* GaryxMobileFileLinks.swift */; };
 		284A6E8C8970E9A94BD2CB3A /* GaryxAvatarDiskStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = AD635B7F59D429C8C8A5754D /* GaryxAvatarDiskStore.swift */; };
 		2D2E7EB4F816E99371CE1328 /* GaryxGatewayModelDecodingSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 902CC14ACF818DFD52F6EE4C /* GaryxGatewayModelDecodingSupport.swift */; };
@@ -367,6 +369,8 @@
 		2030BD5EF74AD38AE7798CCD /* GaryxHomeThreadSearch.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GaryxHomeThreadSearch.swift; sourceTree = "<group>"; };
 		208EC26183952325A88B5E45 /* GaryxCapsulePreviewLoadPlanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GaryxCapsulePreviewLoadPlanner.swift; sourceTree = "<group>"; };
 		234F5D6B1E2FD10E1F56C572 /* GaryxCapsuleViewport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GaryxCapsuleViewport.swift; sourceTree = "<group>"; };
+		279800000000000000000001 /* GaryxCatalogRefreshPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GaryxCatalogRefreshPolicy.swift; sourceTree = "<group>"; };
+		279800000000000000000003 /* GaryxCatalogRefreshIntegrationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GaryxCatalogRefreshIntegrationTests.swift; sourceTree = "<group>"; };
 		264C058888E6FD39DD88ED2B /* GaryxColdOpenRestorePolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GaryxColdOpenRestorePolicy.swift; sourceTree = "<group>"; };
 		26EE9FBDD5B4C2602C1F4A13 /* GaryxRouteRendererState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GaryxRouteRendererState.swift; sourceTree = "<group>"; };
 		28A514B7A668CBFA3E45581C /* GaryxMobileModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GaryxMobileModel.swift; sourceTree = "<group>"; };
@@ -657,6 +661,7 @@
 				E2A0FFBBDB8131BEC2537044 /* GaryxCapsuleFocusedPreviewLoadingTests.swift */,
 				D7081D71AC07C68795DF84AB /* GaryxCapsulePreviewShellLayoutTests.swift */,
 				D5223B0AAC0643559494DE7A /* GaryxCapsuleThumbnailScrollbarTests.swift */,
+				279800000000000000000003 /* GaryxCatalogRefreshIntegrationTests.swift */,
 				5B1160B371E0D2493F5E7579 /* GaryxComposerBrowseFocusProbeTests.swift */,
 				F92B4253C80CB095FA34E483 /* GaryxComposerDurabilityFileProtectionTests.swift */,
 				2CB0FD35E03C46196DC7EAC1 /* GaryxComposerRuntimeIntegrationTests.swift */,
@@ -846,6 +851,7 @@
 				6A7B51E29E9148EB04AEE886 /* GaryxCapsuleThumbnailFill.swift */,
 				46AB6618F0A724EECC06C0D5 /* GaryxCapsuleThumbnailRendering.swift */,
 				234F5D6B1E2FD10E1F56C572 /* GaryxCapsuleViewport.swift */,
+				279800000000000000000001 /* GaryxCatalogRefreshPolicy.swift */,
 				943F19C5774C98CF2AA342C5 /* GaryxChromeMorph.swift */,
 				A843A1443DAA40DF1D43E63F /* GaryxClaudeCodeAuthModels.swift */,
 				1713C93B1706C39A9A946E69 /* GaryxCodexAuthModels.swift */,
@@ -1151,6 +1157,7 @@
 				B6784187B3722B41C26C7297 /* GaryxCapsuleFocusedPreviewLoadingTests.swift in Sources */,
 				03848E860C3D3D294B7900DA /* GaryxCapsulePreviewShellLayoutTests.swift in Sources */,
 				8EC63D7C77B8B96D12F5E703 /* GaryxCapsuleThumbnailScrollbarTests.swift in Sources */,
+				279800000000000000000004 /* GaryxCatalogRefreshIntegrationTests.swift in Sources */,
 				B38C1E924493CE113DB0D896 /* GaryxComposerBrowseFocusProbeTests.swift in Sources */,
 				BEB666C8229CC6B6AD5BB504 /* GaryxComposerDurabilityFileProtectionTests.swift in Sources */,
 				C7A132008BD8990A8A75D970 /* GaryxComposerRuntimeIntegrationTests.swift in Sources */,
@@ -1195,6 +1202,7 @@
 				4755AA90D03C65FBF793E136 /* GaryxCapsuleThumbnailRendering.swift in Sources */,
 				42767961A15BDF6DD396A565 /* GaryxCapsuleThumbnailStore.swift in Sources */,
 				F19F3D28D1E1317DC3CF9C06 /* GaryxCapsuleViewport.swift in Sources */,
+				279800000000000000000002 /* GaryxCatalogRefreshPolicy.swift in Sources */,
 				1DDD3FF1FBDB64BEFFD94E60 /* GaryxChromeMorph.swift in Sources */,
 				7776F018568293C6068FB24B /* GaryxClaudeCodeAuthModels.swift in Sources */,
 				06CD7B159C043C5F2B31FE1D /* GaryxCodexAuthModels.swift in Sources */,

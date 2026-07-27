@@ -24,10 +24,6 @@ struct GaryxRootView: View {
                         model.setSidebarVisible(visible, animated: animated)
                     },
                     onRefreshAll: {
-                        // Pull-to-refresh awaits only the thread list; the
-                        // catalog sweep refreshes in the background so the
-                        // spinner ends when the list is fresh (TASK-1802 R1).
-                        Task { await model.refreshRemoteState() }
                         await model.requestHomeFeedRefresh(source: .userPullToRefresh)
                     },
                     onRefreshSidebarThreads: {

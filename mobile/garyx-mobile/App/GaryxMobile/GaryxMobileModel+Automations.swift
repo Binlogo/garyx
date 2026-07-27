@@ -7,7 +7,7 @@ extension GaryxMobileModel {
             let run = try await client().runAutomationNow(id: automation.id)
             guard runtimeGeneration == gatewayRequestToken else { return }
             lastAutomationRun = run
-            await refreshRemoteState()
+            await refreshRemoteState(.forced)
             guard runtimeGeneration == gatewayRequestToken else { return }
             if !run.threadId.isEmpty {
                 await openThread(id: run.threadId)
@@ -33,7 +33,7 @@ extension GaryxMobileModel {
                 enabled: enabled
             )
             guard runtimeGeneration == gatewayRequestToken else { return false }
-            await refreshRemoteState()
+            await refreshRemoteState(.forced)
             return true
         } catch {
             guard runtimeGeneration == gatewayRequestToken else { return false }

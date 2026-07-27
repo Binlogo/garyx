@@ -591,7 +591,7 @@ extension GaryxMobileModel {
                 return
             }
             await refreshAgentTargets()
-            await refreshRemoteState()
+            await refreshRemoteState(.forced)
             guard isCurrentConnectRefresh(requestId, runtimeGeneration: runtimeGeneration, scopeId: gatewayScopeId) else {
                 return
             }
@@ -685,14 +685,70 @@ extension GaryxMobileModel {
         }
     }
 
-    func refreshRemoteState() async {
+    func refreshRemoteState(_ intent: GaryxCatalogRefreshPolicy.Intent) async {
         #if DEBUG
         // Panels may request a refresh when they mount. Keep deterministic
         // snapshot routes offline so their fixture data and error state stay put.
         guard !debugSnapshotActive else { return }
         #endif
         guard hasGatewaySettings else { return }
+
         let runtimeGeneration = gatewayRequestToken
+        let currentFlight = catalogRefreshInFlight.flatMap { flight in
+            flight.runtimeGeneration == runtimeGeneration ? flight : nil
+        }
+        let lastCompleted = lastSuccessfulCatalogSweepRuntimeGeneration == runtimeGeneration
+            ? lastSuccessfulCatalogSweepCompletedAt
+            : nil
+        let action = GaryxCatalogRefreshPolicy.action(
+            for: intent,
+            now: catalogRefreshNow(),
+            lastSuccessfulSweepCompletedAt: lastCompleted,
+            isSweepInFlight: currentFlight != nil
+        )
+
+        switch action {
+        case .skip:
+            return
+        case .joinInFlight:
+            if let currentFlight {
+                await currentFlight.task.value
+            }
+            return
+        case .startSweep:
+            let flightId = UUID()
+            let task = Task { @MainActor [weak self] in
+                guard let self else { return }
+                guard catalogRefreshInFlight?.id == flightId,
+                      runtimeGeneration == gatewayRequestToken else {
+                    if catalogRefreshInFlight?.id == flightId {
+                        catalogRefreshInFlight = nil
+                    }
+                    return
+                }
+                let succeeded = await performRemoteStateRefresh(
+                    runtimeGeneration: runtimeGeneration
+                )
+                guard catalogRefreshInFlight?.id == flightId else { return }
+                catalogRefreshInFlight = nil
+                guard succeeded, runtimeGeneration == gatewayRequestToken else {
+                    return
+                }
+                lastSuccessfulCatalogSweepCompletedAt = catalogRefreshNow()
+                lastSuccessfulCatalogSweepRuntimeGeneration = runtimeGeneration
+            }
+            catalogRefreshInFlight = GaryxCatalogRefreshFlight(
+                id: flightId,
+                runtimeGeneration: runtimeGeneration,
+                task: task
+            )
+            await task.value
+        }
+    }
+
+    private func performRemoteStateRefresh(
+        runtimeGeneration: GaryxGatewayRequestToken
+    ) async -> Bool {
         let requestId = UUID()
         remoteStateRefreshRequestId = requestId
         workspaceRefreshRequestId = requestId
@@ -713,7 +769,9 @@ extension GaryxMobileModel {
             async let agentsResult = garyxCaptureCatalog { try await gateway.listAgentCatalog() }
             async let skillsResult = garyxCaptureCatalog { try await gateway.listSkills() }
             async let capsulesResult = refreshCapsules(reportFailure: false)
-            async let gatewaySettingsResult: [String: GaryxJSONValue]? = try? gateway.gatewaySettings()
+            async let gatewaySettingsResult = garyxCaptureCatalog {
+                try await gateway.gatewaySettings()
+            }
             async let automationsResult = garyxCaptureCatalog { try await gateway.listAutomations() }
             async let slashCommandsResult = garyxCaptureCatalog { try await gateway.listSlashCommands() }
             async let mcpServersResult = garyxCaptureCatalog { try await gateway.listMcpServers() }
@@ -724,7 +782,9 @@ extension GaryxMobileModel {
             async let channelPluginsResult = garyxCaptureCatalog { try await gateway.listChannelPlugins() }
 
             let nextWorkspaces = await workspacesResult
-            guard isCurrentRemoteStateRefresh(requestId, runtimeGeneration: runtimeGeneration) else { return }
+            guard isCurrentRemoteStateRefresh(requestId, runtimeGeneration: runtimeGeneration) else {
+                return false
+            }
             if workspaceRefreshRequestId == requestId {
                 workspaceRefreshRequestId = nil
                 switch nextWorkspaces {
@@ -737,7 +797,9 @@ extension GaryxMobileModel {
             }
 
             let nextAgents = await agentsResult
-            guard isCurrentRemoteStateRefresh(requestId, runtimeGeneration: runtimeGeneration) else { return }
+            guard isCurrentRemoteStateRefresh(requestId, runtimeGeneration: runtimeGeneration) else {
+                return false
+            }
             let ownsAgentTargetsState = agentTargetsStateRequestId == requestId
             if ownsAgentTargetsState, let catalog = nextAgents.successValue {
                 applyAgentCatalog(catalog)
@@ -753,7 +815,9 @@ extension GaryxMobileModel {
             let nextConfiguredBots = await configuredBotsResult
             let nextBotConsoles = await botConsolesResult
             let nextChannelPlugins = await channelPluginsResult
-            guard isCurrentRemoteStateRefresh(requestId, runtimeGeneration: runtimeGeneration) else { return }
+            guard isCurrentRemoteStateRefresh(requestId, runtimeGeneration: runtimeGeneration) else {
+                return false
+            }
 
             let cacheableResults: [AnyCatalogResult] = [
                 .init(nextAgents),
@@ -769,13 +833,14 @@ extension GaryxMobileModel {
                 .init(nextChannelPlugins),
             ]
             let cacheableRefreshSucceeded = cacheableResults.allSatisfy(\.isSuccess)
+            let sweepSucceeded = cacheableRefreshSucceeded && !nextGatewaySettings.isFailure
 
             if case let .success(value) = nextSkills {
                 skills = value
             }
             // Capsule catalog state was already committed by its coordinator;
             // this result participates only in aggregate refresh success.
-            if let settings = nextGatewaySettings {
+            if case let .success(settings) = nextGatewaySettings {
                 gatewaySettingsDocument = settings
             }
             if case let .success(value) = nextAutomations {
@@ -808,13 +873,17 @@ extension GaryxMobileModel {
                 runtimeGeneration: runtimeGeneration,
                 remoteStateRefreshRequestId: requestId
             )
-            guard isCurrentRemoteStateRefresh(requestId, runtimeGeneration: runtimeGeneration) else { return }
+            guard isCurrentRemoteStateRefresh(requestId, runtimeGeneration: runtimeGeneration) else {
+                return false
+            }
             ensureSelectedWorkspace()
             await refreshProviderModelsForVisibleAgents(
                 runtimeGeneration: runtimeGeneration,
                 remoteStateRefreshRequestId: requestId
             )
-            guard isCurrentRemoteStateRefresh(requestId, runtimeGeneration: runtimeGeneration) else { return }
+            guard isCurrentRemoteStateRefresh(requestId, runtimeGeneration: runtimeGeneration) else {
+                return false
+            }
             let stillOwnsAgentTargetsState = agentTargetsStateRequestId == requestId
             if cacheableRefreshSucceeded, stillOwnsAgentTargetsState {
                 persistCatalogCacheSnapshot()
@@ -843,8 +912,11 @@ extension GaryxMobileModel {
                 ) ?? "Some catalog data could not be loaded."
                 remoteStateLoadPhase = .failed(message)
             }
+            return sweepSucceeded
         } catch {
-            guard isCurrentRemoteStateRefresh(requestId, runtimeGeneration: runtimeGeneration) else { return }
+            guard isCurrentRemoteStateRefresh(requestId, runtimeGeneration: runtimeGeneration) else {
+                return false
+            }
             let message = displayMessage(for: error)
             remoteStateLoadPhase = .failed(message)
             if workspaceRefreshRequestId == requestId {
@@ -858,6 +930,7 @@ extension GaryxMobileModel {
                 agentTargetsStateRequestId = nil
             }
             lastError = message
+            return false
         }
     }
 

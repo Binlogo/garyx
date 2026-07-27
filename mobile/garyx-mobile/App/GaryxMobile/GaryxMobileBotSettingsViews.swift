@@ -31,7 +31,7 @@ struct GaryxBotsContent: View {
         }
         .task {
             if model.channelPlugins.isEmpty || model.gatewaySettingsDocument.isEmpty {
-                await model.refreshRemoteState()
+                await model.refreshRemoteState(.staleGated)
             }
         }
     }
