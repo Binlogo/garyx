@@ -328,6 +328,110 @@ final class GaryxCatalogRefreshIntegrationTests: XCTestCase {
         )
     }
 
+    func testB13HomePullCommitsSelectedFeedWithoutDroppingPinnedSection() async throws {
+        let recorder = GaryxCatalogRequestRecorder()
+        let model = makeModel(recorder: recorder)
+        let runtime = GaryxThreadRuntimeSummary(
+            agentId: "agent-current",
+            providerType: "test",
+            model: "test-model"
+        )
+        let existing = makeThread(
+            id: "thread-home",
+            title: "Previous Home Thread",
+            updatedAt: "2026-07-26T12:00:00Z",
+            threadRuntime: runtime
+        )
+        model.seedThreadSummariesForTesting(
+            [existing],
+            recentThreadIds: [existing.id]
+        )
+        model.applyPinnedThreadIds([existing.id])
+        model.selectedThread = existing
+        model.draftThreadTitle = existing.title
+        let coordinator = prepareHome(model, filter: .all)
+        recorder.reset()
+
+        await performHomePull(model)
+        await coordinator.waitForTransportIdleForTesting()
+
+        XCTAssertEqual(
+            Set(recorder.entries.map(\.target)),
+            ["/api/recent-threads?limit=30&tasks=include"]
+        )
+        XCTAssertEqual(model.pinnedThreadIds, [existing.id])
+        XCTAssertEqual(
+            model.homeThreadListStore.presentationSnapshot.sections.pinned.map(\.id),
+            [existing.id]
+        )
+        let refreshed = try XCTUnwrap(model.cachedThreadSummary(for: existing.id))
+        XCTAssertEqual(refreshed.title, "Home Thread")
+        XCTAssertEqual(refreshed.threadRuntime, runtime)
+        XCTAssertEqual(model.selectedThread?.title, "Home Thread")
+        XCTAssertEqual(model.draftThreadTitle, "Home Thread")
+    }
+
+    func testConcurrentPullDoesNotNarrowQueuedUserAction() async {
+        let recorder = GaryxCatalogRequestRecorder()
+        let model = makeModel(recorder: recorder)
+        let coordinator = prepareHome(model, filter: .all)
+        recorder.reset()
+
+        let userAction = Task { @MainActor in
+            await model.requestHomeFeedRefresh(source: .userAction)
+        }
+        while !coordinator.hasPendingUserIntentForTesting(.userAction) {
+            await Task.yield()
+        }
+        let pull = Task { @MainActor in
+            await model.requestHomeFeedRefresh(source: .userPullToRefresh)
+        }
+        while !coordinator.hasPendingUserIntentForTesting(.userPullToRefresh) {
+            await Task.yield()
+        }
+        model.connectionState = .ready(version: "test")
+
+        await userAction.value
+        await pull.value
+        await coordinator.waitForTransportIdleForTesting()
+        await coordinator.waitForFavoritesConvergence()
+
+        XCTAssertEqual(
+            Set(recorder.entries.map(\.target)),
+            [
+                "/api/recent-threads?limit=30&tasks=include",
+                "/api/thread-favorites/snapshot",
+                "/api/thread-pins",
+                "/api/thread-summaries?limit=1",
+            ]
+        )
+        XCTAssertTrue(recorder.catalogPaths.isEmpty)
+    }
+
+    private func makeThread(
+        id: String,
+        title: String,
+        updatedAt: String,
+        threadRuntime: GaryxThreadRuntimeSummary? = nil
+    ) -> GaryxThreadSummary {
+        GaryxThreadSummary(
+            id: id,
+            title: title,
+            createdAt: nil,
+            updatedAt: updatedAt,
+            lastMessagePreview: "",
+            workspacePath: nil,
+            messageCount: nil,
+            agentId: nil,
+            providerType: nil,
+            recentRunId: nil,
+            activeRunId: nil,
+            runState: nil,
+            worktreePath: nil,
+            threadRuntime: threadRuntime
+        )
+    }
+
     private func makeModel(
         defaults: UserDefaults? = nil,
         recorder: GaryxCatalogRequestRecorder,
