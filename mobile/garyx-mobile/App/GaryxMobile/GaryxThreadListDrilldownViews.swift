@@ -225,7 +225,7 @@ struct GaryxBotThreadListDrilldown: View {
         GaryxListPanelScaffold(
             title: group.title,
             onRefresh: {
-                await model.refreshRemoteState()
+                await model.refreshRemoteState(.forced)
                 refreshCurrentGroup()
             }
         ) {
@@ -234,7 +234,7 @@ struct GaryxBotThreadListDrilldown: View {
                 store: store,
                 emptyTitle: "No threads yet",
                 onRetry: {
-                    await model.refreshRemoteState()
+                    await model.refreshRemoteState(.forced)
                     refreshCurrentGroup()
                 },
                 onLoadMore: { _ in },

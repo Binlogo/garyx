@@ -12,6 +12,7 @@ final class GaryxHomeFeedSyncCoordinator {
     private struct UserIntent {
         var source: GaryxThreadListRefreshSource
         var forceReplacement: Bool
+        var refreshesSelectedFeedOnly: Bool
     }
 
     private struct Waiter {
@@ -123,6 +124,12 @@ final class GaryxHomeFeedSyncCoordinator {
     func hasQueuedHeadRequestForTesting(_ filter: GaryxRecentThreadFilter) -> Bool {
         hasQueuedRequest(for: filter)
     }
+
+    func hasPendingUserIntentForTesting(
+        _ source: GaryxThreadListRefreshSource
+    ) -> Bool {
+        pendingUserIntent?.source == source
+    }
     #endif
 
     func updateConnection(_ state: GaryxMobileConnectionState) {
@@ -180,7 +187,8 @@ final class GaryxHomeFeedSyncCoordinator {
         mergeUserIntent(
             UserIntent(
                 source: source,
-                forceReplacement: forceReplacement
+                forceReplacement: forceReplacement,
+                refreshesSelectedFeedOnly: source == .userPullToRefresh
             )
         )
         wake()
@@ -301,6 +309,8 @@ final class GaryxHomeFeedSyncCoordinator {
                     let effects = owner.makeHomeFeedRefreshEffects(
                         source: source,
                         forceReplacement: intent?.forceReplacement ?? false,
+                        refreshesSelectedFeedOnly:
+                            intent?.refreshesSelectedFeedOnly ?? false,
                         authority: GaryxHomeFeedSyncAuthority()
                     )
                     runRecentFeedEffects(effects)
@@ -368,6 +378,7 @@ final class GaryxHomeFeedSyncCoordinator {
                 return
             }
             pendingFavoritesSnapshotTicket = nil
+            syncState.lastRefreshStartedAt = Date()
             let taskId = UUID()
             let transport = owner.startThreadFavoritesSnapshot(
                 ticket,
@@ -464,7 +475,9 @@ final class GaryxHomeFeedSyncCoordinator {
         }
         pendingUserIntent = UserIntent(
             source: source,
-            forceReplacement: current.forceReplacement || candidate.forceReplacement
+            forceReplacement: current.forceReplacement || candidate.forceReplacement,
+            refreshesSelectedFeedOnly: current.refreshesSelectedFeedOnly
+                && candidate.refreshesSelectedFeedOnly
         )
     }
 
@@ -564,10 +577,13 @@ extension GaryxMobileModel {
     fileprivate func makeHomeFeedRefreshEffects(
         source: GaryxThreadListRefreshSource,
         forceReplacement: Bool,
+        refreshesSelectedFeedOnly: Bool,
         authority _: GaryxHomeFeedSyncAuthority
     ) -> [GaryxRecentFeedEffect] {
         servicePinnedOrderRetry(source: source)
-        refreshThreadFavoritesSnapshot()
+        if !refreshesSelectedFeedOnly {
+            refreshThreadFavoritesSnapshot()
+        }
 
         switch recentThreadFeeds.selectedFilter {
         case .all:
@@ -575,27 +591,38 @@ extension GaryxMobileModel {
                 filter: .all,
                 source: source,
                 forceReplacement: forceReplacement,
-                updatesHomeChrome: true
+                homeProjectionCommit: refreshesSelectedFeedOnly
+                    ? .cachedPins
+                    : .refreshedPins
             )
         case .nonTask:
-            return recentThreadFeeds.requestHeadEffects(
+            let selectedFeedEffects = recentThreadFeeds.requestHeadEffects(
                 filter: .nonTask,
                 source: source,
                 forceReplacement: forceReplacement,
-                updatesHomeChrome: true
-            ) + recentThreadFeeds.requestHeadEffects(
+                homeProjectionCommit: refreshesSelectedFeedOnly
+                    ? .cachedPins
+                    : .refreshedPins
+            )
+            guard !refreshesSelectedFeedOnly else {
+                return selectedFeedEffects
+            }
+            return selectedFeedEffects + recentThreadFeeds.requestHeadEffects(
                 filter: .all,
                 source: source,
                 forceReplacement: forceReplacement,
-                updatesHomeChrome: false
+                homeProjectionCommit: .none
             )
         case .favorites:
             runThreadFavoritesEffects(threadFavoritesProvider.requestRefresh())
+            guard !refreshesSelectedFeedOnly else {
+                return []
+            }
             return recentThreadFeeds.requestHeadEffects(
                 filter: .all,
                 source: source,
                 forceReplacement: forceReplacement,
-                updatesHomeChrome: true
+                homeProjectionCommit: .refreshedPins
             )
         }
     }
@@ -620,13 +647,17 @@ extension GaryxMobileModel {
             filter: .all,
             source: .userAction,
             forceReplacement: true,
-            updatesHomeChrome: recentThreadFeeds.selectedFilter != .nonTask,
+            homeProjectionCommit: recentThreadFeeds.selectedFilter != .nonTask
+                ? .refreshedPins
+                : .none,
             runsWhenUnselected: true
         ) + recentThreadFeeds.requestHeadEffects(
             filter: .nonTask,
             source: .userAction,
             forceReplacement: true,
-            updatesHomeChrome: recentThreadFeeds.selectedFilter == .nonTask,
+            homeProjectionCommit: recentThreadFeeds.selectedFilter == .nonTask
+                ? .refreshedPins
+                : .none,
             runsWhenUnselected: true
         )
     }

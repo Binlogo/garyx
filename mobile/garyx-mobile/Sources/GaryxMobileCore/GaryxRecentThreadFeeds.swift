@@ -38,25 +38,45 @@ public enum GaryxRecentThreadRefreshMode: Equatable, Sendable {
     case replacement
 }
 
+/// Controls how a Recent head result is committed into the shared Home
+/// projection. Keeping the cached-pins case distinct lets a selected-feed
+/// refresh retain the canonical commit without widening its request set.
+public enum GaryxRecentHomeProjectionCommit: Equatable, Sendable {
+    case none
+    case cachedPins
+    case refreshedPins
+
+    fileprivate func merging(_ candidate: Self) -> Self {
+        switch (self, candidate) {
+        case (.refreshedPins, _), (_, .refreshedPins):
+            return .refreshedPins
+        case (.cachedPins, _), (_, .cachedPins):
+            return .cachedPins
+        case (.none, .none):
+            return .none
+        }
+    }
+}
+
 public struct GaryxRecentHeadRequest: Equatable, Sendable {
     public var filter: GaryxRecentThreadFilter
     public var source: GaryxThreadListRefreshSource
     public var forceReplacement: Bool
-    public var updatesHomeChrome: Bool
+    public var homeProjectionCommit: GaryxRecentHomeProjectionCommit
     public var runsWhenUnselected: Bool
 
     public init(
         filter: GaryxRecentThreadFilter,
         source: GaryxThreadListRefreshSource,
         forceReplacement: Bool = false,
-        updatesHomeChrome: Bool = true,
+        homeProjectionCommit: GaryxRecentHomeProjectionCommit = .refreshedPins,
         runsWhenUnselected: Bool = false
     ) {
         precondition(filter != .favorites, "Favorites owns its snapshot transport")
         self.filter = filter
         self.source = source
         self.forceReplacement = forceReplacement
-        self.updatesHomeChrome = updatesHomeChrome
+        self.homeProjectionCommit = homeProjectionCommit
         self.runsWhenUnselected = runsWhenUnselected
     }
 
@@ -75,7 +95,9 @@ public struct GaryxRecentHeadRequest: Equatable, Sendable {
             filter: filter,
             source: mergedSource,
             forceReplacement: forceReplacement || candidate.forceReplacement,
-            updatesHomeChrome: updatesHomeChrome || candidate.updatesHomeChrome,
+            homeProjectionCommit: homeProjectionCommit.merging(
+                candidate.homeProjectionCommit
+            ),
             runsWhenUnselected: runsWhenUnselected || candidate.runsWhenUnselected
         )
     }
@@ -93,7 +115,7 @@ public struct GaryxRecentThreadRefreshTicket: Equatable, Sendable {
     public let gatewayScope: String
     public let runtimeEpoch: UInt64
     public let source: GaryxThreadListRefreshSource
-    public let updatesHomeChrome: Bool
+    public let homeProjectionCommit: GaryxRecentHomeProjectionCommit
     public let runsWhenUnselected: Bool
     public let mode: GaryxRecentThreadRefreshMode
     public let oldHeadActivitySeq: Int64?
@@ -294,7 +316,9 @@ public struct GaryxRecentThreadFeedState: Equatable, Sendable, GaryxRecentHeadDo
                         filter: filter,
                         source: .userAction,
                         forceReplacement: true,
-                        updatesHomeChrome: filter == .all
+                        homeProjectionCommit: filter == .all
+                            ? .refreshedPins
+                            : .none
                     )
                 ),
             ]
@@ -354,7 +378,7 @@ public struct GaryxRecentThreadFeedState: Equatable, Sendable, GaryxRecentHeadDo
             gatewayScope: gatewayScope,
             runtimeEpoch: runtimeEpoch,
             source: request.source,
-            updatesHomeChrome: request.updatesHomeChrome,
+            homeProjectionCommit: request.homeProjectionCommit,
             runsWhenUnselected: request.runsWhenUnselected,
             mode: mode,
             oldHeadActivitySeq: headActivitySeq,
@@ -467,7 +491,7 @@ public struct GaryxRecentThreadFeedState: Equatable, Sendable, GaryxRecentHeadDo
                 gatewayScope: ticket.gatewayScope,
                 runtimeEpoch: ticket.runtimeEpoch,
                 source: ticket.source,
-                updatesHomeChrome: ticket.updatesHomeChrome,
+                homeProjectionCommit: ticket.homeProjectionCommit,
                 runsWhenUnselected: ticket.runsWhenUnselected,
                 mode: .rangeFill,
                 oldHeadActivitySeq: primaryHead,
@@ -693,7 +717,9 @@ public struct GaryxRecentThreadFeedState: Equatable, Sendable, GaryxRecentHeadDo
                     filter: filter,
                     source: .userAction,
                     forceReplacement: true,
-                    updatesHomeChrome: filter == .all
+                    homeProjectionCommit: filter == .all
+                        ? .refreshedPins
+                        : .none
                 )
             ),
         ]
@@ -730,7 +756,7 @@ public struct GaryxRecentThreadFeedState: Equatable, Sendable, GaryxRecentHeadDo
                 filter: ticket.filter,
                 source: ticket.source,
                 forceReplacement: forceReplacement,
-                updatesHomeChrome: ticket.updatesHomeChrome,
+                homeProjectionCommit: ticket.homeProjectionCommit,
                 runsWhenUnselected: ticket.runsWhenUnselected
             )
         )
@@ -749,7 +775,7 @@ public struct GaryxRecentThreadFeedState: Equatable, Sendable, GaryxRecentHeadDo
             filter: filter,
             source: source,
             forceReplacement: forceReplacement,
-            updatesHomeChrome: true
+            homeProjectionCommit: .refreshedPins
         )
         pendingHeadRequest = Self.mergedPendingHeadRequest(
             pendingHeadRequest,
@@ -898,7 +924,7 @@ public struct GaryxRecentThreadFeeds: Equatable, Sendable {
         filter: GaryxRecentThreadFilter? = nil,
         source: GaryxThreadListRefreshSource,
         forceReplacement: Bool = false,
-        updatesHomeChrome: Bool = true,
+        homeProjectionCommit: GaryxRecentHomeProjectionCommit = .refreshedPins,
         runsWhenUnselected: Bool = false
     ) -> [GaryxRecentFeedEffect] {
         let filter = filter ?? selectedFilter
@@ -907,7 +933,7 @@ public struct GaryxRecentThreadFeeds: Equatable, Sendable {
             filter: filter,
             source: source,
             forceReplacement: forceReplacement,
-            updatesHomeChrome: updatesHomeChrome,
+            homeProjectionCommit: homeProjectionCommit,
             runsWhenUnselected: runsWhenUnselected
         )
         switch filter {
@@ -950,7 +976,7 @@ public struct GaryxRecentThreadFeeds: Equatable, Sendable {
             gatewayScope: ticket.gatewayScope,
             runtimeEpoch: ticket.runtimeEpoch,
             source: ticket.source,
-            updatesHomeChrome: ticket.updatesHomeChrome,
+            homeProjectionCommit: ticket.homeProjectionCommit,
             runsWhenUnselected: ticket.runsWhenUnselected,
             mode: ticket.mode,
             oldHeadActivitySeq: ticket.oldHeadActivitySeq,

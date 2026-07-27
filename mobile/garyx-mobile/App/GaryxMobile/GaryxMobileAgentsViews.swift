@@ -12,7 +12,7 @@ struct GaryxAgentsView: View {
         GaryxPanelScaffold(
             title: "Agents",
             subtitle: "\(model.agents.count) agents",
-            onRefresh: { await model.refreshRemoteState() }
+            onRefresh: { await model.refreshRemoteState(.forced) }
         ) {
             VStack(alignment: .leading, spacing: 18) {
                 GaryxSectionBlock(title: "Agents") {

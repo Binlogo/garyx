@@ -30,7 +30,7 @@ extension GaryxMobileModel {
             let status = try await client().bindBot(botId: bot.id, threadId: threadId)
             guard runtimeGeneration == gatewayRequestToken else { return }
             botStatusesById[bot.id] = status
-            await refreshRemoteState()
+            await refreshRemoteState(.forced)
         } catch {
             guard runtimeGeneration == gatewayRequestToken else { return }
             lastError = displayMessage(for: error)
@@ -43,7 +43,7 @@ extension GaryxMobileModel {
             let status = try await client().unbindBot(botId: bot.id)
             guard runtimeGeneration == gatewayRequestToken else { return }
             botStatusesById[bot.id] = status
-            await refreshRemoteState()
+            await refreshRemoteState(.forced)
         } catch {
             guard runtimeGeneration == gatewayRequestToken else { return }
             lastError = displayMessage(for: error)
@@ -108,7 +108,7 @@ extension GaryxMobileModel {
             _ = try await client().saveGatewaySettings(settings, merge: false)
             guard runtimeGeneration == gatewayRequestToken else { return false }
             gatewaySettingsDocument = settings
-            await refreshRemoteState()
+            await refreshRemoteState(.forced)
             return true
         } catch {
             guard runtimeGeneration == gatewayRequestToken else { return false }
@@ -167,7 +167,7 @@ extension GaryxMobileModel {
             }
             botStatusesById.removeValue(forKey: account.id)
             persistCatalogCacheSnapshot()
-            await refreshRemoteState()
+            await refreshRemoteState(.forced)
         } catch {
             guard runtimeGeneration == gatewayRequestToken else { return }
             lastError = displayMessage(for: error)
@@ -200,7 +200,7 @@ extension GaryxMobileModel {
             }
             botStatusesById.removeValue(forKey: bot.id)
             persistCatalogCacheSnapshot()
-            await refreshRemoteState()
+            await refreshRemoteState(.forced)
         } catch {
             guard runtimeGeneration == gatewayRequestToken else { return }
             lastError = displayMessage(for: error)
@@ -213,7 +213,7 @@ extension GaryxMobileModel {
         do {
             _ = try await client().bindChannelEndpoint(endpointKey: endpoint.endpointKey, threadId: threadId)
             guard runtimeGeneration == gatewayRequestToken else { return }
-            await refreshRemoteState()
+            await refreshRemoteState(.forced)
         } catch {
             guard runtimeGeneration == gatewayRequestToken else { return }
             lastError = displayMessage(for: error)
@@ -225,7 +225,7 @@ extension GaryxMobileModel {
         do {
             _ = try await client().detachChannelEndpoint(endpointKey: endpoint.endpointKey)
             guard runtimeGeneration == gatewayRequestToken else { return }
-            await refreshRemoteState()
+            await refreshRemoteState(.forced)
         } catch {
             guard runtimeGeneration == gatewayRequestToken else { return }
             lastError = displayMessage(for: error)
@@ -323,7 +323,7 @@ extension GaryxMobileModel {
                 activeAssistantMessageIdsByThread[normalizedThreadId] = nil
             }
 
-            await refreshRemoteState()
+            await refreshRemoteState(.forced)
             await requestHomeFeedRefresh(source: .userAction)
         case .rejected(let code, let message):
             pendingThreadArchives.cancelArchive(threadId: normalizedThreadId)

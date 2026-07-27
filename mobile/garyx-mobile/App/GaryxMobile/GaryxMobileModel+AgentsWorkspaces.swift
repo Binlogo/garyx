@@ -898,7 +898,7 @@ extension GaryxMobileModel {
                 serviceTier: request.serviceTier
             )
             await loadProviderModels(providerType: provider.providerType, runtimeGeneration: runtimeGeneration)
-            await refreshRemoteState()
+            await refreshRemoteState(.forced)
             return true
         } catch {
             guard runtimeGeneration == gatewayRequestToken else { return false }

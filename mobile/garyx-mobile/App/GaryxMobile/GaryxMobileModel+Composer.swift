@@ -1111,7 +1111,7 @@ extension GaryxMobileModel {
                 agentId: pendingAgentId,
                 draftGeneration: draftGeneration
             )
-            await refreshRemoteState()
+            await refreshRemoteState(.staleGated)
             try Task.checkCancellation()
             guard runtimeGeneration == gatewayRequestToken else {
                 throw CancellationError()

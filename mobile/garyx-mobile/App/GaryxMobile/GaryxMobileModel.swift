@@ -37,6 +37,12 @@ struct GaryxGatewayRuntimeIdentity: Equatable {
     var headers: String
 }
 
+struct GaryxCatalogRefreshFlight {
+    let id: UUID
+    let runtimeGeneration: GaryxGatewayRequestToken
+    let task: Task<Void, Never>
+}
+
 struct GaryxThreadRuntimeRollbackSnapshot {
     var selectedRuntime: GaryxThreadRuntimeSummary?
     var listRuntime: GaryxThreadRuntimeSummary?
@@ -547,9 +553,13 @@ final class GaryxMobileModel: ObservableObject {
     var catalogSnapshotRestored = false
     var connectRefreshRequestId: UUID?
     var remoteStateRefreshRequestId: UUID?
+    var catalogRefreshInFlight: GaryxCatalogRefreshFlight?
+    var lastSuccessfulCatalogSweepCompletedAt: Date?
+    var lastSuccessfulCatalogSweepRuntimeGeneration: GaryxGatewayRequestToken?
     var agentTargetsRefreshRequestId: UUID?
     var agentTargetsStateRequestId: UUID?
     var workspaceRefreshRequestId: UUID?
+    let catalogRefreshNow: () -> Date
     let productionRouteStore = GaryxProductionRouteStore()
     let routeNotFoundStore = GaryxRouteNotFoundStore()
     let homeObservationStore = GaryxHomeObservationStore()
@@ -634,7 +644,8 @@ final class GaryxMobileModel: ObservableObject {
         defaults: UserDefaults = .standard,
         keychain: GaryxMobileKeychain = .shared,
         gatewayClientFactory: ((GaryxGatewayConfiguration) -> GaryxGatewayClient)? = nil,
-        composerPayloadCoordinator: GaryxComposerPayloadCoordinator? = nil
+        composerPayloadCoordinator: GaryxComposerPayloadCoordinator? = nil,
+        catalogRefreshNow: @escaping () -> Date = Date.init
     ) {
         let threadSummaryCache = GaryxThreadSummaryCache()
         let threadSummaryLeaseOwner = GaryxThreadSummaryLeaseOwner(cache: threadSummaryCache)
@@ -664,6 +675,7 @@ final class GaryxMobileModel: ObservableObject {
         self.defaults = defaults
         self.keychain = keychain
         self.gatewayClientFactory = gatewayClientFactory
+        self.catalogRefreshNow = catalogRefreshNow
         self.gatewayScopeEpochByIdentity = Self.loadGatewayScopeEpochs(defaults: defaults)
         self.pinnedOrderOutboxStore = GaryxPinnedOrderUserDefaultsStore(defaults: defaults)
         self.recentThreadFeeds = recentFeedsBootstrap.feeds

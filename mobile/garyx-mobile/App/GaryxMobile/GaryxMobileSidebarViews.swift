@@ -1852,7 +1852,7 @@ struct GaryxWorkspaceBotsView: View {
         GaryxPanelScaffold(
             title: "Workspaces",
             subtitle: "",
-            onRefresh: { await model.refreshRemoteState() },
+            onRefresh: { await model.refreshRemoteState(.forced) },
             leadingActionLabel: nil,
             leadingAction: nil,
             contentHorizontalPadding: 0
@@ -1893,7 +1893,7 @@ struct GaryxWorkspaceBotsView: View {
             }
         }
         .task {
-            await model.refreshRemoteState()
+            await model.refreshRemoteState(.staleGated)
         }
         .garyxSheet(isPresented: $showsAddWorkspace) {
             GaryxWorkspacePathPickerSheet(title: "Add Workspace") { path in

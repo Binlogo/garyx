@@ -21,7 +21,7 @@ struct GaryxSkillsView: View {
         GaryxPanelScaffold(
             title: "Skills",
             subtitle: "\(model.skills.filter(\.enabled).count) enabled / \(model.skills.count) total",
-            onRefresh: { await model.refreshRemoteState() }
+            onRefresh: { await model.refreshRemoteState(.forced) }
         ) {
             VStack(alignment: .leading, spacing: 18) {
                 if model.skills.isEmpty, model.isRemoteStatePending {

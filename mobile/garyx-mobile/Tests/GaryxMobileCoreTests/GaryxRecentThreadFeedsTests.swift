@@ -20,6 +20,37 @@ final class GaryxRecentThreadFeedsTests: XCTestCase {
         XCTAssertFalse(feeds.nonTaskFeed.isPrimed)
     }
 
+    func testHeadRequestMergeKeepsStrongestHomeProjectionCommit() {
+        let cachedPins = GaryxRecentHeadRequest(
+            filter: .all,
+            source: .userPullToRefresh,
+            homeProjectionCommit: .cachedPins
+        )
+        let refreshedPins = GaryxRecentHeadRequest(
+            filter: .all,
+            source: .userAction,
+            homeProjectionCommit: .refreshedPins
+        )
+        let feedOnly = GaryxRecentHeadRequest(
+            filter: .all,
+            source: .backgroundLoop,
+            homeProjectionCommit: .none
+        )
+
+        XCTAssertEqual(
+            feedOnly.merging(cachedPins).homeProjectionCommit,
+            .cachedPins
+        )
+        XCTAssertEqual(
+            cachedPins.merging(refreshedPins).homeProjectionCommit,
+            .refreshedPins
+        )
+        XCTAssertEqual(
+            refreshedPins.merging(cachedPins).homeProjectionCommit,
+            .refreshedPins
+        )
+    }
+
     func testFavoritesSelectionHasNoRecentPagerOrTransportTicket() {
         var feeds = makeFeeds()
         feeds.select(.favorites)

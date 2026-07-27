@@ -5,6 +5,12 @@ private struct GaryxFetchedRecentRefresh {
     var threads: [GaryxThreadSummary]
 }
 
+private struct GaryxFetchedRecentHomeProjectionRefresh {
+    var recent: GaryxFetchedRecentRefresh
+    var pinsPage: GaryxThreadPinsPage?
+    var pinsRequestStamp: GaryxPinnedOrderRequestStamp?
+}
+
 private struct GaryxRecentIdentityInterrupted: Error {}
 
 // Home recent-thread list: refresh and pagination, the widget snapshot
@@ -39,7 +45,7 @@ extension GaryxMobileModel {
         defer { homeProjectionGateway.endTransaction(transactionId) }
         do {
             let gatewayClient = try client()
-            if !ticket.updatesHomeChrome {
+            if ticket.homeProjectionCommit == .none {
                 let fetched = try await fetchRecentRefresh(
                     ticket: ticket,
                     gatewayClient: gatewayClient
@@ -66,13 +72,10 @@ extension GaryxMobileModel {
                 return
             }
 
-            let pinsRequestStamp = capturePinnedOrderRequestStamp()
-            async let recentRefresh = fetchRecentRefresh(
+            let fetchedHomeProjection = try await fetchRecentHomeProjectionRefresh(
                 ticket: ticket,
                 gatewayClient: gatewayClient
             )
-            async let threadPinsPage = gatewayClient.listThreadPins()
-            let (fetchedRefresh, pinsPage) = try await (recentRefresh, threadPinsPage)
             if runtimeGeneration != gatewayRequestToken {
                 let completion = recentThreadFeeds.completeHead(
                     ticket,
@@ -81,40 +84,45 @@ extension GaryxMobileModel {
                 homeFeedSyncCoordinator.runRecentFeedEffects(completion.effects)
                 return
             }
-            var fetchedThreads = pendingThreadArchives.visibleThreads(fetchedRefresh.threads)
+            var fetchedThreads = pendingThreadArchives.visibleThreads(
+                fetchedHomeProjection.recent.threads
+            )
             let selectionIdForThisRefresh = selectedThread?.id
-            let requiredThreadIds = normalizedThreadIds(
-                pendingThreadArchives.visibleThreadIds(pinsPage.threadIds) + [selectionIdForThisRefresh]
-            )
-            fetchedThreads += await fetchMissingThreadSummaries(
-                using: gatewayClient,
-                requiredThreadIds: requiredThreadIds,
-                existingThreadIds: Set(fetchedThreads.map(\.id))
-            )
-            if runtimeGeneration != gatewayRequestToken {
-                let completion = recentThreadFeeds.completeHead(
-                    ticket,
-                    result: .interrupted(.supersededByReset)
+            if let pinsPage = fetchedHomeProjection.pinsPage {
+                let requiredThreadIds = normalizedThreadIds(
+                    pendingThreadArchives.visibleThreadIds(pinsPage.threadIds)
+                        + [selectionIdForThisRefresh]
                 )
-                homeFeedSyncCoordinator.runRecentFeedEffects(completion.effects)
-                return
+                fetchedThreads += await fetchMissingThreadSummaries(
+                    using: gatewayClient,
+                    requiredThreadIds: requiredThreadIds,
+                    existingThreadIds: Set(fetchedThreads.map(\.id))
+                )
+                if runtimeGeneration != gatewayRequestToken {
+                    let completion = recentThreadFeeds.completeHead(
+                        ticket,
+                        result: .interrupted(.supersededByReset)
+                    )
+                    homeFeedSyncCoordinator.runRecentFeedEffects(completion.effects)
+                    return
+                }
             }
 
             let completion = recentThreadFeeds.completeHead(
                 ticket,
-                result: .page(fetchedRefresh.bundle)
+                result: .page(fetchedHomeProjection.recent.bundle)
             )
             homeFeedSyncCoordinator.runRecentFeedEffects(completion.effects)
             if completion.outcome == .applied {
                 commitRefreshedRecentThreadsPage(
-                    pinsPageThreadIds: pinsPage.threadIds,
+                    pinsPageThreadIds: fetchedHomeProjection.pinsPage?.threadIds,
                     fetchedThreads: fetchedThreads,
                     previousThreadSummaries: previousThreadSummaries,
                     previouslyRemoteBusyThreadIds: previouslyRemoteBusyThreadIds,
                     selectionIdForThisRefresh: selectionIdForThisRefresh,
                     runtimeGeneration: runtimeGeneration,
-                    pinsRevision: pinsPage.revision,
-                    pinsRequestStamp: pinsRequestStamp
+                    pinsRevision: fetchedHomeProjection.pinsPage?.revision ?? 0,
+                    pinsRequestStamp: fetchedHomeProjection.pinsRequestStamp
                 )
             }
         } catch is GaryxRecentIdentityInterrupted {
@@ -141,6 +149,37 @@ extension GaryxMobileModel {
             if recentThreadFeeds.selectedFilter == ticket.filter {
                 presentThreadListRefreshFailure(source: ticket.source, error: error)
             }
+        }
+    }
+
+    private func fetchRecentHomeProjectionRefresh(
+        ticket: GaryxRecentThreadRefreshTicket,
+        gatewayClient: GaryxGatewayClient
+    ) async throws -> GaryxFetchedRecentHomeProjectionRefresh {
+        switch ticket.homeProjectionCommit {
+        case .none:
+            preconditionFailure("non-projection requests use the feed-only path")
+        case .cachedPins:
+            return GaryxFetchedRecentHomeProjectionRefresh(
+                recent: try await fetchRecentRefresh(
+                    ticket: ticket,
+                    gatewayClient: gatewayClient
+                ),
+                pinsPage: nil,
+                pinsRequestStamp: nil
+            )
+        case .refreshedPins:
+            let pinsRequestStamp = capturePinnedOrderRequestStamp()
+            async let recent = fetchRecentRefresh(
+                ticket: ticket,
+                gatewayClient: gatewayClient
+            )
+            async let pinsPage = gatewayClient.listThreadPins()
+            return try await GaryxFetchedRecentHomeProjectionRefresh(
+                recent: recent,
+                pinsPage: pinsPage,
+                pinsRequestStamp: pinsRequestStamp
+            )
         }
     }
 
@@ -301,7 +340,7 @@ extension GaryxMobileModel {
                 )
             } else if ticket.storeId.hasPrefix("bot:") {
                 let groupId = String(ticket.storeId.dropFirst("bot:".count))
-                await refreshRemoteState()
+                await refreshRemoteState(.staleGated)
                 if let group = mobileBotGroups.first(where: { $0.id == groupId }) {
                     refreshBotThreadList(group: group)
                     let hydrationTasks = botThreadHydrationTasks[groupId]
@@ -360,9 +399,10 @@ extension GaryxMobileModel {
     /// inputs captured before the backfill are re-filtered here against the
     /// committed tombstones in `pendingThreadArchives`: a thread archived
     /// while the backfill was suspended must not be resurrected by pre-await
-    /// snapshots (review #TASK-1804 round 2).
+    /// snapshots (review #TASK-1804 round 2). A nil pins page retains the
+    /// cached pinned order while still applying the canonical row commit.
     func commitRefreshedRecentThreadsPage(
-        pinsPageThreadIds: [String],
+        pinsPageThreadIds: [String]?,
         fetchedThreads: [GaryxThreadSummary],
         previousThreadSummaries: [GaryxThreadSummary],
         previouslyRemoteBusyThreadIds: Set<String>,
@@ -371,11 +411,13 @@ extension GaryxMobileModel {
         pinsRevision: Int64 = 0,
         pinsRequestStamp: GaryxPinnedOrderRequestStamp? = nil
     ) {
-        applyPinnedThreadIds(
-            pendingThreadArchives.visibleThreadIds(pinsPageThreadIds),
-            revision: pinsRevision,
-            stamp: pinsRequestStamp
-        )
+        if let pinsPageThreadIds {
+            applyPinnedThreadIds(
+                pendingThreadArchives.visibleThreadIds(pinsPageThreadIds),
+                revision: pinsRevision,
+                stamp: pinsRequestStamp
+            )
+        }
         let visibleFetchedThreads = pendingThreadArchives.visibleThreads(fetchedThreads)
         let previousRuntimeByThreadId = Dictionary(
             uniqueKeysWithValues: previousThreadSummaries.compactMap { thread -> (String, GaryxThreadRuntimeSummary)? in

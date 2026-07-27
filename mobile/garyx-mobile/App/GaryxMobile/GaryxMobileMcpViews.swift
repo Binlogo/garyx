@@ -11,7 +11,7 @@ struct GaryxMcpServersView: View {
         GaryxPanelScaffold(
             title: "MCP",
             subtitle: "\(model.mcpServers.filter(\.enabled).count) enabled / \(model.mcpServers.count) servers",
-            onRefresh: { await model.refreshRemoteState() }
+            onRefresh: { await model.refreshRemoteState(.forced) }
         ) {
             GaryxMcpServersContent()
         } actions: {
