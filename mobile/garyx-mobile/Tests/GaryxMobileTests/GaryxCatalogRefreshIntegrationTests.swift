@@ -308,7 +308,7 @@ final class GaryxCatalogRefreshIntegrationTests: XCTestCase {
             recorder.catalogPathCounts["/api/capsules"] ?? 0
         XCTAssertTrue(
             (1...2).contains(capsuleTransportCount),
-            "capsule intents may share their existing single-flight transport"
+            "the superseded capsule request may be cancelled before transport"
         )
         XCTAssertEqual(model.lastSuccessfulCatalogSweepCompletedAt, clock.now)
     }
