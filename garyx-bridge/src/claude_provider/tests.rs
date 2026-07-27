@@ -4977,6 +4977,17 @@ async fn test_execute_sdk_run_entry_clears_stale_rate_limit_stash() {
     );
 }
 
+fn bare_signals() -> ClaudeRateLimitSignals<'static> {
+    ClaudeRateLimitSignals {
+        terminal_reason: None,
+        rate_limit_info: None,
+        errors: None,
+        assistant_error_rate_limited: false,
+        api_error_status: None,
+        response_text: None,
+    }
+}
+
 #[test]
 fn build_claude_rate_limit_carries_launch_account_and_model() {
     let info = json!({
@@ -4986,9 +4997,11 @@ fn build_claude_rate_limit_carries_launch_account_and_model() {
     });
     let rate_limit = build_claude_rate_limit(
         "claude_code",
-        None,
-        Some(&info),
-        Some("usage limit reached"),
+        ClaudeRateLimitSignals {
+            rate_limit_info: Some(&info),
+            errors: Some("usage limit reached"),
+            ..bare_signals()
+        },
         Some(Path::new(
             "/Users/test/.garyx/provider-accounts/claude-code/abc",
         )),
@@ -5004,15 +5017,107 @@ fn build_claude_rate_limit_carries_launch_account_and_model() {
     // A system-default run carries no directory; blank models are dropped.
     let rate_limit = build_claude_rate_limit(
         "claude_code",
-        Some("blocking_limit"),
-        None,
-        None,
+        ClaudeRateLimitSignals {
+            terminal_reason: Some("blocking_limit"),
+            ..bare_signals()
+        },
         None,
         Some("  "),
     )
     .expect("rate limit built");
     assert_eq!(rate_limit.account_dir, None);
     assert_eq!(rate_limit.model, None);
+}
+
+/// The production incident shape (thread blocked at request time): a
+/// terminal API 429 the CLI classified as `rate_limit`, carrying only the
+/// usage-limit copy — no `rate_limit_event`, no `blocking_limit`. This must
+/// enter the quota pipeline with the reset parsed from the copy.
+#[test]
+fn build_claude_rate_limit_classifies_terminal_api_429_with_limit_copy() {
+    let rate_limit = build_claude_rate_limit(
+        "claude_code",
+        ClaudeRateLimitSignals {
+            terminal_reason: Some("api_error"),
+            assistant_error_rate_limited: true,
+            api_error_status: Some(429),
+            response_text: Some("You've hit your session limit · resets 10:30pm (Asia/Shanghai)"),
+            ..bare_signals()
+        },
+        None,
+        Some("claude-fable-5"),
+    )
+    .expect("terminal API 429 with usage-limit copy must classify");
+    assert_eq!(rate_limit.window.as_deref(), Some("five_hour"));
+    assert_eq!(
+        rate_limit.reached_type.as_deref(),
+        Some("api_rate_limit_429")
+    );
+    let reset_at = rate_limit.reset_at.expect("reset parsed from the copy");
+    // 10:30pm Asia/Shanghai == 14:30 UTC, today or tomorrow.
+    assert!(
+        reset_at.contains("T14:30:00"),
+        "unexpected reset: {reset_at}"
+    );
+    assert_eq!(
+        rate_limit.message.as_deref(),
+        Some("You've hit your session limit · resets 10:30pm (Asia/Shanghai)")
+    );
+
+    // Weekly copy maps to the weekly window.
+    let rate_limit = build_claude_rate_limit(
+        "claude_code",
+        ClaudeRateLimitSignals {
+            assistant_error_rate_limited: true,
+            api_error_status: Some(429),
+            response_text: Some("You've hit your weekly limit · resets Jul 30"),
+            ..bare_signals()
+        },
+        None,
+        None,
+    )
+    .expect("weekly copy must classify");
+    assert_eq!(rate_limit.window.as_deref(), Some("seven_day"));
+    // No parsable time-of-day hint: parked without an automatic reset.
+    assert_eq!(rate_limit.reset_at, None);
+}
+
+/// Transient burst 429s carry different copy and must NOT enter the quota
+/// pipeline; neither must non-rate-limit assistant errors.
+#[test]
+fn build_claude_rate_limit_rejects_non_quota_429_shapes() {
+    assert!(
+        build_claude_rate_limit(
+            "claude_code",
+            ClaudeRateLimitSignals {
+                terminal_reason: Some("api_error"),
+                assistant_error_rate_limited: true,
+                api_error_status: Some(429),
+                response_text: Some("Rate limited, please slow down and retry."),
+                ..bare_signals()
+            },
+            None,
+            None,
+        )
+        .is_none(),
+        "a 429 without the usage-limit copy is not a quota exhaustion"
+    );
+    assert!(
+        build_claude_rate_limit(
+            "claude_code",
+            ClaudeRateLimitSignals {
+                terminal_reason: Some("api_error"),
+                assistant_error_rate_limited: false,
+                api_error_status: Some(529),
+                response_text: Some("You've hit your session limit · resets 10:30pm"),
+                ..bare_signals()
+            },
+            None,
+            None,
+        )
+        .is_none(),
+        "an overloaded error must not classify even with limit-like text"
+    );
 }
 
 #[tokio::test]

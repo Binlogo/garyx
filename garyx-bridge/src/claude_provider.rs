@@ -234,44 +234,163 @@ struct StreamSignals {
 /// result's `terminal_reason == "blocking_limit"`, or a `rate_limit_event`
 /// with `status == "rejected"` was observed. A mere `allowed_warning` is NOT
 /// enough — warning-level utilization must never trigger an automatic resend.
+/// Signals a terminated attempt carries into quota classification. Three
+/// upstream shapes mean "the subscription quota is exhausted":
+/// - an explicit `blocking_limit` terminal reason;
+/// - a `rate_limit_event` whose status is `rejected`;
+/// - a terminal API 429 whose assistant error the CLI classified as
+///   `rate_limit` AND whose text is the CLI's usage-limit message ("You've
+///   hit your session limit · resets …"). This is what a run started on an
+///   already-exhausted window sees — no `rate_limit_event` ever precedes it.
+///   The text gate keeps transient burst 429s (different copy) out of the
+///   quota pipeline.
+struct ClaudeRateLimitSignals<'a> {
+    terminal_reason: Option<&'a str>,
+    rate_limit_info: Option<&'a Value>,
+    errors: Option<&'a str>,
+    /// The CLI classified the terminal assistant error as `rate_limit`.
+    assistant_error_rate_limited: bool,
+    api_error_status: Option<i64>,
+    /// The assistant text of the failed turn (the usage-limit copy lands
+    /// here, not in `errors`).
+    response_text: Option<&'a str>,
+}
+
+/// The CLI's usage-limit copy, e.g. "You've hit your session limit · resets
+/// 10:30pm (Asia/Shanghai)" or a weekly variant. Deliberately narrow: an
+/// arbitrary 429 message must not classify as quota exhaustion.
+fn claude_usage_limit_text(text: Option<&str>) -> Option<&str> {
+    let text = text.map(str::trim).filter(|value| !value.is_empty())?;
+    let lower = text.to_lowercase();
+    let is_limit_copy =
+        (lower.contains("hit your") && lower.contains("limit")) || lower.contains("usage limit");
+    is_limit_copy.then_some(text)
+}
+
+/// Parse the reset hint of the CLI usage-limit copy: a wall-clock time plus
+/// an optional explicit IANA zone ("resets 10:30pm (Asia/Shanghai)"). With a
+/// zone the instant is exact; without one the machine-local zone applies
+/// (the CLI renders in local time). A time already passed rolls to the next
+/// day, matching the codex message parser's tolerance.
+fn claude_reset_at_from_limit_message(message: &str) -> Option<String> {
+    static RESET: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(
+            r"(?i)\bresets?\s+(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*([ap])\.?m?\b\.?(?:\s*\(([A-Za-z]+(?:[_/-][A-Za-z_+-]+)*)\))?",
+        )
+        .expect("valid regex")
+    });
+    let captures = RESET.captures(message)?;
+    let hour12: u32 = captures.get(1)?.as_str().parse().ok()?;
+    if !(1..=12).contains(&hour12) {
+        return None;
+    }
+    let minute: u32 = captures
+        .get(2)
+        .map(|m| m.as_str().parse().ok())
+        .unwrap_or(Some(0))?;
+    if minute > 59 {
+        return None;
+    }
+    let is_pm = captures.get(3)?.as_str().eq_ignore_ascii_case("p");
+    let hour = match (hour12, is_pm) {
+        (12, false) => 0,
+        (12, true) => 12,
+        (h, false) => h,
+        (h, true) => h + 12,
+    };
+    match captures.get(4).map(|m| m.as_str()) {
+        Some(zone_name) => {
+            let zone: chrono_tz::Tz = zone_name.parse().ok()?;
+            claude_reset_in_zone(hour, minute, chrono::Utc::now().with_timezone(&zone))
+        }
+        None => claude_reset_in_zone(hour, minute, chrono::Local::now()),
+    }
+}
+
+/// Timezone-generic resolution shared by the zoned and local paths; tests
+/// pass a fixed `chrono_tz` instant so DST edges are reproducible.
+fn claude_reset_in_zone<Tz: chrono::TimeZone>(
+    hour: u32,
+    minute: u32,
+    now: chrono::DateTime<Tz>,
+) -> Option<String> {
+    use chrono::{Duration as ChronoDuration, LocalResult, Utc};
+    let zone = now.timezone();
+    let resolve = |naive: chrono::NaiveDateTime| match zone.from_local_datetime(&naive) {
+        LocalResult::Single(dt) => Some(dt),
+        LocalResult::Ambiguous(a, b) => Some(if a <= b { a } else { b }),
+        LocalResult::None => zone
+            .from_local_datetime(&(naive + ChronoDuration::hours(1)))
+            .earliest(),
+    };
+    let today = now.date_naive().and_hms_opt(hour, minute, 0)?;
+    let mut reset = resolve(today)?;
+    if reset < now.clone() - ChronoDuration::minutes(5) {
+        reset = resolve(today.checked_add_signed(ChronoDuration::days(1))?)?;
+    }
+    Some(reset.with_timezone(&Utc).to_rfc3339())
+}
+
 fn build_claude_rate_limit(
     provider_slug: &str,
-    terminal_reason: Option<&str>,
-    rate_limit_info: Option<&Value>,
-    message: Option<&str>,
+    signals: ClaudeRateLimitSignals<'_>,
     account_dir: Option<&Path>,
     model: Option<&str>,
 ) -> Option<ProviderRateLimit> {
-    let blocking_result = terminal_reason == Some("blocking_limit");
-    let info = rate_limit_info.and_then(Value::as_object);
+    let blocking_result = signals.terminal_reason == Some("blocking_limit");
+    let info = signals.rate_limit_info.and_then(Value::as_object);
     let rejected = info
         .and_then(|object| object.get("status"))
         .and_then(Value::as_str)
         .map(|status| status.eq_ignore_ascii_case("rejected"))
         .unwrap_or(false);
-    if !blocking_result && !rejected {
+    let limit_text = claude_usage_limit_text(signals.response_text)
+        .or_else(|| claude_usage_limit_text(signals.errors));
+    let api_rate_limited = signals.assistant_error_rate_limited
+        && signals.api_error_status.is_none_or(|status| status == 429)
+        && limit_text.is_some();
+    if !blocking_result && !rejected && !api_rate_limited {
         return None;
     }
 
+    // Structured `rate_limit_event` fields win; the API-429 shape falls back
+    // to the usage-limit copy for the reset hint and window.
+    let reset_at = info
+        .and_then(|object| object.get("resetsAt"))
+        .and_then(Value::as_i64)
+        .and_then(unix_to_rfc3339)
+        .or_else(|| limit_text.and_then(claude_reset_at_from_limit_message));
+    let window = info
+        .and_then(|object| object.get("rateLimitType"))
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            let lower = limit_text?.to_lowercase();
+            if lower.contains("session limit") {
+                Some("five_hour".to_owned())
+            } else if lower.contains("weekly limit") || lower.contains("week") {
+                Some("seven_day".to_owned())
+            } else {
+                None
+            }
+        });
+
     Some(ProviderRateLimit {
         provider: provider_slug.to_owned(),
-        reset_at: info
-            .and_then(|object| object.get("resetsAt"))
-            .and_then(Value::as_i64)
-            .and_then(unix_to_rfc3339),
-        window: info
-            .and_then(|object| object.get("rateLimitType"))
-            .and_then(Value::as_str)
-            .map(ToOwned::to_owned),
+        reset_at,
+        window,
         used_percent: info
             .and_then(|object| object.get("utilization"))
             .and_then(claude_utilization_percent),
         reached_type: if blocking_result {
-            terminal_reason.map(ToOwned::to_owned)
-        } else {
+            signals.terminal_reason.map(ToOwned::to_owned)
+        } else if rejected {
             Some("rate_limit_rejected".to_owned())
+        } else {
+            Some("api_rate_limit_429".to_owned())
         },
-        message: message
+        message: limit_text
+            .or(signals.errors)
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(ToOwned::to_owned),
@@ -2389,8 +2508,9 @@ impl ClaudeCliProvider {
 
         // Stage quota-exhaustion context for the bridge run-completion path
         // (`take_rate_limit`) when this attempt terminated on the subscription
-        // quota: an explicit `blocking_limit` terminal reason, or a rejected
-        // `rate_limit_event` on a run that did not complete successfully.
+        // quota: an explicit `blocking_limit` terminal reason, a rejected
+        // `rate_limit_event`, or a terminal API 429 carrying the CLI's
+        // usage-limit copy (a run started on an already-exhausted window).
         let run_errored = result_data.as_ref().is_none_or(|result| result.is_error);
         if run_errored {
             let errors_joined = result_data
@@ -2399,11 +2519,19 @@ impl ClaudeCliProvider {
                 .filter(|joined| !joined.is_empty());
             if let Some(rate_limit) = build_claude_rate_limit(
                 self.config.provider_type.as_slug(),
-                result_data
-                    .as_ref()
-                    .and_then(|result| result.terminal_reason.as_deref()),
-                signals.rate_limit_info.as_ref(),
-                errors_joined.as_deref(),
+                ClaudeRateLimitSignals {
+                    terminal_reason: result_data
+                        .as_ref()
+                        .and_then(|result| result.terminal_reason.as_deref()),
+                    rate_limit_info: signals.rate_limit_info.as_ref(),
+                    errors: errors_joined.as_deref(),
+                    assistant_error_rate_limited: signals.last_assistant_error
+                        == Some(AssistantMessageError::RateLimit),
+                    api_error_status: result_data
+                        .as_ref()
+                        .and_then(|result| result.api_error_status),
+                    response_text: Some(response_text.as_str()),
+                },
                 quota_account_dir,
                 actual_model.as_deref().or(requested_model),
             ) {
