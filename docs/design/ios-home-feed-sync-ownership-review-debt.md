@@ -18,13 +18,14 @@ tasks and must not be used as blockers for this implementation.
 | D9 | `shouldRefreshSidebarThreads` rebuilds the full presentation snapshot to read one Boolean. | `GaryxMobileSidebarViews.swift`. Performance cleanup only. |
 | D10 | Pager-level and feed-level lane contracts still describe different concurrency capabilities. | `GaryxHomeThreadListPager.swift` versus `GaryxRecentThreadFeeds.swift`. This task adds the required feed-owned single-flight trailing edge; reconciling the lower-level public contracts remains separate. |
 | D11 | While Favorites remains selected, the resident Chats feed does not receive periodic refreshes. | `GaryxMobileModel+HomeFeedSync.swift`. Returning to Chats now submits and settles an explicit refresh intent; continuous off-selection refresh policy remains separate. |
-| D12 | Defensively harden the Favorites-selected planner against an artificial `.ready` connection paired with an empty gateway scope. That combination is unreachable through the production exit ordering today, but a synthetic caller could otherwise keep planning `.refreshNow` while `selectedHeadRequestIsInternallyQueued` is false. | `GaryxMobileModel+HomeFeedSync.swift`. The adversarial review established that `exitCurrentGatewayScope()` deactivates the owner before clearing Favorites and that production `.ready` implies a configured URL, so this is robustness work, not a current bug or blocker. |
+| D12 | Defensively harden the planner against synthetic inconsistent owner state: a `.ready` connection paired with an empty Favorites scope, or an active coordinator paired with a stale scope token. Either can repeatedly plan `.refreshNow` while `beginRecentHeadRequest` cannot mint a ticket. | `GaryxMobileModel+HomeFeedSync.swift`. Adversarial review established both states are unreachable through production ordering: `exitCurrentGatewayScope()` deactivates before clearing Favorites, `.ready` implies a configured URL, and token writes keep `scopeIsActive` consistent. This is robustness work, not a current bug or blocker. |
+| D13 | `GaryxBackgroundCommittedRunReconcileDecision.refreshesThreads` remains produced by Core but has no production consumer after refresh ownership moved to the gateway-scope coordinator. | `GaryxHomeThreadListPresentation.swift`; decide in an independent cleanup whether the field should be removed or handed back to the coordinator through an explicit intent. Existing Core assertions alone must not preserve an inert production contract. |
 
 ## Findings added during implementation
 
 No additional reachable adjacent production defect was established. D12 records
-an unreachable-state hardening opportunity from adversarial review and remains
-separate.
+unreachable-state hardening opportunities from adversarial review; D13 records
+an inert handback field. Both remain separate.
 
 Two findings were resolved inside the approved type / phase boundary rather
 than deferred:
@@ -46,5 +47,5 @@ test model and routes per-session protocol handlers by an opaque token. This
 is validation infrastructure required by the new lifecycle contract, not
 deferred product debt.
 
-Disposition: keep D1–D12 in independent follow-up work. Do not expand the
+Disposition: keep D1–D13 in independent follow-up work. Do not expand the
 Home-feed ownership implementation to address them.

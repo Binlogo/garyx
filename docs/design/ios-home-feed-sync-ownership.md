@@ -340,6 +340,7 @@ favorites 域内部同款的「欠一次但无人补」空洞
 | `Sources/GaryxMobileCore/GaryxRecentThreadFeeds.swift` | 5 布尔 → phase；mutator 返回 effect；`:552` 去伪造 |
 | `Sources/GaryxMobileCore/GaryxHomeThreadListPager.swift` | 合并完成漏斗；attempt 凭证；trailing-edge |
 | `Sources/GaryxMobileCore/GaryxHomeThreadListPresentation.swift` | `:307-315` 改 phase 派生；删 `isLoadingThreads` |
+| `Sources/GaryxMobileCore/HomeProjectionActor.swift` / `HomeProjectionReducer.swift` | 删除 `isLoadingThreads` 独立输入，改为透传并派生 `headPhase` |
 | `Sources/GaryxMobileCore/GaryxThreadMembershipProviders.swift` | `:125` 去伪造 |
 | `App/GaryxMobile/GaryxMobileSidebarViews.swift` | 删 `:204/:244/:621-643`；`:512-520`/`:545-551` 改提交意图 |
 | `App/GaryxMobile/GaryxMobileViews.swift` | `:26-35` 改意图提交 |
@@ -347,8 +348,9 @@ favorites 域内部同款的「欠一次但无人补」空洞
 | `App/GaryxMobile/GaryxMobileModel+Gateway.swift` | `:439/:569/:581/:590` 改 scope-ready 通知；`:406-481` 改报 visibility |
 | `App/GaryxMobile/GaryxMobileModel+ThreadFavorites.swift` | 接入统一 phase 协议 |
 
-**不动**：`GaryxHomeThreadListStore` / `HomeProjectionActor` / `HomeProjectionReducer`
-渲染投影链路。
+**不改变其余语义**：`GaryxHomeThreadListStore` 及 Home projection 的排序、事务和
+差分协议保持原样；`HomeProjectionActor` / `HomeProjectionReducer` 只做上表所列的
+phase 输入迁移。这与 §3.1 删除第二份 `isLoadingThreads` 真相源一致。
 
 **规模**：约 9 改 + 5 新增；核心 ~300 行纯函数 + 测试。
 主要风险在**把 18 个 `refreshThreads` 调用点逐一映射成意图**——机械但需逐条判定语义，

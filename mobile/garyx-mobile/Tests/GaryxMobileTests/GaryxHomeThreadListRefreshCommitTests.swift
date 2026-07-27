@@ -1869,6 +1869,7 @@ final class GaryxHomeThreadListRefreshCommitTests: XCTestCase {
     func testColdStartRecentIdentityInterruptionSchedulesAReplacementRefresh() async throws {
         let recentStarted = expectation(description: "cold-start recent request started")
         let recentGate = DispatchSemaphore(value: 0)
+        let replacementGate = DispatchSemaphore(value: 0)
         let recentRequests = GaryxLockedCounter()
         let snapshotRequests = GaryxLockedCounter()
         let session = makeStubSession { request in
@@ -1896,11 +1897,18 @@ final class GaryxHomeThreadListRefreshCommitTests: XCTestCase {
                     data: try garyxPinsPageData(ids: [], revision: 29)
                 )
             case ("GET", "/api/recent-threads"):
-                if recentRequests.increment() == 1 {
+                switch recentRequests.increment() {
+                case 1:
                     recentStarted.fulfill()
                     guard recentGate.wait(timeout: .now() + 5) == .success else {
                         throw GaryxRefreshStubError.timedOut
                     }
+                case 2:
+                    guard replacementGate.wait(timeout: .now() + 5) == .success else {
+                        throw GaryxRefreshStubError.timedOut
+                    }
+                default:
+                    break
                 }
                 return try garyxStubResponse(
                     request,
@@ -1914,6 +1922,7 @@ final class GaryxHomeThreadListRefreshCommitTests: XCTestCase {
         }
         defer {
             recentGate.signal()
+            replacementGate.signal()
             GaryxRecentThreadsURLProtocolStub.requestHandler = nil
             session.invalidateAndCancel()
         }
@@ -1925,6 +1934,9 @@ final class GaryxHomeThreadListRefreshCommitTests: XCTestCase {
         )
         model.connectionState = .ready(version: "test")
         await fulfillment(of: [recentStarted], timeout: 2)
+        let interruptedAttempt = try XCTUnwrap(
+            model.recentThreadFeeds.allFeed.headPhase.activeAttempt
+        )
         let favoritesEstablishedIdentity = await waitUntil {
             model.threadFavoritesState.storeIncarnationId
                 == GaryxTask2783CapturedGeneration.beforeRotation.storeIncarnationId
@@ -1939,10 +1951,13 @@ final class GaryxHomeThreadListRefreshCommitTests: XCTestCase {
                 && model.threadFavoritesSnapshotTask == nil
         }
         XCTAssertTrue(identityRecoverySettled)
-        await model.homeProjectionGateway.waitForIdleForTesting()
 
         let replacementIssued = await waitUntil(timeout: 0.5) {
-            recentRequests.value > 1
+            guard let activeAttempt =
+                model.recentThreadFeeds.allFeed.headPhase.activeAttempt else {
+                return false
+            }
+            return activeAttempt != interruptedAttempt
         }
         let presentation = model.selectedRecentFeedPresentation
         let placeholder = model.homeThreadListStore.presentationSnapshot.recentPlaceholder
@@ -1955,6 +1970,15 @@ final class GaryxHomeThreadListRefreshCommitTests: XCTestCase {
             recentRequests=\(recentRequests.value). No replacement refresh was scheduled.
             """
         )
+        if replacementIssued {
+            replacementGate.signal()
+            let replacementSettled = await waitUntil {
+                model.recentThreadFeeds.allFeed.refreshCycle == 1
+                    && model.recentThreadFeeds.allFeed.headPhase == .ready
+            }
+            XCTAssertTrue(replacementSettled)
+        }
+        await model.homeProjectionGateway.waitForIdleForTesting()
         model.homeFeedSyncCoordinator.deactivateScope()
         await model.homeFeedSyncCoordinator.waitForTransportIdleForTesting()
     }

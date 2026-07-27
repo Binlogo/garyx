@@ -40,7 +40,7 @@
 | TC-B1 | **冷启动无 restore** | 已配置 gateway；上次停在首页；本地有 ≥20 条线程 | 杀 app → 冷启动 | 首页在首帧显示骨架屏，数据到达后替换为列表；**全程不超过一次刷新往返** | [App 无 UI] | **PASS** — `testColdStartMatchingCapturedIdentitiesPrimeRecentWithoutInterruption`：首帧 skeleton→ready、`refreshCycle == 1`；2 个 HTTP page read 是同一周期的 primary + bounded verification。 |
 | TC-B2 | **冷启动 restore 成功** | 上次停在某个会话页 | 杀 app → 冷启动 → 停在恢复的会话页 → 返回首页 | 返回首页时列表**立即有数据**（不是先骨架后填充）；若返回时数据未就绪，最多一个刷新周期内出现，**绝不停在骨架** | [App 无 UI] | **PASS** — `testColdStartRestoreSuccessPrimesBeforePushAndManualReturnRearmsHome` 走 production restore / route pop / canonical projection；在 restore push 前已 prime，返回快照 rows 保留且 placeholder 为 `.none`。 |
 | TC-B9 | **首刷被自动分页挡住** | 冷启动，列表 > 一页 | 令 0.3s 那次 head refresh 撞上在飞的 load-more | 被拒的 head refresh **立即 trailing-edge 补发**，不等 10 秒下一轮；首屏数据到达时间不受影响 | [App] 时序 | **PASS** — `testScopeOwnerTrailsAutomaticHeadImmediatelyAfterLoadMore`：load-more 释放即发 head，未推进 cadence 时钟。 |
-| TC-B10 | **thread-backed bot 打开路径** | 冷启动首页尚未 primed | 打开携带 `mainThreadId`/`defaultOpenThreadId` 的 bot → 返回 | 首页数据由 coordinator 保证，**不依赖** bot 打开路径顺带补发的刷新；去掉该副作用后首页仍能自行收敛 | [App 无 UI] | **PASS** — `testHomeFeedSelfConvergesWithoutThreadBackedBotRefreshSideEffect` 用 semaphore 保持冷 head 在飞且未 prime，bot id 不在 summary / Recent cache，断言必经 point-read cache-miss 分支；bot 路径 0 个 Recent 请求，owner 独立完成恰好 primary + verification 两次读取，返回 `.none`。反事实恢复旧隐式刷新后读数变为 4、精确失败（`/tmp/task2785-b10-counterfactual-fail.log`），还原后 PASS（`/tmp/task2785-b10-restored-pass.xcresult`）。 |
+| TC-B10 | **thread-backed bot 打开路径** | 冷启动首页尚未 primed | 打开携带 `mainThreadId`/`defaultOpenThreadId` 的 bot → 返回 | 首页数据由 coordinator 保证，**不依赖** bot 打开路径顺带补发的刷新；去掉该副作用后首页仍能自行收敛 | [App 无 UI] | **PASS** — `testHomeFeedSelfConvergesWithoutThreadBackedBotRefreshSideEffect` 用 semaphore 保持冷 head 在飞且未 prime，bot id 不在 summary / Recent cache，断言必经 point-read cache-miss 分支；bot 路径 0 个 Recent 请求，owner 独立完成恰好 primary + verification 两次读取，返回 `.none`。反事实恢复旧隐式刷新会多启动一个 All head cycle，使 owner-only 的精确读数断言失败；独立复审复现总读数为 3（`/tmp/rev2790-b10-counterfactual.log`），还原后 PASS（`/tmp/task2785-b10-restored-pass.xcresult`）。 |
 | TC-B3 | **冷启动 restore 失败** | 上次打开的线程已在服务端删除 | 杀 app → 冷启动 | 恢复失败后落到首页；列表正常加载出数据，不卡骨架 | [App 无 UI] | **PASS** — `testColdStartRestoreFailureStillLoadsHomeFeed` 用 gate 保持冷 head 确实在飞且未 prime，此时对不在缓存的 restore id 执行 1 次 point-read 并返回 404；随后释放 owner，Recent 恰好完成 primary + verification 两次读取并收敛为 rows / `.ready` / `.none`。 |
 | TC-B4 | **冷启动 restore 被取消** | restore 途中触发 gateway scope 切换 | 构造取消 | 首页列表仍收敛到有数据或可重试态，不卡骨架 | [App 无 UI] | **PASS** — `testColdStartRestoreCancellationStaysHomeWithRefreshGateReleased`：真实 restore task 取消后 owner 仍补发并收敛，refresh gate 释放；允许终态 ready 或显式 retry，不声称取消路径必有数据。 |
 | TC-B5 | **首刷被 scope 替换打断** | favorites `gatewayScope` 初值为空，首刷飞行中被替换 | 触发 `ensureThreadFavoritesScope` 抢跑 | 打断后**自动补发**一次 head refresh；终态 `.ready` 且列表有数据 | [App] 时序测试 | **PASS** — `testGatewayScopeRebuildCancelsOldOwnerAndRejectsLateRows` + `testColdStartRecentIdentityInterruptionSchedulesAReplacementRefresh`：新 scope 自动补发，旧行被拒。 |
@@ -107,8 +107,12 @@
 | # | 测试 | 当前失败信息要点 | 执行记录 |
 |---|---|---|---|
 | TC-G1 | `GaryxHomeThreadListPagerTests.testColdStartIdentityInterruptCannotLeaveIdleFeedPresentedAsLoading` | 「无请求在飞却仍投影 loadingSkeleton(6)」 | **PASS** — 原 `XCTAssertFalse` 文本未修改，但公开记录契约重述：设计 §2 / §3.1 允许 `.primingOwed(_, .immediate)` 投影 skeleton，只要该 transition 已产出必执行的 `.requestHead`。测试现驱动唯一 executor 的 effect 边界后再执行原断言；没有先 `XCTUnwrap` replacement。反事实删除 effect 后原断言在原行精确失败（`/tmp/task2785-g1-counterfactual-fail.log`），还原后 PASS（`/tmp/task2785-g1-restored-pass.log`）。 |
-| TC-G2 | `GaryxHomeThreadListRefreshCommitTests.testColdStartRecentIdentityInterruptionSchedulesAReplacementRefresh` | 「placeholder=loadingSkeleton, isRefreshingHead=false, recentRequests=1, 无 replacement」 | **PASS** — 原断言未修改；replacement 自动补发。 |
+| TC-G2 | `GaryxHomeThreadListRefreshCommitTests.testColdStartRecentIdentityInterruptionSchedulesAReplacementRefresh` | 「placeholder=loadingSkeleton, isRefreshingHead=false, recentRequests=1, 无 replacement」 | **PASS** — 原 `XCTAssertTrue` 与 REPRO 文本未修改。测试锁住第 1 个 opaque attempt；首响应的确定性 identity mismatch 令它在 verification 前中断，再 gate 第 2 次读，只有观察到一个不同的 `activeAttempt` 才令原断言通过。真实实现 PASS（`/tmp/task2785-g2-attempt-witness-final-pass.xcresult`）；反事实同时移除 reset request effect 并把 reset debt 降为 `.userAction` 后，原断言在原位置以 `recentRequests=1` 精确失败（`/tmp/task2785-g2-attempt-witness-counterfactual.log`）。 |
 | TC-G3 | `GaryxHomeThreadListRefreshCommitTests.testColdStartFavoritesIdentityResetSchedulesAReplacementRefresh` | 「reset 前后 recentRequests 均为 2，无 replacement」 | **PASS** — 原断言未修改；replacement 自动补发。 |
+
+注：#TASK-2790 的初始反事实虽然移除了 reset 的显式 request effect，却仍保留
+`headState.reset()` 产生的 `.immediate` debt；唯一 owner 因而仍会合法 mint 第二个
+attempt。TC-G2 的反事实同时移除 effect 与 immediate debt，才真正表示「无 replacement」。
 
 ---
 
@@ -119,15 +123,15 @@
 
 | # | 测试 | 改写后断言 | 执行记录 |
 |---|---|---|---|
-| TC-H1 | `GaryxHomeThreadListPagerTests.swift:329-343` | identity interrupt 后为 `.primingOwed(.interrupted, .immediate)`，并产出 replacement `.requestHead`；中断不是允许通道空闲。 | **PASS** — 改写为 `testIdentityInterruptProducesOwnedImmediateReplacement`，它经 `completeHead(.interrupted)` 覆盖 pager `interruptRefresh`；另加 `GaryxRecentThreadFeedsTests.testInterruptLoadMoreDrainsOwnedTrailingHeadRequest`，直接断言 `interruptLoadMore` 释放 lane 并补发 pending head。 |
-| TC-H2 | `GaryxRecentThreadFeedsTests.swift:62-73` | reset 递增 epoch、保留 selection，并将 phase 置为 immediate owed，同时返回 request effect。 | **PASS** — 改写为 `testResetAbandonsOldEpochAndPreservesSelection`。 |
-| TC-H3 | `GaryxRecentThreadFeedsTests.swift:92-101` | load-more 拒绝 head 时记录 pending intent；load-more completion 必须立即返回 trailing request。 | **PASS** — 改写为 `testRefreshBlockedByLoadMoreTrailsImmediatelyAfterCompletion`。 |
-| TC-H4 | `GaryxLastOpenedThreadRestorationPolicyTests.swift:56-74` | 真正 priming attempt 派生 skeleton；`.userAction` owed 派生 `.unavailable`，不能把 unknown-idle 当 loading。 | **PASS** — 改写为 `testInitialEmptyLoadingSnapshotDerivesRecentSkeletonRowsInCore`。 |
-| TC-H5 | `HomeProjectionActorTests.swift:108-140` | 用真实 priming→ready phase 边界断言 skeleton→empty，而不是手工布尔组合。 | **PASS** — 改写为 `testRefreshLoadingBoundaryPublishesSkeletonBeforeRefreshTransactionCompletes`。 |
-| TC-H6 | `HomeProjectionActorTests.swift:103` | actor 输入/结果携带 `recentFeedPresentation.headPhase`；旧 `isLoadingThreads` 信号不再存在。 | **PASS** — `testGatewayUsesLatestBoundaryWhileActorIsInFlight` 现断言 actor 输出保留与输入**完全相同的 attempt-bearing phase**，不是只断言派生 Boolean；`testRefreshLoadingBoundaryPublishesSkeletonBeforeRefreshTransactionCompletes` 再断言 priming→ready 的 skeleton→empty。 |
-| TC-H7 | `GaryxRecentThreadFeedsTests.swift:23-34` | Favorites 选择不构造 Recent pager、phase 或 transport ticket；由 Favorites provider 自有统一 phase。 | **PASS** — 改写为 `testFavoritesSelectionHasNoRecentPagerOrTransportTicket`。 |
-| TC-H8 | `GaryxHomeThreadListRefreshCommitTests.swift:767` | 旧 gateway auxiliary failure 不 toast；reset 后选中 feed 为 `.primingOwed(.supersededByReset, .immediate)` 并由 owner 补发。 | **PASS** — 改写为 `testAuxiliaryFailureFromPreviousGatewayDoesNotToastAfterReset`；保留 reset 前的旧 coordinator，并用 `waitForTransportIdleForTesting()` 确定性等待旧 transport 结算，不再依赖 `Task.yield()`。 |
-| TC-H9 | `GaryxHomeThreadListRefreshCommitTests.swift:1010-1072` | Favorites incarnation 变化拥有一次 immediate Recent replacement；终态 ready，旧 ticket 被拒。 | **PASS** — 改写为 `testFavoritesIncarnationChangeOwnsImmediateRecentReplacement`。 |
+| TC-H1 | `GaryxHomeThreadListPagerTests.testIdentityInterruptProducesOwnedImmediateReplacement` | identity interrupt 后为 `.primingOwed(.interrupted, .immediate)`，并产出 replacement `.requestHead`；中断不是允许通道空闲。 | **PASS** — 经 `completeHead(.interrupted)` 覆盖 pager `interruptRefresh`；另加 `GaryxRecentThreadFeedsTests.testInterruptLoadMoreDrainsOwnedTrailingHeadRequest`，直接断言 `interruptLoadMore` 释放 lane 并补发 pending head。 |
+| TC-H2 | `GaryxRecentThreadFeedsTests.testResetAbandonsOldEpochAndPreservesSelection` | reset 递增 epoch、保留 selection，并将 phase 置为 immediate owed，同时返回 request effect。 | **PASS** — 改写后断言如左。 |
+| TC-H3 | `GaryxRecentThreadFeedsTests.testRefreshBlockedByLoadMoreTrailsImmediatelyAfterCompletion` | load-more 拒绝 head 时记录 pending intent；load-more completion 必须立即返回 trailing request。 | **PASS** — 改写后断言如左。 |
+| TC-H4 | `GaryxLastOpenedThreadRestorationPolicyTests.testInitialEmptyLoadingSnapshotDerivesRecentSkeletonRowsInCore` | 真正 priming attempt 派生 skeleton；`.userAction` owed 派生 `.unavailable`，不能把 unknown-idle 当 loading。 | **PASS** — 改写后断言如左。 |
+| TC-H5 | `HomeProjectionActorTests.testRefreshLoadingBoundaryPublishesSkeletonBeforeRefreshTransactionCompletes` | 用真实 priming→ready phase 边界断言 skeleton→empty，而不是手工布尔组合。 | **PASS** — 改写后断言如左。 |
+| TC-H6 | `HomeProjectionActorTests.testGatewayUsesLatestBoundaryWhileActorIsInFlight` | actor 输入/结果携带 `recentFeedPresentation.headPhase`；旧 `isLoadingThreads` 信号不再存在。 | **PASS** — 断言 actor 输出保留与输入**完全相同的 attempt-bearing phase**，不是只断言派生 Boolean；H5 再断言 priming→ready 的 skeleton→empty。 |
+| TC-H7 | `GaryxRecentThreadFeedsTests.testFavoritesSelectionHasNoRecentPagerOrTransportTicket` | Favorites 选择不构造 Recent pager、phase 或 transport ticket；由 Favorites provider 自有统一 phase。 | **PASS** — 改写后断言如左。 |
+| TC-H8 | `GaryxHomeThreadListRefreshCommitTests.testAuxiliaryFailureFromPreviousGatewayDoesNotToastAfterReset` | 旧 gateway auxiliary failure 不 toast；reset 后选中 feed 为 `.primingOwed(.supersededByReset, .immediate)` 并由 owner 补发。 | **PASS** — 保留 reset 前的旧 coordinator，并用 `waitForTransportIdleForTesting()` 确定性等待旧 transport 结算，不再依赖 `Task.yield()`。 |
+| TC-H9 | `GaryxHomeThreadListRefreshCommitTests.testFavoritesIncarnationChangeOwnsImmediateRecentReplacement` | Favorites incarnation 变化拥有一次 immediate Recent replacement；终态 ready，旧 ticket 被拒。 | **PASS** — 改写后断言如左。 |
 
 ## 执行汇总
 
@@ -139,9 +143,9 @@
   stdout 的 crash-harness 22 条：
   `/tmp/task2785-swiftpm-round2-crash-harness.log`。
 - Home app-target 聚焦类：63/63 PASS，
-  `/tmp/task2785-home-round2-final4.xcresult`。
+  `/tmp/task2785-home-round3-final.xcresult`。
 - 完整 app-target：259/259 PASS，
-  `/tmp/task2785-app-round2-final2.xcresult`。
+  `/tmp/task2785-app-round3-final.xcresult`。
 - #TASK-2783 的 6 条判别路径均保留并通过：scope 同步初始化、Home
   visibility false→true、restore 成功/失败/取消，以及 thread-backed bot
   打开/返回。最后一条按 TC-B10 将断言从“bot 顺带刷新”升级为“owner 已自行
