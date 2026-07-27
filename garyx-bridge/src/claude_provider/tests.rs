@@ -5339,6 +5339,93 @@ async fn quota_copy_on_the_error_segment_classifies_despite_prior_content() {
         session_id: "sdk-session-quota".to_owned(),
         terminal_reason: Some("api_error".to_owned()),
         api_error_status: Some(429),
+
+fn mid_response_error_result() -> Message {
+    Message::Result(Box::new(ResultMessage {
+        subtype: "error_during_execution".to_owned(),
+        is_error: true,
+        session_id: "sdk-session-net".to_owned(),
+        terminal_reason: Some("api_error".to_owned()),
+        errors: vec![
+            "API Error: Connection closed mid-response. The response above may be incomplete."
+                .to_owned(),
+        ],
+        ..Default::default()
+    }))
+}
+
+/// A run dying on the CLI's "Connection closed mid-response" copy stages an
+/// automatic one-minute continue through the quota pipeline, marked as a
+/// transient interruption (never a quota verdict).
+#[tokio::test]
+async fn mid_response_interruption_stages_a_short_retry_with_streak_cap() {
+    let provider = make_provider();
+
+    for attempt in 1..=3 {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        tx.send(Ok(mid_response_error_result())).await.unwrap();
+        drop(tx);
+        let (_chunks, cb) = collecting_callback();
+        provider
+            .process_messages_streaming(
+                &format!("run-net-{attempt}"),
+                "thread::net",
+                &mut rx,
+                &cb,
+                None,
+                None,
+            )
+            .await
+            .expect("stream should process");
+        let staged = provider
+            .take_rate_limit("thread::net")
+            .await
+            .unwrap_or_else(|| panic!("attempt {attempt} must stage a retry"));
+        assert_eq!(
+            staged.reached_type.as_deref(),
+            Some("connection_interrupted")
+        );
+        let reset_at = staged.reset_at.expect("reset_at drives the resend timer");
+        let parsed = chrono::DateTime::parse_from_rfc3339(&reset_at).expect("rfc3339");
+        let delta = (chrono::Utc::now() - parsed.with_timezone(&chrono::Utc)).num_seconds();
+        assert!(
+            (0..=30).contains(&delta),
+            "reset_at should be ~now so the standard buffer lands the continue in ~1 minute"
+        );
+        assert_eq!(staged.window, None);
+    }
+
+    // The fourth consecutive interruption stays a terminal failure.
+    let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+    tx.send(Ok(mid_response_error_result())).await.unwrap();
+    drop(tx);
+    let (_chunks, cb) = collecting_callback();
+    provider
+        .process_messages_streaming("run-net-4", "thread::net", &mut rx, &cb, None, None)
+        .await
+        .expect("stream should process");
+    assert!(
+        provider.take_rate_limit("thread::net").await.is_none(),
+        "a persistent outage must stop looping after the streak cap"
+    );
+}
+
+/// A successful attempt ends the interruption streak: the next interruption
+/// retries again instead of inheriting the exhausted cap.
+#[tokio::test]
+async fn successful_attempt_resets_the_interruption_streak() {
+    let provider = make_provider();
+    provider
+        .connection_interruption_counts
+        .lock()
+        .await
+        .insert("thread::net-reset".to_owned(), 3);
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+    tx.send(Ok(Message::Result(Box::new(ResultMessage {
+        subtype: "success".to_owned(),
+        is_error: false,
+        session_id: "sdk-session-ok".to_owned(),
         ..Default::default()
     }))))
     .await
@@ -5356,4 +5443,42 @@ async fn quota_copy_on_the_error_segment_classifies_despite_prior_content() {
         .expect("quota copy on the error segment must classify");
     assert_eq!(staged.window.as_deref(), Some("five_hour"));
     assert_eq!(staged.reached_type.as_deref(), Some("api_rate_limit_429"));
+=======
+    let (_chunks, cb) = collecting_callback();
+    provider
+        .process_messages_streaming("run-ok", "thread::net-reset", &mut rx, &cb, None, None)
+        .await
+        .expect("stream should process");
+    assert!(
+        !provider
+            .connection_interruption_counts
+            .lock()
+            .await
+            .contains_key("thread::net-reset"),
+        "success must clear the streak"
+    );
+}
+
+/// Ordinary failures without the interruption copy must not stage anything.
+#[tokio::test]
+async fn plain_failures_do_not_stage_an_automatic_continue() {
+    let provider = make_provider();
+    let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+    tx.send(Ok(Message::Result(Box::new(ResultMessage {
+        subtype: "error_during_execution".to_owned(),
+        is_error: true,
+        session_id: "sdk-session-err".to_owned(),
+        terminal_reason: Some("api_error".to_owned()),
+        errors: vec!["something else went wrong".to_owned()],
+        ..Default::default()
+    }))))
+    .await
+    .unwrap();
+    drop(tx);
+    let (_chunks, cb) = collecting_callback();
+    provider
+        .process_messages_streaming("run-err", "thread::err", &mut rx, &cb, None, None)
+        .await
+        .expect("stream should process");
+    assert!(provider.take_rate_limit("thread::err").await.is_none());
 }

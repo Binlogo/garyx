@@ -54,6 +54,10 @@ struct RecoveryPlan {
     /// Model the blocked run was using, when reported. Consumed by quota
     /// auto-switch for scoped-bucket checks.
     model: Option<String>,
+    /// Provider-reported reason classifier. `connection_interrupted` marks a
+    /// transient network retry, not a quota verdict — the timer resend runs
+    /// but auto account switch must not evaluate.
+    reached_type: Option<String>,
 }
 
 /// Start the event projection and SQL recovery worker. Both are process-local
@@ -182,6 +186,12 @@ fn recovery_plan_from_control(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned);
+    let reached_type = rate_limit
+        .get("reached_type")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
     Some(RecoveryPlan {
         thread_id,
         run_id,
@@ -191,6 +201,7 @@ fn recovery_plan_from_control(
         reset_at,
         account_dir,
         model,
+        reached_type,
     })
 }
 
@@ -277,7 +288,12 @@ async fn register_plan(state: &Arc<AppState>, plan: RecoveryPlan) -> Option<Quot
 /// Only the event projection calls this — manual retry and startup reconcile
 /// re-register historical generations without an auto-switch trigger.
 async fn register_plan_with_auto_switch(state: &Arc<AppState>, plan: RecoveryPlan) {
-    let provider = crate::quota_auto_switch::AccountProvider::from_canonical(&plan.provider);
+    // A transient connection interruption is not a quota verdict: the timer
+    // resend handles it, and switching accounts over a network blip would be
+    // pure churn.
+    let quota_verdict = plan.reached_type.as_deref() != Some("connection_interrupted");
+    let provider = crate::quota_auto_switch::AccountProvider::from_canonical(&plan.provider)
+        .filter(|_| quota_verdict);
     let thread_id = plan.thread_id.clone();
     let run_id = plan.run_id.clone();
     let account_dir = plan.account_dir.clone();
@@ -844,6 +860,38 @@ mod tests {
             parse_recovery_plan(&raw_rate_limit_event("run::two", "2026-07-23T00:00:00Z")).unwrap();
         assert_eq!(legacy.account_dir, None);
         assert_eq!(legacy.model, None);
+    }
+
+    #[test]
+    fn parses_connection_interruption_as_a_non_quota_retry() {
+        let raw = json!({
+            "type": "committed_message",
+            "thread_id": "thread::quota",
+            "run_id": "run::net",
+            "seq": 9,
+            "message": {
+                "role": "system",
+                "control": {
+                    "kind": "run_complete",
+                    "run_id": "run::net",
+                    "status": "rate_limited",
+                    "rate_limit": {
+                        "provider": "claude",
+                        "reached_type": "connection_interrupted",
+                        "reset_at": "2026-07-27T12:00:00Z",
+                        "will_auto_resend": true
+                    }
+                }
+            }
+        })
+        .to_string();
+        let plan = parse_recovery_plan(&raw).unwrap();
+        assert_eq!(
+            plan.reached_type.as_deref(),
+            Some("connection_interrupted"),
+            "the transient marker must survive projection so auto-switch skips it"
+        );
+        assert!(plan.reset_at.is_some(), "the timer resend must stay armed");
     }
 
     #[test]

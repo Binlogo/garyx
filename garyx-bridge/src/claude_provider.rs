@@ -427,6 +427,43 @@ fn build_claude_rate_limit(
     })
 }
 
+/// The CLI's transient network copy: "API Error: Connection closed
+/// mid-response. The response above may be incomplete." A run that dies on
+/// this is worth exactly one cheap automatic retry — the model was mid-turn
+/// and the session is intact.
+fn claude_connection_interruption_text(text: Option<&str>) -> Option<&str> {
+    let text = text.map(str::trim).filter(|value| !value.is_empty())?;
+    text.to_lowercase()
+        .contains("connection closed mid-response")
+        .then_some(text)
+}
+
+/// Classify a transient connection interruption into the same durable
+/// recovery pipeline as quota exhaustion, with `reset_at = now` so the
+/// standard resend buffer schedules the synthetic `continue` about one
+/// minute out. `reached_type = connection_interrupted` tells the gateway
+/// this is NOT a quota verdict: auto account switch must not evaluate.
+fn build_claude_connection_interruption(
+    provider_slug: &str,
+    limit_text: &str,
+    account_dir: Option<&Path>,
+    model: Option<&str>,
+) -> ProviderRateLimit {
+    ProviderRateLimit {
+        provider: provider_slug.to_owned(),
+        reset_at: Some(chrono::Utc::now().to_rfc3339()),
+        window: None,
+        used_percent: None,
+        reached_type: Some("connection_interrupted".to_owned()),
+        message: Some(limit_text.to_owned()),
+        account_dir: account_dir.map(|path| path.to_string_lossy().into_owned()),
+        model: model
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned),
+    }
+}
+
 /// Normalize the Claude `rate_limit_info.utilization` value to a whole
 /// percentage. The official CLI reports a `0..1` ratio (e.g. `0.93`), so
 /// ratios are scaled by 100; values above `1` are treated as already being
@@ -1400,6 +1437,10 @@ pub struct ClaudeCliProvider {
     session_map: Mutex<HashMap<String, String>>,
     /// Tracks thread failure counts for auto-recovery.
     session_failure_counts: Mutex<HashMap<String, u32>>,
+    /// Consecutive "Connection closed mid-response" terminals per thread.
+    /// Bounds the automatic 1-minute continue so a persistent outage cannot
+    /// loop forever; any successful attempt resets the streak.
+    connection_interruption_counts: Mutex<HashMap<String, u32>>,
     /// Tracks active run controls by run_id for abort support.
     active_runs: Mutex<HashMap<String, ClaudeRunControl>>,
     /// Maps run_id to thread_id for reverse lookup during abort.
@@ -1435,6 +1476,7 @@ impl ClaudeCliProvider {
             launch_env,
             session_map: Mutex::new(HashMap::new()),
             session_failure_counts: Mutex::new(HashMap::new()),
+            connection_interruption_counts: Mutex::new(HashMap::new()),
             active_runs: Mutex::new(HashMap::new()),
             run_session_map: Mutex::new(HashMap::new()),
             run_pending_inputs: Mutex::new(HashMap::new()),
@@ -2585,7 +2627,51 @@ impl ClaudeCliProvider {
                 self.pending_rate_limits
                     .stage(thread_id.to_owned(), rate_limit)
                     .await;
+            } else if let Some(limit_text) =
+                claude_connection_interruption_text(Some(response_text.as_str()))
+                    .or_else(|| claude_connection_interruption_text(errors_joined.as_deref()))
+            {
+                // Transient network interruption: schedule one automatic
+                // continue about a minute out through the same durable
+                // pipeline, bounded so a persistent outage cannot loop.
+                const MAX_CONSECUTIVE_INTERRUPTION_RETRIES: u32 = 3;
+                let streak = {
+                    let mut counts = self.connection_interruption_counts.lock().await;
+                    let streak = counts.entry(thread_id.to_owned()).or_insert(0);
+                    *streak += 1;
+                    *streak
+                };
+                if streak <= MAX_CONSECUTIVE_INTERRUPTION_RETRIES {
+                    let rate_limit = build_claude_connection_interruption(
+                        self.config.provider_type.as_slug(),
+                        limit_text,
+                        quota_account_dir,
+                        actual_model.as_deref().or(requested_model),
+                    );
+                    tracing::warn!(
+                        run_id = %run_id,
+                        thread_id = %thread_id,
+                        streak,
+                        "claude run died mid-response; staging a one-minute automatic continue",
+                    );
+                    self.pending_rate_limits
+                        .stage(thread_id.to_owned(), rate_limit)
+                        .await;
+                } else {
+                    tracing::warn!(
+                        run_id = %run_id,
+                        thread_id = %thread_id,
+                        streak,
+                        "claude run died mid-response repeatedly; leaving the failure terminal",
+                    );
+                }
             }
+        } else {
+            // A successful attempt ends the interruption streak.
+            self.connection_interruption_counts
+                .lock()
+                .await
+                .remove(thread_id);
         }
 
         Ok((response_text, result_data, signals))
