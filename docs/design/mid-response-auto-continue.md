@@ -29,15 +29,20 @@ that merely quotes the copy (agent conversations discussing this very
 feature do) must not arm the retry. The `ResultMessage.errors` text is an
 additional accepted source at the terminal.
 
-## Every terminal funnels through staging
+## Every terminal funnels through one quota-first classifier
 
 The copy can be observed on the stream while the run later dies on a
-terminal that never reaches result processing. All three terminals stage
-through one helper (`stage_connection_interruption_if_seen`):
+terminal that never reaches result processing. All three terminals — the
+ordinary errored result path, the stream-idle backstop, and the SDK
+receive-error return — call the same `stage_terminal_quota_context`, which
+classifies quota FIRST (a rejected `rate_limit_event` or a paired API-429
+usage-limit segment observed earlier is a quota verdict even on an early
+terminal) and only then falls back to the interruption staging.
 
-- the ordinary errored result path (after quota classification declines);
-- the stream-idle backstop (`claude stream idle for …`);
-- the SDK receive-error return.
+The interruption signal is per-turn: the real user-turn boundary (a queued
+user input acknowledged mid-run) clears it, so an interruption from a
+previous exchange can never classify a later unrelated failure. Tool-result
+user messages do not clear it.
 
 The bridge run graph consumes the stash on both the soft-failure and
 hard-error persistence paths, so the terminal `run_complete` carries
@@ -89,10 +94,23 @@ Bridge (stream-shape driven, `claude_provider/tests.rs`):
 - `quoted_interruption_copy_in_ordinary_content_does_not_stage` — quoting
   inside ordinary content never arms the retry.
 - `plain_failures_do_not_stage_an_automatic_continue`.
+- `quota_verdict_beats_interruption_on_the_stream_error_terminal` — every
+  terminal classifies quota FIRST: a rejected `rate_limit_event` followed
+  by the interruption copy and an SDK receive error stages the quota
+  verdict, never the network retry.
+- `interruption_copy_does_not_cross_the_user_turn_boundary` — the real
+  user-turn boundary clears the per-turn interruption signal; a later
+  unrelated failure in the next turn stays terminal. Tool-result user
+  messages never clear it.
 
 Gateway (`quota_resend.rs`):
 
 - `parses_connection_interruption_as_a_non_quota_retry` — projection keeps
   the marker, the timer stays armed, and `reached_type_is_quota_verdict`
-  pins the auto-switch gate (false for `connection_interrupted`, true for
-  quota verdicts).
+  pins the gate both ways.
+- `registration_path_gates_auto_switch_on_the_quota_verdict` — end to end
+  through the production `register_plan_with_auto_switch`: a connection
+  interruption registers its durable row but never reaches auto-switch
+  consideration (observed via the synchronous generation claim), while a
+  quota verdict does. `auto_switch_context_for` is the single decision
+  point the production path consumes; removing the gate turns this red.

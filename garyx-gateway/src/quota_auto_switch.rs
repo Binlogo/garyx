@@ -251,10 +251,27 @@ pub(crate) fn spawn_consideration(
 /// (review #TASK-2781). A restart clears the set; the SQLite re-validation
 /// in `evaluate` still gates every claim that survives it.
 fn claim_generation_once(job_id: &str) -> bool {
+    generation_claims()
+        .lock()
+        .expect("quota auto-switch dedup lock poisoned")
+        .insert(job_id.to_owned())
+}
+
+fn generation_claims() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
     static SEEN: OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> = OnceLock::new();
-    let seen = SEEN.get_or_init(Default::default);
-    let mut guard = seen.lock().expect("quota auto-switch dedup lock poisoned");
-    guard.insert(job_id.to_owned())
+    SEEN.get_or_init(Default::default)
+}
+
+/// Test observation seam: whether a generation entered consideration (the
+/// claim happens synchronously in `spawn_consideration` before any task is
+/// spawned), so registration-path tests can pin that a non-quota generation
+/// never reaches auto-switch.
+#[cfg(test)]
+pub(crate) fn generation_was_considered(job_id: &str) -> bool {
+    generation_claims()
+        .lock()
+        .expect("quota auto-switch dedup lock poisoned")
+        .contains(job_id)
 }
 
 fn provider_queue(provider: AccountProvider) -> Arc<Mutex<()>> {

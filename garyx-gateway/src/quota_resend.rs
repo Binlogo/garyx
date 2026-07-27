@@ -290,15 +290,39 @@ async fn register_plan(state: &Arc<AppState>, plan: RecoveryPlan) -> Option<Quot
 /// Whether a committed rate-limited generation is a real quota verdict that
 /// may drive auto account switch. A transient connection interruption is
 /// not: the timer resend handles it, and switching accounts over a network
-/// blip would be pure churn. The production registration path must consume
-/// this function — it is the single decision point the tests pin.
+/// blip would be pure churn.
 fn reached_type_is_quota_verdict(reached_type: Option<&str>) -> bool {
     reached_type != Some("connection_interrupted")
 }
 
+/// The single decision point between a registered generation and quota
+/// auto-switch: provider mapping plus the quota-verdict gate. The production
+/// registration path consumes exactly this function, so removing either gate
+/// turns the registration-path tests red.
+fn auto_switch_context_for(
+    plan_provider: &str,
+    plan_reached_type: Option<&str>,
+    thread_id: String,
+    blocked_run_id: String,
+    account_dir: Option<String>,
+    model: Option<String>,
+    job: &QuotaRecoveryJob,
+) -> Option<crate::quota_auto_switch::QuotaBlockContext> {
+    let provider = crate::quota_auto_switch::AccountProvider::from_canonical(plan_provider)
+        .filter(|_| reached_type_is_quota_verdict(plan_reached_type))?;
+    Some(crate::quota_auto_switch::QuotaBlockContext {
+        thread_id,
+        provider,
+        job_id: job.job_id.clone(),
+        blocked_run_id,
+        account_dir,
+        model,
+    })
+}
+
 async fn register_plan_with_auto_switch(state: &Arc<AppState>, plan: RecoveryPlan) {
-    let provider = crate::quota_auto_switch::AccountProvider::from_canonical(&plan.provider)
-        .filter(|_| reached_type_is_quota_verdict(plan.reached_type.as_deref()));
+    let plan_provider = plan.provider.clone();
+    let plan_reached_type = plan.reached_type.clone();
     let thread_id = plan.thread_id.clone();
     let run_id = plan.run_id.clone();
     let account_dir = plan.account_dir.clone();
@@ -306,15 +330,15 @@ async fn register_plan_with_auto_switch(state: &Arc<AppState>, plan: RecoveryPla
     let Some(job) = register_plan(state, plan).await else {
         return;
     };
-    if let Some(provider) = provider {
-        let context = crate::quota_auto_switch::QuotaBlockContext {
-            thread_id,
-            provider,
-            job_id: job.job_id.clone(),
-            blocked_run_id: run_id,
-            account_dir,
-            model,
-        };
+    if let Some(context) = auto_switch_context_for(
+        &plan_provider,
+        plan_reached_type.as_deref(),
+        thread_id,
+        run_id,
+        account_dir,
+        model,
+        &job,
+    ) {
         crate::quota_auto_switch::spawn_consideration(state, context, &job);
     }
 }
@@ -977,6 +1001,75 @@ mod tests {
             },
         ];
         assert!(latest_rate_limited_plan(&records).is_none());
+    }
+
+    /// Review #TASK-2795 finding 3: the production registration path itself
+    /// must gate auto-switch. Drives register_plan_with_auto_switch end to
+    /// end and observes the consideration claim (taken synchronously before
+    /// any spawn): a connection interruption registers its durable row but
+    /// never reaches auto-switch, while a quota verdict does. Removing the
+    /// production gate turns the first assertion red.
+    #[tokio::test]
+    async fn registration_path_gates_auto_switch_on_the_quota_verdict() {
+        let state = crate::server::AppStateBuilder::new(Default::default()).build();
+        state
+            .ops
+            .garyx_db
+            .run_thread_data_startup_migrations()
+            .unwrap();
+        state
+            .ops
+            .garyx_db
+            .write_thread_record_with_projections("thread::quota", "{}", None, None)
+            .unwrap();
+
+        let interruption = RecoveryPlan {
+            thread_id: "thread::quota".to_owned(),
+            run_id: "run::interrupted".to_owned(),
+            blocked_seq: 3,
+            provider: "claude_code".to_owned(),
+            window: None,
+            reset_at: Some(Utc::now()),
+            account_dir: None,
+            model: None,
+            reached_type: Some("connection_interrupted".to_owned()),
+        };
+        register_plan_with_auto_switch(&state, interruption).await;
+        let job = state
+            .ops
+            .garyx_db
+            .active_quota_recovery_job("thread::quota")
+            .unwrap()
+            .expect("the interruption registers a durable row");
+        assert_eq!(job.blocked_run_id, "run::interrupted");
+        assert!(
+            !crate::quota_auto_switch::generation_was_considered(&job.job_id),
+            "a connection interruption must never reach auto-switch consideration"
+        );
+
+        let quota = RecoveryPlan {
+            thread_id: "thread::quota".to_owned(),
+            run_id: "run::quota-verdict".to_owned(),
+            blocked_seq: 9,
+            provider: "claude_code".to_owned(),
+            window: Some("five_hour".to_owned()),
+            reset_at: Some(Utc::now()),
+            account_dir: None,
+            model: None,
+            reached_type: Some("api_rate_limit_429".to_owned()),
+        };
+        register_plan_with_auto_switch(&state, quota).await;
+        let job = state
+            .ops
+            .garyx_db
+            .active_quota_recovery_job("thread::quota")
+            .unwrap()
+            .expect("the quota verdict registers a durable row");
+        assert_eq!(job.blocked_run_id, "run::quota-verdict");
+        assert!(
+            crate::quota_auto_switch::generation_was_considered(&job.job_id),
+            "a quota verdict must reach auto-switch consideration"
+        );
     }
 
     #[tokio::test]

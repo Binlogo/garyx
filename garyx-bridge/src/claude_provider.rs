@@ -2114,6 +2114,62 @@ impl ClaudeCliProvider {
     }
 
     /// Core message processing loop with optional streaming callback.
+    /// One terminal classifier for every way an attempt can end: quota
+    /// FIRST, interruption fallback. The early terminals (idle backstop,
+    /// SDK receive error) must use exactly this ordering too — a rejected
+    /// `rate_limit_event` followed by a mid-response copy is a quota
+    /// verdict, and downgrading it to a network retry would skip auto
+    /// account switch (review #TASK-2795).
+    #[allow(clippy::too_many_arguments)]
+    async fn stage_terminal_quota_context(
+        &self,
+        thread_id: &str,
+        run_id: &str,
+        signals: &StreamSignals,
+        terminal_reason: Option<&str>,
+        api_error_status: Option<i64>,
+        result_errors: Option<&str>,
+        quota_account_dir: Option<&Path>,
+        model: Option<&str>,
+    ) {
+        if let Some(rate_limit) = build_claude_rate_limit(
+            self.config.provider_type.as_slug(),
+            ClaudeRateLimitSignals {
+                terminal_reason,
+                rate_limit_info: signals.rate_limit_info.as_ref(),
+                errors: result_errors,
+                assistant_error_rate_limited: signals.last_assistant_error
+                    == Some(AssistantMessageError::RateLimit),
+                api_error_status,
+                assistant_error_text: signals.last_assistant_error_text.as_deref(),
+            },
+            quota_account_dir,
+            model,
+        ) {
+            tracing::warn!(
+                run_id = %run_id,
+                thread_id = %thread_id,
+                provider = %rate_limit.provider,
+                window = ?rate_limit.window,
+                reset_at = ?rate_limit.reset_at,
+                "claude run hit usage quota; staging rate-limit context for auto-resend",
+            );
+            self.pending_rate_limits
+                .stage(thread_id.to_owned(), rate_limit)
+                .await;
+            return;
+        }
+        self.stage_connection_interruption_if_seen(
+            thread_id,
+            run_id,
+            signals,
+            result_errors,
+            quota_account_dir,
+            model,
+        )
+        .await;
+    }
+
     /// Stage the transient-interruption recovery when a segment (or the
     /// result errors) surfaced the CLI's mid-response copy. Shared by the
     /// normal terminal path AND the idle / SDK receive-error terminals,
@@ -2243,13 +2299,16 @@ impl ClaudeCliProvider {
                         "stream idle for {}s, treating run as dead",
                         STREAM_IDLE_TIMEOUT_SECS,
                     );
-                    // An already-observed interruption segment must still
-                    // stage recovery even though this terminal never reaches
-                    // result processing (review #TASK-2795).
-                    self.stage_connection_interruption_if_seen(
+                    // An already-observed quota verdict or interruption
+                    // segment must still stage recovery even though this
+                    // terminal never reaches result processing
+                    // (review #TASK-2795), with the same quota-first order.
+                    self.stage_terminal_quota_context(
                         thread_id,
                         run_id,
                         &signals,
+                        None,
+                        None,
                         None,
                         quota_account_dir,
                         actual_model.as_deref().or(requested_model),
@@ -2290,6 +2349,13 @@ impl ClaudeCliProvider {
                         }
                         // Keep Python parity: normal UserMessage echoes are ACKs that
                         // indicate one queued user input has been consumed.
+                        //
+                        // A real user turn starts a new logical exchange: an
+                        // interruption observed in the previous turn must not
+                        // classify a later unrelated failure
+                        // (review #TASK-2795). Tool-result user messages
+                        // `continue`d above and never reach this clear.
+                        signals.interruption_copy = None;
                         result_seen = false;
                         on_chunk(StreamEvent::Boundary {
                             kind: StreamBoundaryKind::UserAck,
@@ -2676,10 +2742,12 @@ impl ClaudeCliProvider {
                                 "error receiving message from SDK"
                             ),
                         }
-                        self.stage_connection_interruption_if_seen(
+                        self.stage_terminal_quota_context(
                             thread_id,
                             run_id,
                             &signals,
+                            None,
+                            None,
                             None,
                             quota_account_dir,
                             actual_model.as_deref().or(requested_model),
@@ -2702,46 +2770,21 @@ impl ClaudeCliProvider {
                 .as_ref()
                 .map(|result| result.errors.join("; "))
                 .filter(|joined| !joined.is_empty());
-            if let Some(rate_limit) = build_claude_rate_limit(
-                self.config.provider_type.as_slug(),
-                ClaudeRateLimitSignals {
-                    terminal_reason: result_data
-                        .as_ref()
-                        .and_then(|result| result.terminal_reason.as_deref()),
-                    rate_limit_info: signals.rate_limit_info.as_ref(),
-                    errors: errors_joined.as_deref(),
-                    assistant_error_rate_limited: signals.last_assistant_error
-                        == Some(AssistantMessageError::RateLimit),
-                    api_error_status: result_data
-                        .as_ref()
-                        .and_then(|result| result.api_error_status),
-                    assistant_error_text: signals.last_assistant_error_text.as_deref(),
-                },
+            self.stage_terminal_quota_context(
+                thread_id,
+                run_id,
+                &signals,
+                result_data
+                    .as_ref()
+                    .and_then(|result| result.terminal_reason.as_deref()),
+                result_data
+                    .as_ref()
+                    .and_then(|result| result.api_error_status),
+                errors_joined.as_deref(),
                 quota_account_dir,
                 actual_model.as_deref().or(requested_model),
-            ) {
-                tracing::warn!(
-                    run_id = %run_id,
-                    thread_id = %thread_id,
-                    provider = %rate_limit.provider,
-                    window = ?rate_limit.window,
-                    reset_at = ?rate_limit.reset_at,
-                    "claude run hit usage quota; staging rate-limit context for auto-resend",
-                );
-                self.pending_rate_limits
-                    .stage(thread_id.to_owned(), rate_limit)
-                    .await;
-            } else {
-                self.stage_connection_interruption_if_seen(
-                    thread_id,
-                    run_id,
-                    &signals,
-                    errors_joined.as_deref(),
-                    quota_account_dir,
-                    actual_model.as_deref().or(requested_model),
-                )
-                .await;
-            }
+            )
+            .await;
         } else {
             // A successful attempt ends the interruption streak.
             self.connection_interruption_counts

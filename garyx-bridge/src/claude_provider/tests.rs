@@ -5619,3 +5619,114 @@ async fn quoted_interruption_copy_in_ordinary_content_does_not_stage() {
         "a quoted copy inside ordinary content must not arm the retry"
     );
 }
+
+/// Review #TASK-2795 round 3: the early terminals classify quota FIRST. A
+/// rejected rate_limit_event followed by the interruption copy and an SDK
+/// receive error is a quota verdict — never a network retry.
+#[tokio::test]
+async fn quota_verdict_beats_interruption_on_the_stream_error_terminal() {
+    let provider = make_provider();
+    let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+    tx.send(Ok(Message::System(SystemMessage {
+        subtype: "rate_limit_event".to_owned(),
+        data: json!({
+            "type": "rate_limit_event",
+            "rate_limit_info": {
+                "status": "rejected",
+                "resetsAt": 1767225600,
+                "rateLimitType": "five_hour",
+            },
+        }),
+    })))
+    .await
+    .unwrap();
+    tx.send(Ok(Message::Assistant(AssistantMessage {
+        content: vec![ContentBlock::Text(TextBlock {
+            text:
+                "API Error: Connection closed mid-response. The response above may be incomplete."
+                    .to_owned(),
+        })],
+        model: "claude-test".to_owned(),
+        parent_tool_use_id: None,
+        error: Some(AssistantMessageError::ServerError),
+    })))
+    .await
+    .unwrap();
+    tx.send(Err(claude_agent_sdk::ClaudeSDKError::Connection(
+        "socket closed".to_owned(),
+    )))
+    .await
+    .unwrap();
+    drop(tx);
+
+    let (_chunks, cb) = collecting_callback();
+    provider
+        .process_messages_streaming("run-mixed", "thread::mixed", &mut rx, &cb, None, None)
+        .await
+        .expect_err("stream error should fail the run");
+    let staged = provider
+        .take_rate_limit("thread::mixed")
+        .await
+        .expect("the quota verdict must stage");
+    assert_eq!(
+        staged.reached_type.as_deref(),
+        Some("rate_limit_rejected"),
+        "quota classification must win over the interruption fallback"
+    );
+}
+
+/// Review #TASK-2795 round 3: an interruption observed in a previous user
+/// turn must not classify a later unrelated failure — the real user-turn
+/// boundary clears the signal.
+#[tokio::test]
+async fn interruption_copy_does_not_cross_the_user_turn_boundary() {
+    let provider = make_provider();
+    provider.initialize_pending_inputs("run-turns").await;
+    provider.set_pending_inputs("run-turns", 1).await;
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+    tx.send(Ok(Message::Assistant(AssistantMessage {
+        content: vec![ContentBlock::Text(TextBlock {
+            text:
+                "API Error: Connection closed mid-response. The response above may be incomplete."
+                    .to_owned(),
+        })],
+        model: "claude-test".to_owned(),
+        parent_tool_use_id: None,
+        error: Some(AssistantMessageError::ServerError),
+    })))
+    .await
+    .unwrap();
+    // A queued user message is consumed: a new logical turn begins.
+    tx.send(Ok(Message::User(UserMessage {
+        content: UserContent::Text("continue".to_owned()),
+        uuid: None,
+        parent_tool_use_id: None,
+        tool_use_result: None,
+        origin: None,
+    })))
+    .await
+    .unwrap();
+    // The new turn dies on an unrelated failure.
+    tx.send(Ok(Message::Result(Box::new(ResultMessage {
+        subtype: "error_during_execution".to_owned(),
+        is_error: true,
+        session_id: "sdk-session-turns".to_owned(),
+        terminal_reason: Some("api_error".to_owned()),
+        errors: vec!["something else went wrong".to_owned()],
+        ..Default::default()
+    }))))
+    .await
+    .unwrap();
+    drop(tx);
+
+    let (_chunks, cb) = collecting_callback();
+    provider
+        .process_messages_streaming("run-turns", "thread::turns", &mut rx, &cb, None, None)
+        .await
+        .expect("stream should process");
+    assert!(
+        provider.take_rate_limit("thread::turns").await.is_none(),
+        "an interruption from the previous turn must not stage the later unrelated failure"
+    );
+}
