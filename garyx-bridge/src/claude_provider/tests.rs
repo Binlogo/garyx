@@ -1097,6 +1097,7 @@ fn claude_account_environment_is_provider_owned_and_snapshot_stable() {
         None,
         "run-account-env",
         &run_snapshot,
+        None,
     );
     assert_eq!(
         in_flight.env.get("CLAUDE_CONFIG_DIR").map(String::as_str),
@@ -5059,4 +5060,41 @@ async fn staged_rate_limit_model_uses_the_run_snapshot_not_hot_config() {
         .await
         .expect("rate limit should be staged");
     assert_eq!(staged.model.as_deref(), Some("claude-fable-5"));
+}
+
+#[test]
+fn sdk_launch_options_consume_the_same_model_snapshot_as_quota_attribution() {
+    // Review #TASK-2781 round 2: the SDK launch options and the quota
+    // fallback must consume ONE launch snapshot. The builder takes the
+    // snapshot as a parameter and never re-reads hot config for the model,
+    // so a defaults reload between run entry and attempt start cannot split
+    // the launched model from the quota attribution.
+    let provider = make_provider();
+    let opts = ProviderRunOptions {
+        thread_id: "test".to_owned(),
+        message: "hello".to_owned(),
+        workspace_dir: None,
+        images: None,
+        metadata: HashMap::new(),
+    };
+
+    // Run entry captured Fable with the launch env...
+    let snapshot = Some("claude-fable-5");
+    // ...then a hot defaults reload lands before the attempt builds its
+    // SDK options.
+    provider.update_model_defaults(&ProviderModelDefaults {
+        model: "claude-sonnet-4".to_owned(),
+        default_model: "claude-sonnet-4".to_owned(),
+        model_reasoning_effort: String::new(),
+        model_service_tier: String::new(),
+    });
+
+    let launch_env = HashMap::new();
+    let sdk_opts =
+        provider.build_sdk_options_with_launch_env(&opts, None, "run-1", &launch_env, snapshot);
+    assert_eq!(
+        sdk_opts.model.as_deref(),
+        Some("claude-fable-5"),
+        "the SDK launch must use the run snapshot, not hot config"
+    );
 }

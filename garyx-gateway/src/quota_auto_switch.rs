@@ -242,17 +242,18 @@ pub(crate) fn spawn_consideration(
     });
 }
 
-/// Process-local once-per-generation claim. Bounded: the set is cleared when
-/// it grows past a few thousand entries — at one entry per blocked run this
-/// takes months, and losing dedup for ancient generations is harmless because
-/// their rows have long settled and fail the SQLite re-validation anyway.
+/// Process-local once-per-generation claim, kept for the life of the
+/// process. Deliberately unbounded: entries accrue only when a run actually
+/// blocks on its quota (a few dozen bytes each), so even a gateway that
+/// blocks every few minutes for a year stays in the low megabytes — while
+/// any eviction scheme risks re-claiming a still-waiting generation that a
+/// lag replay then re-evaluates, violating the once-per-generation contract
+/// (review #TASK-2781). A restart clears the set; the SQLite re-validation
+/// in `evaluate` still gates every claim that survives it.
 fn claim_generation_once(job_id: &str) -> bool {
     static SEEN: OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> = OnceLock::new();
     let seen = SEEN.get_or_init(Default::default);
     let mut guard = seen.lock().expect("quota auto-switch dedup lock poisoned");
-    if guard.len() > 4096 {
-        guard.clear();
-    }
     guard.insert(job_id.to_owned())
 }
 
@@ -754,5 +755,21 @@ mod tests {
         assert!(claim_generation_once(&job));
         assert!(!claim_generation_once(&job));
         assert!(!claim_generation_once(&job));
+    }
+
+    #[test]
+    fn generation_dedup_survives_any_fleet_size() {
+        // Review #TASK-2781 round 2: an active claim must never be evicted by
+        // volume — a capacity clear would let a lag replay re-claim a
+        // still-waiting generation.
+        let sentinel = format!("quota-recovery:run::{}", uuid::Uuid::new_v4());
+        assert!(claim_generation_once(&sentinel));
+        for index in 0..4097 {
+            claim_generation_once(&format!("quota-recovery:run::fleet-{index}"));
+        }
+        assert!(
+            !claim_generation_once(&sentinel),
+            "an active generation must remain claimed regardless of fleet size"
+        );
     }
 }

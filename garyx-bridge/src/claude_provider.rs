@@ -1314,6 +1314,7 @@ impl ClaudeCliProvider {
         session_id: Option<&str>,
         run_id: &str,
         launch_env: &HashMap<String, String>,
+        requested_model: Option<&str>,
     ) -> ClaudeAgentOptions {
         // Reserve `garyx` for the built-in control-plane MCP server so a
         // stale runtime override cannot shadow the local gateway endpoint.
@@ -1342,9 +1343,13 @@ impl ClaudeCliProvider {
         // Workspace directory
         let cwd = resolve_claude_cwd(&self.config, options);
 
-        // Model: metadata override > (hot-reloadable) config default
+        // Model: the run's launch snapshot, captured once at run entry
+        // alongside the launch env. The builder never re-reads hot config
+        // for it — the SDK launch and the quota attribution must consume the
+        // same snapshot, or a defaults reload racing the run splits them
+        // (review #TASK-2781).
+        let model = requested_model.map(ToOwned::to_owned);
         let effective_config = self.effective_config();
-        let model = resolve_requested_model(&effective_config, &options.metadata);
         // Thinking level: per-run metadata overrides the provider default and
         // is mapped to the Claude CLI `--effort` flag.
         let requested_effort = resolve_requested_effort(&effective_config, &options.metadata);
@@ -1466,7 +1471,14 @@ impl ClaudeCliProvider {
             .read()
             .expect("claude launch environment lock poisoned")
             .clone();
-        self.build_sdk_options_with_launch_env(options, session_id, run_id, &launch_env)
+        let requested_model = resolve_requested_model(&self.effective_config(), &options.metadata);
+        self.build_sdk_options_with_launch_env(
+            options,
+            session_id,
+            run_id,
+            &launch_env,
+            requested_model.as_deref(),
+        )
     }
 
     /// Record a thread failure and return whether we should clear the provider session.
@@ -1693,9 +1705,13 @@ impl ClaudeCliProvider {
             }
         }
 
-        let connect_future = sdk_run_streaming(
-            self.build_sdk_options_with_launch_env(options, session_id, run_id, launch_env),
-        );
+        let connect_future = sdk_run_streaming(self.build_sdk_options_with_launch_env(
+            options,
+            session_id,
+            run_id,
+            launch_env,
+            requested_model,
+        ));
         let mut run = connect_future
             .await
             .map_err(bridge_error_from_sdk_connect_error)?;

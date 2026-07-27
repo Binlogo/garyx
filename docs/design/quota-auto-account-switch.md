@@ -71,9 +71,12 @@ provider at staging time and persisted in the control payload:
   assumption below and let a stale System-default block dethrone a healthy
   managed selection.
 - `model`: the run's model — actual model when reported, otherwise the
-  requested model captured once at run start with the launch snapshot (a
-  defaults hot reload racing the stream must not relabel the blocked run).
-  Used only for the scoped-bucket check.
+  requested model captured once at run entry with the launch snapshot. The
+  SDK launch options and the quota attribution consume that same snapshot
+  (the options builder takes it as a parameter and never re-reads hot config
+  for the model), so a defaults reload racing the run can neither relabel
+  the blocked run nor split the launched model from its attribution. Used
+  only for the scoped-bucket check.
 
 The gateway maps `account_dir` back to a managed account id through its own
 managed-root layout (`managed_account_dir(config_path, id)`); any explicit
@@ -125,9 +128,11 @@ Decision:
 Every evaluation is pinned to the durable generation that triggered it. The
 context carries the recovery row's `job_id` and `blocked_run_id`; enqueue
 requires a still-waiting row for exactly that run; each generation is
-considered at most once per process (broadcast lag replays a window of
-historical events, and a replayed still-waiting generation must not
-re-evaluate after conditions changed); and after acquiring the per-provider
+considered at most once per process — the claim set is kept for the life of
+the process, never evicted by volume, because any eviction could let a lag
+replay re-claim a still-waiting generation (entries accrue only per blocked
+run, so the set stays tiny; a restart clears it and the SQLite re-validation
+still gates every claim) — and after acquiring the per-provider
 queue the evaluation re-validates against SQLite that its row is still the
 active waiting generation — a row that was claimed, superseded, or settled
 while the evaluation was queued aborts without acting. The straggler wake is
