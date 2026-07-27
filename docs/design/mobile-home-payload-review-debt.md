@@ -35,5 +35,17 @@ compression change).
   it to the fields lists render. Cross-client API contract change — needs
   consumer audit first.
 
-Both items are adjacent findings, not regressions; per the scope rule they
+## Debt 3: Unreachable-gateway Home reducer test timing flake
+
+- `GaryxHomeThreadListRefreshCommitTests.
+  testUnreachableGatewayPresentsSetupInsteadOfHomeSkeleton` intermittently
+  observes `.empty` instead of the reducer's retained
+  `.loadingSkeleton(rowCount: 6)` debt after the connection failure wins the
+  race. It reproduces with the Home suite alone and in unrelated control
+  combinations; it predates the catalog-refresh work.
+- Direction when picked up: replace the live connection-failure timing with a
+  deterministic transport gate and explicitly settle the reducer transition
+  before asserting both the hidden Home debt and the visible setup root.
+
+These items are adjacent findings, not regressions; per the scope rule they
 must not ride along inside other tasks' review loops.

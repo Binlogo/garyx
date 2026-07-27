@@ -7,17 +7,39 @@ final class GaryxCatalogRefreshIntegrationTests: XCTestCase {
     private var sessions: [URLSession] = []
     private var models: [GaryxMobileModel] = []
 
-    override func tearDown() {
+    override func tearDown() async throws {
         for model in models {
-            model.homeFeedSyncCoordinator.deactivateScope()
-            model.cancelThreadFavoritesSnapshotTransport()
-            model.catalogRefreshInFlight?.task.cancel()
+            var outstandingTasks: [Task<Void, Never>] = [
+                model.catalogRefreshInFlight?.task,
+                model.sceneRefreshTask,
+                model.selectedThreadRecoveryTask,
+                model.selectedThreadHistoryRetryTask,
+                model.selectedThreadReconcileTask,
+                model.backgroundCommittedRunReconcileTask,
+                model.selectedThreadStreamTask,
+                model.selectedThreadStreamFlushTask,
+                model.selectedThreadStreamDrainTask,
+                model.threadFavoritesSnapshotTask,
+            ].compactMap { $0 }
+            outstandingTasks.append(
+                contentsOf: model.completedThreadHistoryHydrationTasks.values
+            )
+            outstandingTasks.append(
+                contentsOf: model.botThreadHydrationTasks.values.flatMap(\.values)
+            )
+            outstandingTasks.forEach { $0.cancel() }
+            model.resetGatewayRuntimeState()
+            for task in outstandingTasks {
+                await task.value
+            }
+            await model.homeFeedSyncCoordinator.waitForTransportIdleForTesting()
+            await model.homeProjectionGateway.waitForIdleForTesting()
         }
         models.removeAll()
         sessions.forEach { $0.invalidateAndCancel() }
         sessions.removeAll()
         GaryxCatalogURLProtocolStub.requestHandler = nil
-        super.tearDown()
+        try await super.tearDown()
     }
 
     func testB1HomePullAllIssuesOnlySelectedRecentFeed() async throws {
@@ -336,19 +358,24 @@ final class GaryxCatalogRefreshIntegrationTests: XCTestCase {
             providerType: "test",
             model: "test-model"
         )
-        let existing = makeThread(
+        let pinnedOutsidePage = makeThread(
+            id: "thread-pinned-outside-page",
+            title: "Cached Pinned Thread",
+            updatedAt: "2026-07-26T11:00:00Z"
+        )
+        let selected = makeThread(
             id: "thread-home",
             title: "Previous Home Thread",
             updatedAt: "2026-07-26T12:00:00Z",
             threadRuntime: runtime
         )
         model.seedThreadSummariesForTesting(
-            [existing],
-            recentThreadIds: [existing.id]
+            [pinnedOutsidePage, selected],
+            recentThreadIds: [selected.id]
         )
-        model.applyPinnedThreadIds([existing.id])
-        model.selectedThread = existing
-        model.draftThreadTitle = existing.title
+        model.applyPinnedThreadIds([pinnedOutsidePage.id])
+        model.selectedThread = selected
+        model.draftThreadTitle = selected.title
         let coordinator = prepareHome(model, filter: .all)
         recorder.reset()
 
@@ -359,12 +386,16 @@ final class GaryxCatalogRefreshIntegrationTests: XCTestCase {
             Set(recorder.entries.map(\.target)),
             ["/api/recent-threads?limit=30&tasks=include"]
         )
-        XCTAssertEqual(model.pinnedThreadIds, [existing.id])
+        XCTAssertEqual(model.pinnedThreadIds, [pinnedOutsidePage.id])
         XCTAssertEqual(
             model.homeThreadListStore.presentationSnapshot.sections.pinned.map(\.id),
-            [existing.id]
+            [pinnedOutsidePage.id]
         )
-        let refreshed = try XCTUnwrap(model.cachedThreadSummary(for: existing.id))
+        XCTAssertEqual(
+            model.cachedThreadSummary(for: pinnedOutsidePage.id),
+            pinnedOutsidePage
+        )
+        let refreshed = try XCTUnwrap(model.cachedThreadSummary(for: selected.id))
         XCTAssertEqual(refreshed.title, "Home Thread")
         XCTAssertEqual(refreshed.threadRuntime, runtime)
         XCTAssertEqual(model.selectedThread?.title, "Home Thread")
