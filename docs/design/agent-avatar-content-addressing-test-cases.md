@@ -31,7 +31,7 @@ iOS validation: iPhone 17 Pro Max / iOS 26.5 / light mode only.
 | I3 | Fetch never blocks render | with the avatar transport gated (held open), rows render immediately with the provider/initials fallback; releasing the gate swaps the image in | |
 | I4 | Failure is silent + lazily retried | avatar endpoint 500s → no error UI, fallback stays; a later render triggers a fresh attempt which succeeds | |
 | I5 | Catalog snapshot slimmed | `GaryxCachedAgent` carries `avatarHash` only; snapshot version 7; a stored v6 snapshot is discarded cleanly; persisted snapshot for the real profile set is KB-scale (assert < 64 KB) | |
-| I6 | Widget channel | widget projection passes scope+hash; widget process loads bytes from the shared App Group store; no inline base64 in App Group UserDefaults payloads | |
+| I6 | Widget channel | widget projection passes the hash alone (no scope leg in the lookup); widget process loads bytes from the shared App Group store; no inline base64 in App Group UserDefaults payloads | |
 | I7 | Shared image dedup | two agents with the same `avatar_hash` store one blob and both render | |
 | I8 | Upload read-back | avatar upload flow saves, reads back the server hash, and the next render is a disk hit (zero avatar fetches); a deliberately mismatched local normalization falls back to the fetch path | |
 | I9 | Auth in headers | the avatar fetch carries the Authorization header; the hash URL contains no token material | |
