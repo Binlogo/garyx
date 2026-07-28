@@ -36,6 +36,7 @@ iOS validation: iPhone 17 Pro Max / iOS 26.5 / light mode only.
 | I8 | Upload read-back | avatar upload flow saves, reads back the server hash, and the next render is a disk hit (zero avatar fetches); a deliberately mismatched local normalization falls back to the fetch path | |
 | I9 | Auth in headers | the avatar fetch carries the Authorization header; the hash URL contains no token material | |
 | I10 | Regression | full `GaryxMobileCoreTests` SwiftPM suite + Home/`GaryxMobileTests` suites green; #TASK-2798 B-suite and #TASK-2806 R/P/C suites unaffected | |
+| I11 | Cache is gateway-independent (owner rule) | fetch hash H while connected to gateway profile A; switch to gateway profile B (different URL — same or different backend) whose catalog also references H → renders from disk with **zero** avatar requests; store contains one record for H with no scope dimension in its key | |
 
 ## D. Desktop (headless first, then packaged check)
 
@@ -48,6 +49,7 @@ iOS validation: iPhone 17 Pro Max / iOS 26.5 / light mode only.
 | D5 | Auth in headers | avatar fetch uses the authenticated client path; no token in the URL | |
 | D6 | Renderer regression | desktop unit/component suites green; agent picker, thread rail, pinned sidebar, search dialog, task tree, automation dialog, agents hub all render avatars (visual spot-check list from the consumer survey) | |
 | D7 | Packaged-app check | `npm run dist:dir`, open installed app, attach CDP: avatars render across the surfaces above; network panel shows avatar fetches only for first-seen hashes and none on subsequent navigation | |
+| D8 | Cache is gateway-independent (owner rule) | resolve hash H under gateway profile A, switch the app to profile B referencing H → zero avatar fetches; persistent cache key carries no gateway/scope dimension | |
 
 ## E. End-to-end (real gateway)
 

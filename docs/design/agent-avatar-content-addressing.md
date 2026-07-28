@@ -141,6 +141,19 @@ The four rules, straight from the owner:
    no retry timers, no error UI. Auth stays in headers — the token never
    appears in a URL.
 
+### Cache identity is global, never gateway-scoped (owner rule, 2026-07-28)
+
+The owner frequently reaches **the same gateway through different network
+entries** (different domains/addresses for one gateway). Cache keys must
+therefore follow the **data's own identity**, never the connection profile:
+a content hash is the same image no matter which gateway URL delivered it.
+The avatar blob cache has **no gateway/scope dimension at all** — one global
+hash-addressed pool shared across every configured gateway. Switching
+gateways or switching domains for the same gateway never invalidates or
+re-fetches a known hash. (Cross-gateway sharing is safe by construction:
+a gateway that presents hash H in its catalog already possesses that image;
+rendering it from the local pool reveals nothing.)
+
 ### iOS
 
 - `GaryxAgentSummary.avatarDataUrl` → `avatarHash: String?` (drop the four
@@ -149,15 +162,18 @@ The four rules, straight from the owner:
   version gate — cold start repopulates from the connect sweep). This
   removes the ~720 KB of base64 from the UserDefaults snapshot entirely.
 - Reuse the existing App Group avatar store (`GaryxAvatarDiskStore`,
-  `GaryxAvatarCache/v1/`) rather than building a second cache: the stored
-  record's content fingerprint becomes the server `avatar_hash` (exact
-  scheme — replacing fnv1a64 with the server hash vs. mapping identity →
-  server-hash — is the implementer's choice, but hash-keyed lookup must be
-  O(1) and identity-independent so one image shared by N agents stores
-  once). The widget channel keeps its current shape: projector passes
-  scope + hash (today's `avatarFingerprint` slot), widget loads bytes from
-  the shared container; the inline-data-URL fallback lane in the widget
-  projection disappears with the field.
+  `GaryxAvatarCache/v1/`) rather than building a second cache, but its
+  keying changes per the global-identity rule: records are addressed by
+  server `avatar_hash` **only** — the `GaryxAvatarIdentity{scope,id}`
+  dimension disappears from storage keys (bump the store's on-disk version;
+  old identity-keyed records are discarded, repopulated lazily by the
+  unknown-hash fetch path). Hash-keyed lookup is O(1) and
+  identity-independent, so one image shared by N agents — or by the same
+  agent seen through two gateway URLs — stores once. The widget channel
+  simplifies accordingly: the projector passes the hash alone (today's
+  `avatarFingerprint` slot; the scope leg is no longer part of the lookup),
+  widget loads bytes from the shared container; the inline-data-URL fallback
+  lane in the widget projection disappears with the field.
 - New fetcher in Core-adjacent app layer: hash → authenticated
   `GET /api/avatars/{hash}` → validate sniffed image → write store → wake
   the row(s) that requested it. Pure decision pieces (known/unknown/in-
@@ -182,8 +198,10 @@ The four rules, straight from the owner:
   cache → persistent cache → authenticated fetch (dedup by hash) → object
   URL. Persistent layer per desktop's existing patterns (CacheStorage in the
   renderer or a main-process disk cache — implementer's choice; the contract
-  is the four client rules above). `AgentOptionAvatar` consumes the resolved
-  object URL / falls back exactly as today.
+  is the four client rules above). The persistent cache is keyed by hash
+  alone — global across gateways/domains, per the global-identity rule.
+  `AgentOptionAvatar` consumes the resolved object URL / falls back exactly
+  as today.
 - Upload/generation (`agent-avatar.ts`, `agents-hub-helpers.ts`) keep their
   pre-normalization and `avatar_data_url` upload field; read-back mirrors the
   iOS rule.
