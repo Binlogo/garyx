@@ -330,22 +330,48 @@ public struct GaryxRecentThreadFeedState: Equatable, Sendable, GaryxRecentHeadDo
     public var footerState: GaryxHomeLoadMoreFooterState { pager.footerState }
     public var isPrimed: Bool { headPhase.isPrimed }
     public var headFailure: Bool { headPhase.awaitsUserAction }
+    public var queuedHeadRequest: GaryxHomeFeedQueuedHeadRequest {
+        guard pendingHeadRequest != nil else { return .none }
+        if headPhase.activeAttempt != nil {
+            return .waitingForActiveHead
+        }
+        if pager.isLoadingMore {
+            return .waitingForLoadMore
+        }
+        return .runnable
+    }
 
     public var presentation: GaryxRecentThreadFeedPresentation {
         GaryxRecentThreadFeedPresentation(self)
     }
 
+    #if DEBUG
+    fileprivate mutating func parkPendingHeadRequestForTesting(
+        _ request: GaryxRecentHeadRequest
+    ) {
+        pendingHeadRequest = request
+    }
+
+    fileprivate mutating func consumePendingHeadRequestForTesting()
+        -> GaryxRecentHeadRequest? {
+        defer { pendingHeadRequest = nil }
+        return pendingHeadRequest
+    }
+    #endif
+
     fileprivate mutating func enqueueHeadRequest(
         _ request: GaryxRecentHeadRequest
     ) -> [GaryxRecentFeedEffect] {
+        let merged = Self.mergedPendingHeadRequest(
+            pendingHeadRequest,
+            request
+        )
         guard headPhase.activeAttempt == nil, !pager.isLoadingMore else {
-            pendingHeadRequest = Self.mergedPendingHeadRequest(
-                pendingHeadRequest,
-                request
-            )
+            pendingHeadRequest = merged
             return []
         }
-        return [.requestHead(request)]
+        pendingHeadRequest = nil
+        return [.requestHead(merged)]
     }
 
     fileprivate mutating func beginHeadRequest(
@@ -750,8 +776,7 @@ public struct GaryxRecentThreadFeedState: Equatable, Sendable, GaryxRecentHeadDo
                 effects: [.publish]
             )
         }
-        pendingHeadRequest = Self.mergedPendingHeadRequest(
-            pendingHeadRequest,
+        let retryEffects = enqueueHeadRequest(
             GaryxRecentHeadRequest(
                 filter: ticket.filter,
                 source: ticket.source,
@@ -762,7 +787,7 @@ public struct GaryxRecentThreadFeedState: Equatable, Sendable, GaryxRecentHeadDo
         )
         return GaryxRecentHeadCompletion(
             outcome: outcome,
-            effects: [.publish] + drainPendingHeadEffects()
+            effects: [.publish] + retryEffects
         )
     }
 
@@ -777,12 +802,8 @@ public struct GaryxRecentThreadFeedState: Equatable, Sendable, GaryxRecentHeadDo
             forceReplacement: forceReplacement,
             homeProjectionCommit: .refreshedPins
         )
-        pendingHeadRequest = Self.mergedPendingHeadRequest(
-            pendingHeadRequest,
-            request
-        )
         headState.oweImmediate(stalledBy: .identityReplacement)
-        return drainPendingHeadEffects()
+        return enqueueHeadRequest(request)
     }
 
     private mutating func drainPendingHeadEffects() -> [GaryxRecentFeedEffect] {
@@ -919,6 +940,39 @@ public struct GaryxRecentThreadFeeds: Equatable, Sendable {
     }
 
     public mutating func select(_ filter: GaryxRecentThreadFilter) { selectedFilter = filter }
+
+    #if DEBUG
+    /// Additive test seam for reproducing coordinator behavior when a feed
+    /// owns a parked request. Production requests still enter through
+    /// `requestHeadEffects`.
+    public mutating func parkPendingHeadRequestForTesting(
+        _ request: GaryxRecentHeadRequest
+    ) {
+        switch request.filter {
+        case .all:
+            allFeed.parkPendingHeadRequestForTesting(request)
+        case .nonTask:
+            nonTaskFeed.parkPendingHeadRequestForTesting(request)
+        case .favorites:
+            preconditionFailure("Favorites owns its snapshot transport")
+        }
+    }
+
+    /// Models the transient queue owner consuming its parked request before
+    /// an independent coordinator wake (for example, returning to Home).
+    public mutating func consumePendingHeadRequestForTesting(
+        filter: GaryxRecentThreadFilter
+    ) -> GaryxRecentHeadRequest? {
+        switch filter {
+        case .all:
+            return allFeed.consumePendingHeadRequestForTesting()
+        case .nonTask:
+            return nonTaskFeed.consumePendingHeadRequestForTesting()
+        case .favorites:
+            preconditionFailure("Favorites owns its snapshot transport")
+        }
+    }
+    #endif
 
     public mutating func requestHeadEffects(
         filter: GaryxRecentThreadFilter? = nil,

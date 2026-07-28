@@ -425,11 +425,191 @@ final class GaryxHomeThreadListRefreshCommitTests: XCTestCase {
         for model in homeFeedTestModels {
             model.homeFeedSyncCoordinator.deactivateScope()
             model.cancelThreadFavoritesSnapshotTransport()
+            model.connectRefreshBackgroundTask?.cancel()
             model.sceneRefreshTask?.cancel()
         }
         homeFeedTestModels.removeAll()
         GaryxRecentThreadsURLProtocolStub.requestHandler = nil
         super.tearDown()
+    }
+
+    func testR1ParkedPendingDoesNotFreezeFilterSwitchIntent() async throws {
+        let session = makeIntentPassthroughStubSession()
+        defer {
+            GaryxRecentThreadsURLProtocolStub.requestHandler = nil
+            session.invalidateAndCancel()
+        }
+        let model = makeModel(session: session)
+        prepareParkedChatsRequest(on: model)
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let coordinator = installHomeFeedCoordinator(
+            model,
+            now: { now },
+            automaticallyEvaluatesWakeSignals: false
+        )
+        coordinator.updateConnection(.ready(version: "test"))
+
+        model.selectRecentThreadFilter(.nonTask)
+        let intentParked = await yieldUntil {
+            coordinator.hasPendingUserIntentForTesting(.userAction)
+        }
+        XCTAssertTrue(
+            intentParked,
+            "the real filter-switch path must park its user intent before evaluation"
+        )
+        coordinator.evaluateForTesting()
+
+        XCTAssertEqual(
+            coordinator.startedHeadRequestCountForTesting(.nonTask),
+            1,
+            "R1: the parked Chats request and filter intent must merge and dispatch immediately"
+        )
+        XCTAssertFalse(
+            coordinator.hasPendingUserIntentForTesting(.userAction),
+            "R1: immediate dispatch must consume the filter-switch intent"
+        )
+        await stopHomeFeedTestModel(model)
+    }
+
+    func testR2VisibilityFlipIsIrrelevantAfterImmediateIntentDispatch() async throws {
+        let session = makeIntentPassthroughStubSession()
+        defer {
+            GaryxRecentThreadsURLProtocolStub.requestHandler = nil
+            session.invalidateAndCancel()
+        }
+        let model = makeModel(session: session)
+        prepareParkedChatsRequest(on: model)
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let coordinator = installHomeFeedCoordinator(
+            model,
+            now: { now },
+            automaticallyEvaluatesWakeSignals: false
+        )
+        coordinator.updateConnection(.ready(version: "test"))
+
+        model.selectRecentThreadFilter(.nonTask)
+        let intentParked = await yieldUntil {
+            coordinator.hasPendingUserIntentForTesting(.userAction)
+        }
+        XCTAssertTrue(intentParked)
+        coordinator.evaluateForTesting()
+        XCTAssertEqual(
+            coordinator.startedHeadRequestCountForTesting(.nonTask),
+            1,
+            "R2: the intent must already be dispatched before the owner's workaround"
+        )
+
+        _ = model.recentThreadFeeds.consumePendingHeadRequestForTesting(
+            filter: .nonTask
+        )
+        coordinator.updateHomeVisibility(false)
+        coordinator.updateHomeVisibility(true)
+        coordinator.evaluateForTesting()
+        XCTAssertEqual(
+            coordinator.startedHeadRequestCountForTesting(.nonTask),
+            1,
+            "R2: leaving and returning Home must not be required or duplicate the request"
+        )
+        await stopHomeFeedTestModel(model)
+    }
+
+    func testR3CadenceSurvivesInternallyParkedHeadRequest() async throws {
+        let session = makeIntentPassthroughStubSession()
+        defer {
+            GaryxRecentThreadsURLProtocolStub.requestHandler = nil
+            session.invalidateAndCancel()
+        }
+        let model = makeModel(session: session)
+        prepareParkedChatsRequest(on: model)
+        model.recentThreadFeeds.select(.nonTask)
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let coordinator = installHomeFeedCoordinator(
+            model,
+            now: { now },
+            automaticallyEvaluatesWakeSignals: false
+        )
+        coordinator.updateConnection(.ready(version: "test"))
+
+        coordinator.evaluateForTesting()
+        await coordinator.waitForTransportIdleForTesting()
+        coordinator.evaluateForTesting()
+
+        XCTAssertEqual(
+            coordinator.startedHeadRequestCountForTesting(.nonTask),
+            1,
+            "R3: visible cadence must claim and dispatch the parked request"
+        )
+        XCTAssertTrue(
+            coordinator.hasScheduledTimerForTesting(),
+            "R3: once the refresh settles, visible cadence must remain scheduled"
+        )
+        await stopHomeFeedTestModel(model)
+    }
+
+    func testP3FavoritesIntentConvergesWhenSnapshotIsAlreadyInFlight() async throws {
+        let snapshotStarted = expectation(description: "first favorites snapshot started")
+        let snapshotGate = DispatchSemaphore(value: 0)
+        let snapshotRequests = GaryxLockedCounter()
+        let session = makeStubSession { request in
+            let path = try XCTUnwrap(request.url?.path)
+            switch (request.httpMethod, path) {
+            case ("GET", "/api/thread-favorites/snapshot"):
+                if snapshotRequests.increment() == 1 {
+                    snapshotStarted.fulfill()
+                    guard snapshotGate.wait(timeout: .now() + 5) == .success else {
+                        throw GaryxRefreshStubError.timedOut
+                    }
+                }
+                return try garyxStubResponse(
+                    request,
+                    data: try garyxFavoritesSnapshotData(ids: ["thread-favorite"])
+                )
+            case ("GET", "/api/thread-pins"):
+                return try garyxStubResponse(
+                    request,
+                    data: try garyxPinsPageData(ids: [], revision: 1)
+                )
+            case ("GET", "/api/recent-threads"):
+                return try garyxStubResponse(
+                    request,
+                    data: try garyxRecentThreadsData(ids: ["thread-favorite"])
+                )
+            case ("GET", "/api/thread-summaries"):
+                return try garyxStubResponse(request, statusCode: 404, data: Data())
+            default:
+                return try garyxStubResponse(request, statusCode: 404, data: Data())
+            }
+        }
+        defer {
+            snapshotGate.signal()
+            GaryxRecentThreadsURLProtocolStub.requestHandler = nil
+            session.invalidateAndCancel()
+        }
+
+        let model = makeModel(session: session)
+        let coordinator = model.homeFeedSyncCoordinator
+        model.connectionState = .ready(version: "test")
+        await fulfillment(of: [snapshotStarted], timeout: 2)
+
+        model.selectRecentThreadFilter(.favorites)
+        let intentParked = await yieldUntil {
+            coordinator.hasPendingUserIntentForTesting(.userAction)
+        }
+        XCTAssertTrue(intentParked)
+
+        snapshotGate.signal()
+        await coordinator.waitForFavoritesConvergence()
+
+        XCTAssertEqual(model.recentThreadFeeds.selectedFilter, .favorites)
+        XCTAssertEqual(model.threadFavoritesState.headPhase, .ready)
+        XCTAssertEqual(model.threadFavoritesState.rawThreadIds, ["thread-favorite"])
+        XCTAssertFalse(coordinator.hasPendingUserIntentForTesting(.userAction))
+        XCTAssertGreaterThanOrEqual(
+            snapshotRequests.value,
+            2,
+            "the in-flight snapshot must settle and run a post-intent convergence"
+        )
+        await stopHomeFeedTestModel(model)
     }
 
     func testCommitDoesNotResurrectThreadArchivedDuringBackfillAwait() throws {
@@ -5006,13 +5186,17 @@ final class GaryxHomeThreadListRefreshCommitTests: XCTestCase {
     private func installHomeFeedCoordinator(
         _ model: GaryxMobileModel,
         initialEffects: [GaryxRecentFeedEffect] = [],
-        immediateDemandTimeout: TimeInterval = GaryxMobileModel.homeFeedImmediateDemandTimeout
+        immediateDemandTimeout: TimeInterval = GaryxMobileModel.homeFeedImmediateDemandTimeout,
+        now: @escaping () -> Date = Date.init,
+        automaticallyEvaluatesWakeSignals: Bool = true
     ) -> GaryxHomeFeedSyncCoordinator {
         model.homeFeedSyncCoordinator.deactivateScope()
         let coordinator = GaryxHomeFeedSyncCoordinator(
             initialEffects: initialEffects,
             immediateDemandTimeout: immediateDemandTimeout,
-            scopeToken: model.gatewayRequestToken
+            scopeToken: model.gatewayRequestToken,
+            now: now,
+            automaticallyEvaluatesWakeSignals: automaticallyEvaluatesWakeSignals
         )
         model.homeFeedSyncCoordinator = coordinator
         coordinator.attach(model)
@@ -5020,11 +5204,76 @@ final class GaryxHomeThreadListRefreshCommitTests: XCTestCase {
         return coordinator
     }
 
+    private func prepareParkedChatsRequest(on model: GaryxMobileModel) {
+        if let ticket = model.threadFavoritesState.activeSnapshotTicket {
+            model.runThreadFavoritesEffects(
+                model.threadFavoritesProvider.failSnapshot(ticket: ticket)
+            )
+        }
+        primeRecentFeed(model, ids: ["all-cached"], filter: .all)
+        primeRecentFeed(model, ids: ["chat-cached"], filter: .nonTask)
+        model.recentThreadFeeds.parkPendingHeadRequestForTesting(
+            GaryxRecentHeadRequest(
+                filter: .nonTask,
+                source: .backgroundLoop,
+                homeProjectionCommit: .none
+            )
+        )
+        XCTAssertEqual(model.recentThreadFeeds.selectedFilter, .all)
+        XCTAssertEqual(
+            model.recentThreadFeeds.nonTaskFeed.pendingHeadRequest?.source,
+            .backgroundLoop
+        )
+        XCTAssertEqual(model.recentThreadFeeds.nonTaskFeed.headPhase, .ready)
+        XCTAssertFalse(model.recentThreadFeeds.nonTaskFeed.pager.isLoadingMore)
+    }
+
+    private func makeIntentPassthroughStubSession() -> URLSession {
+        makeStubSession { request in
+            let path = try XCTUnwrap(request.url?.path)
+            switch (request.httpMethod, path) {
+            case ("GET", "/api/thread-summaries"):
+                return try garyxStubResponse(request, statusCode: 404, data: Data())
+            case ("GET", "/api/thread-favorites/snapshot"):
+                return try garyxStubResponse(
+                    request,
+                    data: try garyxFavoritesSnapshotData(ids: [])
+                )
+            case ("GET", "/api/thread-pins"):
+                return try garyxStubResponse(
+                    request,
+                    data: try garyxPinsPageData(ids: [], revision: 1)
+                )
+            case ("GET", "/api/recent-threads"):
+                return try garyxStubResponse(
+                    request,
+                    data: try garyxRecentThreadsData(ids: ["chat-refreshed"])
+                )
+            default:
+                return try garyxStubResponse(request, statusCode: 404, data: Data())
+            }
+        }
+    }
+
+    private func yieldUntil(
+        maxYields: Int = 1_000,
+        condition: () -> Bool
+    ) async -> Bool {
+        for _ in 0..<maxYields {
+            if condition() { return true }
+            await Task.yield()
+        }
+        return condition()
+    }
+
     private func stopHomeFeedTestModel(_ model: GaryxMobileModel) async {
         let favoritesTask = model.threadFavoritesSnapshotTask
+        let connectBackgroundTask = model.connectRefreshBackgroundTask
         model.homeFeedSyncCoordinator.deactivateScope()
         model.cancelThreadFavoritesSnapshotTransport()
+        connectBackgroundTask?.cancel()
         favoritesTask?.cancel()
+        await connectBackgroundTask?.value
         await favoritesTask?.value
         await model.homeFeedSyncCoordinator.waitForTransportIdleForTesting()
     }

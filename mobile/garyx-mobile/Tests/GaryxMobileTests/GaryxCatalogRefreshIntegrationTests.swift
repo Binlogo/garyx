@@ -10,6 +10,7 @@ final class GaryxCatalogRefreshIntegrationTests: XCTestCase {
     override func tearDown() async throws {
         for model in models {
             var outstandingTasks: [Task<Void, Never>] = [
+                model.connectRefreshBackgroundTask,
                 model.catalogRefreshInFlight?.task,
                 model.sceneRefreshTask,
                 model.selectedThreadRecoveryTask,
@@ -39,6 +40,7 @@ final class GaryxCatalogRefreshIntegrationTests: XCTestCase {
         sessions.forEach { $0.invalidateAndCancel() }
         sessions.removeAll()
         GaryxCatalogURLProtocolStub.requestHandler = nil
+        GaryxCatalogURLProtocolStub.responseGate = nil
         try await super.tearDown()
     }
 
@@ -128,6 +130,7 @@ final class GaryxCatalogRefreshIntegrationTests: XCTestCase {
         let model = makeModel(recorder: recorder, clock: clock)
 
         await model.connectAndRefresh()
+        await model.waitForConnectBackgroundWorkForTesting()
 
         XCTAssertEqual(recorder.catalogPaths, garyxCatalogSweepPaths)
         XCTAssertEqual(model.lastSuccessfulCatalogSweepCompletedAt, clock.now)
@@ -208,6 +211,7 @@ final class GaryxCatalogRefreshIntegrationTests: XCTestCase {
         let clock = GaryxCatalogTestClock()
         let model = makeModel(recorder: recorder, clock: clock)
         await model.connectAndRefresh()
+        await model.waitForConnectBackgroundWorkForTesting()
         XCTAssertNotNil(model.lastSuccessfulCatalogSweepCompletedAt)
         recorder.reset()
         preparePendingBotDraft(model)
@@ -227,6 +231,7 @@ final class GaryxCatalogRefreshIntegrationTests: XCTestCase {
         let clock = GaryxCatalogTestClock()
         let model = makeModel(recorder: recorder, clock: clock)
         await model.connectAndRefresh()
+        await model.waitForConnectBackgroundWorkForTesting()
         XCTAssertNotNil(model.lastSuccessfulCatalogSweepCompletedAt)
         clock.now.addTimeInterval(GaryxCatalogRefreshPolicy.defaultTTL + 1)
         recorder.reset()
@@ -413,6 +418,224 @@ final class GaryxCatalogRefreshIntegrationTests: XCTestCase {
         XCTAssertEqual(model.draftThreadTitle, "Home Thread")
     }
 
+    func testC1SelectedFeedCommitsWhileCatalogSweepIsBlocked() async throws {
+        let recorder = GaryxCatalogRequestRecorder()
+        let gate = GaryxCatalogRequestGate()
+        let model = makeModel(recorder: recorder, gate: gate)
+        defer { gate.release() }
+
+        await model.connectAndRefresh()
+        await gate.waitUntilFirstPathStarted()
+        await model.homeFeedSyncCoordinator.waitForTransportIdleForTesting()
+
+        guard case .ready = model.connectionState else {
+            return XCTFail("the successful probe must publish ready")
+        }
+        XCTAssertEqual(model.allRecentThreadIds, ["thread-home"])
+        XCTAssertEqual(model.recentThreadFeeds.allFeed.headPhase, .ready)
+        XCTAssertNotNil(
+            model.connectRefreshBackgroundTask,
+            "blocked catalog work must remain off the completed connect path"
+        )
+
+        let entries = recorder.entries
+        let recentIndex = try XCTUnwrap(
+            entries.firstIndex {
+                $0.target == "/api/recent-threads?limit=30&tasks=include"
+            }
+        )
+        let firstBackgroundIndex = try XCTUnwrap(
+            entries.firstIndex {
+                garyxCatalogSweepPaths.contains($0.path)
+                    || $0.path == "/api/usage/coding"
+            }
+        )
+        XCTAssertLessThan(
+            recentIndex,
+            firstBackgroundIndex,
+            "the selected feed must claim transport before background domains"
+        )
+
+        gate.release()
+        await model.waitForConnectBackgroundWorkForTesting()
+    }
+
+    func testC2EveryConnectBackgroundDomainExecutes() async throws {
+        let recorder = GaryxCatalogRequestRecorder()
+        let model = makeModel(recorder: recorder)
+        let restored = makeThread(
+            id: "thread-restore",
+            title: "Restored Thread",
+            updatedAt: "2026-07-27T12:00:00Z"
+        )
+        model.seedThreadSummariesForTesting([restored])
+        model.persistLastOpenedThreadId(restored.id)
+        model.persistLastSessionRestorable(true)
+
+        await model.connectAndRefresh()
+        await model.waitForConnectBackgroundWorkForTesting()
+
+        XCTAssertEqual(model.selectedThread?.id, restored.id)
+        XCTAssertTrue(model.hasAttemptedLastOpenedThreadRestore)
+        XCTAssertNotNil(model.codingUsage)
+        XCTAssertEqual(recorder.entries.filter { $0.path == "/api/usage/coding" }.count, 1)
+        for path in garyxCatalogSweepPaths {
+            let expectedCount = path == "/api/custom-agents" ? 2 : 1
+            XCTAssertEqual(
+                recorder.catalogPathCounts[path],
+                expectedCount,
+                "\(path) must execute once in the forced sweep"
+                    + (path == "/api/custom-agents"
+                        ? " plus once in the independent agent-target domain"
+                        : "")
+            )
+        }
+        XCTAssertNotNil(model.lastSuccessfulCatalogSweepCompletedAt)
+    }
+
+    func testC3ProbeFailureStartsNoBackgroundWork() async {
+        let recorder = GaryxCatalogRequestRecorder()
+        let model = makeModel(
+            recorder: recorder,
+            responseHandler: { request in
+                if request.url?.path == "/api/status" {
+                    throw URLError(.cannotConnectToHost)
+                }
+                return try garyxCatalogStubResponse(request, recentAgentId: nil)
+            }
+        )
+
+        await model.connectAndRefresh()
+
+        guard case .failed = model.connectionState else {
+            return XCTFail("the failed reachability probe must enter setup")
+        }
+        XCTAssertNil(model.connectRefreshBackgroundTask)
+        XCTAssertEqual(recorder.entries.map(\.path), ["/api/status"])
+        XCTAssertTrue(recorder.catalogPaths.isEmpty)
+    }
+
+    func testC4SecondConnectDiscardsFirstScopeBackgroundResults() async throws {
+        let recorder = GaryxCatalogRequestRecorder()
+        let firstScopeGate = GaryxCatalogRequestGate { request in
+            request.url?.host == "gateway-a.example.test"
+                && request.url?.path == "/api/custom-agents"
+        }
+        let suiteName = "GaryxCatalogRefreshIntegrationTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        defaults.set(
+            "http://gateway-a.example.test",
+            forKey: GaryxMobileSettingsKeys.gatewayUrl
+        )
+        defer {
+            firstScopeGate.release()
+            defaults.removePersistentDomain(forName: suiteName)
+        }
+        let model = makeModel(
+            defaults: defaults,
+            recorder: recorder,
+            gate: firstScopeGate,
+            responseHandler: { request in
+                let url = try XCTUnwrap(request.url)
+                if url.host == "gateway-a.example.test",
+                   url.path == "/api/custom-agents" {
+                    return try garyxCatalogAgentResponse(
+                        request,
+                        id: "agent-a",
+                        name: "Agent A"
+                    )
+                }
+                if url.host == "gateway-b.example.test",
+                   url.path == "/api/custom-agents" {
+                    return try garyxCatalogAgentResponse(
+                        request,
+                        id: "agent-b",
+                        name: "Agent B"
+                    )
+                }
+                return try garyxCatalogStubResponse(request, recentAgentId: nil)
+            }
+        )
+
+        await model.connectAndRefresh()
+        await firstScopeGate.waitUntilFirstPathStarted()
+        let firstBackground = try XCTUnwrap(model.connectRefreshBackgroundTask)
+
+        model.gatewayURL = "http://gateway-b.example.test"
+        await model.connectAndRefresh()
+        await model.waitForConnectBackgroundWorkForTesting()
+
+        XCTAssertEqual(model.agents.map(\.id), ["agent-b"])
+        XCTAssertEqual(
+            model.currentGatewayScopeId,
+            model.gatewayRequestToken.scope.identity
+        )
+
+        firstScopeGate.release()
+        await firstBackground.value
+        XCTAssertEqual(
+            model.agents.map(\.id),
+            ["agent-b"],
+            "late Gateway A results must not bleed into Gateway B"
+        )
+    }
+
+    func testC5PendingThreadRouteRunsBesideUnblockedHomeFeed() async throws {
+        let recorder = GaryxCatalogRequestRecorder()
+        let gate = GaryxCatalogRequestGate()
+        let model = makeModel(recorder: recorder, gate: gate)
+        defer { gate.release() }
+        model.queuePendingMobileRoute(.thread("thread-deep-link"))
+
+        await model.connectAndRefresh()
+        await gate.waitUntilFirstPathStarted()
+        await model.homeFeedSyncCoordinator.waitForTransportIdleForTesting()
+
+        XCTAssertEqual(model.allRecentThreadIds, ["thread-home"])
+        XCTAssertEqual(model.recentThreadFeeds.allFeed.headPhase, .ready)
+
+        gate.release()
+        await model.waitForConnectBackgroundWorkForTesting()
+        await Task.yield()
+
+        XCTAssertNil(model.pendingMobileRoute)
+        XCTAssertTrue(
+            recorder.entries.contains {
+                $0.path == "/api/threads/thread-deep-link"
+            }
+        )
+        XCTAssertEqual(
+            model.productionRouteStore.path.last?.destination,
+            .conversation(threadID: "thread-deep-link")
+        )
+    }
+
+    func testC6CatalogFailureDoesNotFailConnectOrSelectedFeed() async {
+        let recorder = GaryxCatalogRequestRecorder()
+        let model = makeModel(
+            recorder: recorder,
+            responseHandler: { request in
+                if request.url?.path == "/api/skills" {
+                    throw URLError(.networkConnectionLost)
+                }
+                return try garyxCatalogStubResponse(request, recentAgentId: nil)
+            }
+        )
+
+        await model.connectAndRefresh()
+        await model.homeFeedSyncCoordinator.waitForTransportIdleForTesting()
+        await model.waitForConnectBackgroundWorkForTesting()
+
+        guard case .ready = model.connectionState else {
+            return XCTFail("a background catalog failure must not fail connect")
+        }
+        XCTAssertEqual(model.allRecentThreadIds, ["thread-home"])
+        XCTAssertEqual(model.recentThreadFeeds.allFeed.headPhase, .ready)
+        XCTAssertNotNil(model.remoteStateLoadPhase.failureMessage)
+        XCTAssertNil(model.lastSuccessfulCatalogSweepCompletedAt)
+    }
+
     func testConcurrentPullDoesNotNarrowQueuedUserAction() async {
         let recorder = GaryxCatalogRequestRecorder()
         let model = makeModel(recorder: recorder)
@@ -479,7 +702,8 @@ final class GaryxCatalogRefreshIntegrationTests: XCTestCase {
         recorder: GaryxCatalogRequestRecorder,
         clock: GaryxCatalogTestClock = GaryxCatalogTestClock(),
         gate: GaryxCatalogRequestGate? = nil,
-        recentAgentId: String? = nil
+        recentAgentId: String? = nil,
+        responseHandler: ((URLRequest) throws -> (HTTPURLResponse, Data))? = nil
     ) -> GaryxMobileModel {
         let resolvedDefaults: UserDefaults
         if let defaults {
@@ -493,10 +717,11 @@ final class GaryxCatalogRefreshIntegrationTests: XCTestCase {
                 forKey: GaryxMobileSettingsKeys.gatewayUrl
             )
         }
+        GaryxCatalogURLProtocolStub.responseGate = gate
         let session = makeSession { request in
             recorder.record(request)
-            if let path = request.url?.path, garyxCatalogSweepPaths.contains(path) {
-                gate?.waitUntilReleased(path: path)
+            if let responseHandler {
+                return try responseHandler(request)
             }
             return try garyxCatalogStubResponse(
                 request,
@@ -654,50 +879,72 @@ private final class GaryxCatalogRequestRecorder: @unchecked Sendable {
 }
 
 private final class GaryxCatalogRequestGate: @unchecked Sendable {
-    private let condition = NSCondition()
+    private let lock = NSLock()
+    private let shouldHold: (URLRequest) -> Bool
     private var startedPaths: Set<String> = []
     private var firstPathWaiter: CheckedContinuation<Void, Never>?
+    private var pendingDeliveries: [() -> Void] = []
     private var released = false
 
-    func waitUntilReleased(path: String) {
-        condition.lock()
-        startedPaths.insert(path)
-        let waiter = firstPathWaiter
-        firstPathWaiter = nil
-        condition.broadcast()
-        condition.unlock()
-        waiter?.resume()
-        condition.lock()
-        while !released {
-            condition.wait()
+    init(
+        shouldHold: @escaping (URLRequest) -> Bool = { request in
+            request.url.map { garyxCatalogSweepPaths.contains($0.path) } ?? false
         }
-        condition.unlock()
+    ) {
+        self.shouldHold = shouldHold
+    }
+
+    func holdIfNeeded(
+        request: URLRequest,
+        delivery: @escaping () -> Void
+    ) -> Bool {
+        guard shouldHold(request), let path = request.url?.path else {
+            return false
+        }
+        let waiter: CheckedContinuation<Void, Never>?
+        lock.lock()
+        startedPaths.insert(path)
+        waiter = firstPathWaiter
+        firstPathWaiter = nil
+        if released {
+            lock.unlock()
+            waiter?.resume()
+            return false
+        }
+        pendingDeliveries.append(delivery)
+        lock.unlock()
+        waiter?.resume()
+        return true
     }
 
     func waitUntilFirstPathStarted() async {
         await withCheckedContinuation { continuation in
-            condition.lock()
+            lock.lock()
             if startedPaths.isEmpty {
                 precondition(firstPathWaiter == nil)
                 firstPathWaiter = continuation
-                condition.unlock()
+                lock.unlock()
             } else {
-                condition.unlock()
+                lock.unlock()
                 continuation.resume()
             }
         }
     }
 
     func release() {
-        condition.lock()
+        let deliveries: [() -> Void]
+        lock.lock()
         released = true
-        condition.broadcast()
-        condition.unlock()
+        deliveries = pendingDeliveries
+        pendingDeliveries.removeAll()
+        lock.unlock()
+        deliveries.forEach { $0() }
     }
 }
 
 private final class GaryxCatalogURLProtocolStub: URLProtocol {
     static var requestHandler: ((URLRequest) throws -> (HTTPURLResponse, Data))?
+    static var responseGate: GaryxCatalogRequestGate?
 
     override class func canInit(with request: URLRequest) -> Bool {
         true
@@ -714,9 +961,18 @@ private final class GaryxCatalogURLProtocolStub: URLProtocol {
         }
         do {
             let (response, data) = try handler(request)
-            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-            client?.urlProtocol(self, didLoad: data)
-            client?.urlProtocolDidFinishLoading(self)
+            let delivery: () -> Void = { [self] in
+                client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+                client?.urlProtocol(self, didLoad: data)
+                client?.urlProtocolDidFinishLoading(self)
+            }
+            if Self.responseGate?.holdIfNeeded(
+                request: request,
+                delivery: delivery
+            ) == true {
+                return
+            }
+            delivery()
         } catch {
             client?.urlProtocol(self, didFailWithError: error)
         }
@@ -789,6 +1045,9 @@ private func garyxCatalogStubResponse(
     case ("GET", "/api/capsules"):
         statusCode = 200
         data = Data(#"{"capsules":[]}"#.utf8)
+    case ("GET", "/api/usage/coding"):
+        statusCode = 200
+        data = Data(#"{"providers":[],"refreshed_at":"2026-07-28T00:00:00Z"}"#.utf8)
     case ("GET", "/api/recent-threads"):
         statusCode = 200
         let agentField = recentAgentId.map { #","agent_id":"\#($0)""# } ?? ""
@@ -832,6 +1091,24 @@ private func garyxCatalogStubResponse(
     case ("GET", "/api/thread-summaries"):
         statusCode = 404
         data = Data()
+    case ("GET", "/api/threads/history"):
+        statusCode = 200
+        data = Data(#"{"ok":true,"messages":[],"pending_user_inputs":[]}"#.utf8)
+    case ("GET", let path)
+        where path.split(separator: "/").count == 3
+            && path.hasPrefix("/api/threads/"):
+        statusCode = 200
+        let threadId = String(path.split(separator: "/").last ?? "thread")
+        data = Data(
+            #"""
+            {
+              "thread_id":"\#(threadId)",
+              "title":"Linked Thread",
+              "last_active_at":"2026-07-27T12:00:00Z",
+              "last_message_preview":""
+            }
+            """#.utf8
+        )
     case ("POST", "/api/threads"):
         statusCode = 200
         data = Data(
@@ -873,4 +1150,39 @@ private func garyxCatalogStubResponse(
         throw GaryxCatalogStubError.invalidResponse
     }
     return (response, data)
+}
+
+private func garyxCatalogAgentResponse(
+    _ request: URLRequest,
+    id: String,
+    name: String
+) throws -> (HTTPURLResponse, Data) {
+    guard let url = request.url else {
+        throw GaryxCatalogStubError.missingURL
+    }
+    guard let response = HTTPURLResponse(
+        url: url,
+        statusCode: 200,
+        httpVersion: nil,
+        headerFields: ["Content-Type": "application/json"]
+    ) else {
+        throw GaryxCatalogStubError.invalidResponse
+    }
+    return (
+        response,
+        Data(
+            #"""
+            {
+              "agents":[{
+                "agent_id":"\#(id)",
+                "display_name":"\#(name)",
+                "provider_type":"test",
+                "built_in":false,
+                "standalone":true,
+                "enabled":true
+              }]
+            }
+            """#.utf8
+        )
+    )
 }

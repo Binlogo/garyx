@@ -12,16 +12,26 @@ public enum GaryxHomeFeedConnection: Equatable, Sendable {
     case down
 }
 
+public enum GaryxHomeFeedQueuedHeadRequest: Equatable, Sendable {
+    case none
+    case runnable
+    case waitingForActiveHead
+    case waitingForLoadMore
+}
+
 public struct GaryxHomeFeedDemand: Equatable, Sendable {
     public var phase: GaryxRecentHeadPhase
     public var hasPendingUserIntent: Bool
+    public var queuedHeadRequest: GaryxHomeFeedQueuedHeadRequest
 
     public init(
         phase: GaryxRecentHeadPhase,
-        hasPendingUserIntent: Bool = false
+        hasPendingUserIntent: Bool = false,
+        queuedHeadRequest: GaryxHomeFeedQueuedHeadRequest = .none
     ) {
         self.phase = phase
         self.hasPendingUserIntent = hasPendingUserIntent
+        self.queuedHeadRequest = queuedHeadRequest
     }
 }
 
@@ -41,12 +51,21 @@ public struct GaryxHomeFeedSyncState: Equatable, Sendable {
 public enum GaryxHomeFeedRefreshReason: Equatable, Sendable {
     case immediateDebt
     case userIntent
+    case queuedHeadRequest
     case visibleCadence
     case hiddenCadence
 }
 
+public enum GaryxHomeFeedExternalWake: Equatable, Sendable {
+    case connection
+    case visibility
+    case activeHeadCompletion
+    case loadMoreCompletion
+    case userIntent
+}
+
 public enum GaryxHomeFeedSyncAction: Equatable, Sendable {
-    case none
+    case waitForExternalWake(GaryxHomeFeedExternalWake)
     case refreshNow(GaryxHomeFeedRefreshReason)
     case sleep(until: Date)
     case downgradeImmediateDemand
@@ -77,19 +96,49 @@ public enum GaryxHomeFeedSyncPlanner {
             }
         }
 
-        guard visibility != .background else { return .none }
-        guard connection == .ready else { return .none }
+        guard visibility != .background else {
+            return .waitForExternalWake(.visibility)
+        }
+        guard connection == .ready else {
+            return .waitForExternalWake(.connection)
+        }
 
         if demand.hasPendingUserIntent {
             return .refreshNow(.userIntent)
+        }
+
+        switch demand.queuedHeadRequest {
+        case .none:
+            break
+        case .runnable:
+            return .refreshNow(.queuedHeadRequest)
+        case .waitingForActiveHead:
+            if demand.phase.owesImmediateRequest,
+               let owedSince = state.immediateOwedSince {
+                return .sleep(
+                    until: owedSince.addingTimeInterval(immediateDemandTimeout)
+                )
+            }
+            return .waitForExternalWake(.activeHeadCompletion)
+        case .waitingForLoadMore:
+            if demand.phase.owesImmediateRequest,
+               let owedSince = state.immediateOwedSince {
+                return .sleep(
+                    until: owedSince.addingTimeInterval(immediateDemandTimeout)
+                )
+            }
+            return .waitForExternalWake(.loadMoreCompletion)
         }
 
         if demand.phase.owesImmediateRequest {
             return .refreshNow(.immediateDebt)
         }
 
-        if demand.phase.isRefreshing || demand.phase.awaitsUserAction {
-            return .none
+        if demand.phase.isRefreshing {
+            return .waitForExternalWake(.activeHeadCompletion)
+        }
+        if demand.phase.awaitsUserAction {
+            return .waitForExternalWake(.userIntent)
         }
 
         let interval: TimeInterval
@@ -102,7 +151,7 @@ public enum GaryxHomeFeedSyncPlanner {
             interval = hiddenInterval
             reason = .hiddenCadence
         case .background:
-            return .none
+            return .waitForExternalWake(.visibility)
         }
 
         guard let lastRefreshStartedAt = state.lastRefreshStartedAt else {

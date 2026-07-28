@@ -67,15 +67,15 @@ final class GaryxHomeFeedSyncPlannerTests: XCTestCase {
         )
         XCTAssertEqual(
             next(demand: intent, visibility: .background),
-            .none
+            .waitForExternalWake(.visibility)
         )
         XCTAssertEqual(
             next(demand: intent, connection: .checking),
-            .none
+            .waitForExternalWake(.connection)
         )
         XCTAssertEqual(
             next(demand: intent, connection: .down),
-            .none
+            .waitForExternalWake(.connection)
         )
         XCTAssertEqual(
             next(demand: intent),
@@ -131,7 +131,7 @@ final class GaryxHomeFeedSyncPlannerTests: XCTestCase {
         let attempt = state.beginAttempt()!
         XCTAssertEqual(
             next(demand: .init(phase: state.phase)),
-            .none
+            .waitForExternalWake(.activeHeadCompletion)
         )
         _ = state.settle(
             attempt,
@@ -140,7 +140,7 @@ final class GaryxHomeFeedSyncPlannerTests: XCTestCase {
         )
         XCTAssertEqual(
             next(demand: .init(phase: state.phase)),
-            .none
+            .waitForExternalWake(.userIntent)
         )
         XCTAssertEqual(
             next(
@@ -150,6 +150,94 @@ final class GaryxHomeFeedSyncPlannerTests: XCTestCase {
                 )
             ),
             .refreshNow(.userIntent)
+        )
+    }
+
+    func testP4EveryTimerlessWaitNamesItsExternalWakeOwner() {
+        var refreshing = GaryxRecentHeadState()
+        _ = refreshing.beginAttempt()
+        let cases: [
+            (
+                GaryxHomeFeedDemand,
+                GaryxHomeFeedVisibility,
+                GaryxHomeFeedConnection,
+                GaryxHomeFeedSyncAction
+            )
+        ] = [
+            (
+                .init(phase: .ready, hasPendingUserIntent: true),
+                .background,
+                .ready,
+                .waitForExternalWake(.visibility)
+            ),
+            (
+                .init(phase: .ready, hasPendingUserIntent: true),
+                .foregroundVisible,
+                .down,
+                .waitForExternalWake(.connection)
+            ),
+            (
+                .init(
+                    phase: refreshing.phase,
+                    queuedHeadRequest: .waitingForActiveHead
+                ),
+                .foregroundVisible,
+                .ready,
+                .waitForExternalWake(.activeHeadCompletion)
+            ),
+            (
+                .init(
+                    phase: .ready,
+                    queuedHeadRequest: .waitingForLoadMore
+                ),
+                .foregroundVisible,
+                .ready,
+                .waitForExternalWake(.loadMoreCompletion)
+            ),
+            (
+                .init(phase: .readyStale(.networkFailure, .userAction)),
+                .foregroundVisible,
+                .ready,
+                .waitForExternalWake(.userIntent)
+            ),
+        ]
+
+        for (demand, visibility, connection, expected) in cases {
+            XCTAssertEqual(
+                next(
+                    demand: demand,
+                    visibility: visibility,
+                    connection: connection
+                ),
+                expected
+            )
+        }
+    }
+
+    func testRunnableQueuedHeadPreemptsCadenceWhileBlockedImmediateHeadSleeps() {
+        XCTAssertEqual(
+            next(
+                state: .init(lastRefreshStartedAt: start),
+                demand: .init(
+                    phase: .ready,
+                    queuedHeadRequest: .runnable
+                ),
+                now: start.addingTimeInterval(1)
+            ),
+            .refreshNow(.queuedHeadRequest)
+        )
+
+        let deadline = start.addingTimeInterval(timeout)
+        XCTAssertEqual(
+            next(
+                state: .init(immediateOwedSince: start),
+                demand: .init(
+                    phase: .readyStale(.interrupted, .immediate),
+                    queuedHeadRequest: .waitingForLoadMore
+                ),
+                now: start.addingTimeInterval(1)
+            ),
+            .sleep(until: deadline)
         )
     }
 

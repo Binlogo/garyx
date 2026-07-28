@@ -35,19 +35,28 @@ final class GaryxHomeFeedSyncCoordinator {
     private var timerTask: Task<Void, Never>?
     private var loopTask: Task<Void, Never>?
     private let immediateDemandTimeout: TimeInterval
+    private let now: () -> Date
+    private let automaticallyEvaluatesWakeSignals: Bool
     private let wakeStream: AsyncStream<Void>
     private let wakeContinuation: AsyncStream<Void>.Continuation
+    #if DEBUG
+    private var startedHeadRequestsForTesting: [GaryxRecentHeadRequest] = []
+    #endif
 
     init(
         initialEffects: [GaryxRecentFeedEffect],
         initialFavoritesSnapshotTicket: GaryxFavoritesSnapshotTicket? = nil,
         immediateDemandTimeout: TimeInterval,
-        scopeToken: GaryxGatewayRequestToken? = nil
+        scopeToken: GaryxGatewayRequestToken? = nil,
+        now: @escaping () -> Date = Date.init,
+        automaticallyEvaluatesWakeSignals: Bool = true
     ) {
         pendingEffects = initialEffects
         pendingFavoritesSnapshotTicket = initialFavoritesSnapshotTicket
         self.immediateDemandTimeout = immediateDemandTimeout
         self.scopeToken = scopeToken
+        self.now = now
+        self.automaticallyEvaluatesWakeSignals = automaticallyEvaluatesWakeSignals
         scopeIsActive = scopeToken != nil
         var continuation: AsyncStream<Void>.Continuation?
         wakeStream = AsyncStream(bufferingPolicy: .bufferingNewest(1)) {
@@ -65,7 +74,7 @@ final class GaryxHomeFeedSyncCoordinator {
 
     func attach(_ owner: GaryxMobileModel) {
         self.owner = owner
-        if loopTask == nil {
+        if automaticallyEvaluatesWakeSignals, loopTask == nil {
             let stream = wakeStream
             loopTask = Task { [weak self] in
                 var iterator = stream.makeAsyncIterator()
@@ -129,6 +138,20 @@ final class GaryxHomeFeedSyncCoordinator {
         _ source: GaryxThreadListRefreshSource
     ) -> Bool {
         pendingUserIntent?.source == source
+    }
+
+    func hasScheduledTimerForTesting() -> Bool {
+        timerTask != nil
+    }
+
+    func evaluateForTesting() {
+        evaluateUntilWaiting()
+    }
+
+    func startedHeadRequestCountForTesting(
+        _ filter: GaryxRecentThreadFilter
+    ) -> Int {
+        startedHeadRequestsForTesting.count { $0.filter == filter }
     }
     #endif
 
@@ -207,6 +230,21 @@ final class GaryxHomeFeedSyncCoordinator {
         }
     }
 
+    /// Connect orchestration has already passed the reachability gate. Merge
+    /// its selected-feed work into any bootstrap effect, then synchronously
+    /// claim the transport before unrelated background domains are launched.
+    func startSelectedFeedRefreshForConnect() {
+        guard let owner, owner.hasGatewaySettings else { return }
+        let effects = owner.makeHomeFeedRefreshEffects(
+            source: .userAction,
+            forceReplacement: false,
+            refreshesSelectedFeedOnly: true,
+            authority: GaryxHomeFeedSyncAuthority()
+        )
+        runRecentFeedEffects(effects)
+        evaluateUntilWaiting()
+    }
+
     func replaceAllRecentFeeds() async {
         guard let owner, owner.hasGatewaySettings else { return }
         let waiterId = UUID()
@@ -261,38 +299,31 @@ final class GaryxHomeFeedSyncCoordinator {
             let phase = selectedPhase
             if phase.owesImmediateRequest {
                 if syncState.immediateOwedSince == nil {
-                    syncState.immediateOwedSince = Date()
+                    syncState.immediateOwedSince = now()
                 }
             } else {
                 syncState.immediateOwedSince = nil
-            }
-
-            if selectedHeadRequestIsInternallyQueued {
-                if phase.owesImmediateRequest {
-                    let deadline = (syncState.immediateOwedSince ?? Date())
-                        .addingTimeInterval(immediateDemandTimeout)
-                    if deadline <= Date() {
-                        downgradeSelectedImmediateDemand()
-                        continue
-                    }
-                    scheduleTimer(at: deadline)
-                }
-                break evaluation
             }
 
             let action = GaryxHomeFeedSyncPlanner.next(
                 state: syncState,
                 demand: GaryxHomeFeedDemand(
                     phase: phase,
-                    hasPendingUserIntent: pendingUserIntent != nil
+                    hasPendingUserIntent: pendingUserIntent != nil,
+                    queuedHeadRequest: selectedQueuedHeadRequest
                 ),
                 visibility: visibility,
                 connection: connection,
-                now: Date(),
+                now: now(),
                 immediateDemandTimeout: immediateDemandTimeout
             )
             switch action {
-            case .none:
+            case .waitForExternalWake:
+                // Structural invariant: this is the only timer-less live
+                // exit. The planner must name the owner edge that will call
+                // `wake()` (connection, visibility, transport, load-more, or
+                // a future user intent). Every other live exit schedules a
+                // timer; inactive scopes have no retained demand.
                 break evaluation
             case .sleep(let deadline):
                 scheduleTimer(at: deadline)
@@ -340,8 +371,19 @@ final class GaryxHomeFeedSyncCoordinator {
               let owner,
               let scopeToken else { return }
 
+        let selected = owner.recentThreadFeeds.selectedFilter
+        if selected == .favorites {
+            drainPendingFavoritesSnapshot(owner: owner)
+        }
+        let orderedEffects = pendingEffects.enumerated().sorted { lhs, rhs in
+            let lhsPriority = effectPriority(lhs.element, selected: selected)
+            let rhsPriority = effectPriority(rhs.element, selected: selected)
+            return lhsPriority == rhsPriority
+                ? lhs.offset < rhs.offset
+                : lhsPriority < rhsPriority
+        }.map(\.element)
         var retained: [GaryxRecentFeedEffect] = []
-        for effect in pendingEffects {
+        for effect in orderedEffects {
             switch effect {
             case .publish:
                 owner.emitHomeProjectionSnapshot()
@@ -355,7 +397,10 @@ final class GaryxHomeFeedSyncCoordinator {
                     scopeToken: scopeToken,
                     authority: GaryxHomeFeedSyncAuthority()
                 ) {
-                    syncState.lastRefreshStartedAt = Date()
+                    #if DEBUG
+                    startedHeadRequestsForTesting.append(request)
+                    #endif
+                    syncState.lastRefreshStartedAt = now()
                     let taskId = UUID()
                     transportTasks[taskId] = Task { [weak self, weak owner] in
                         if let owner {
@@ -371,23 +416,36 @@ final class GaryxHomeFeedSyncCoordinator {
         }
         pendingEffects = retained
 
-        if let ticket = pendingFavoritesSnapshotTicket {
-            guard owner.threadFavoritesState.activeSnapshotTicket == ticket,
-                  ticket.gatewayScope == owner.threadFavoritesState.gatewayScope else {
-                pendingFavoritesSnapshotTicket = nil
-                return
-            }
+        if selected != .favorites {
+            drainPendingFavoritesSnapshot(owner: owner)
+        }
+    }
+
+    private func effectPriority(
+        _ effect: GaryxRecentFeedEffect,
+        selected: GaryxRecentThreadFilter
+    ) -> Int {
+        guard case .requestHead(let request) = effect else { return 1 }
+        return request.filter == selected ? 0 : 2
+    }
+
+    private func drainPendingFavoritesSnapshot(owner: GaryxMobileModel) {
+        guard let ticket = pendingFavoritesSnapshotTicket else { return }
+        guard owner.threadFavoritesState.activeSnapshotTicket == ticket,
+              ticket.gatewayScope == owner.threadFavoritesState.gatewayScope else {
             pendingFavoritesSnapshotTicket = nil
-            syncState.lastRefreshStartedAt = Date()
-            let taskId = UUID()
-            let transport = owner.startThreadFavoritesSnapshot(
-                ticket,
-                authority: GaryxHomeFeedSyncAuthority()
-            )
-            transportTasks[taskId] = Task { [weak self] in
-                await transport.value
-                self?.transportDidFinish(taskId)
-            }
+            return
+        }
+        pendingFavoritesSnapshotTicket = nil
+        syncState.lastRefreshStartedAt = now()
+        let taskId = UUID()
+        let transport = owner.startThreadFavoritesSnapshot(
+            ticket,
+            authority: GaryxHomeFeedSyncAuthority()
+        )
+        transportTasks[taskId] = Task { [weak self] in
+            await transport.value
+            self?.transportDidFinish(taskId)
         }
     }
 
@@ -431,21 +489,21 @@ final class GaryxHomeFeedSyncCoordinator {
         return isHomeVisible ? .foregroundVisible : .foregroundHidden
     }
 
-    private var selectedHeadRequestIsInternallyQueued: Bool {
-        guard let owner else { return false }
+    private var selectedQueuedHeadRequest: GaryxHomeFeedQueuedHeadRequest {
+        guard let owner else { return .none }
         switch owner.recentThreadFeeds.selectedFilter {
         case .all:
-            return owner.recentThreadFeeds.allFeed.pendingHeadRequest != nil
+            return owner.recentThreadFeeds.allFeed.queuedHeadRequest
         case .nonTask:
-            return owner.recentThreadFeeds.nonTaskFeed.pendingHeadRequest != nil
+            return owner.recentThreadFeeds.nonTaskFeed.queuedHeadRequest
         case .favorites:
-            return false
+            return .none
         }
     }
 
     private func scheduleTimer(at deadline: Date) {
         timerTask?.cancel()
-        let delay = max(0, deadline.timeIntervalSinceNow)
+        let delay = max(0, deadline.timeIntervalSince(now()))
         timerTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(delay))
             if !Task.isCancelled {

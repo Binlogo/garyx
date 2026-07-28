@@ -51,6 +51,62 @@ final class GaryxRecentThreadFeedsTests: XCTestCase {
         )
     }
 
+    func testP2RunnableParkedRequestMergesIntoExactlyOneHeadEffect() throws {
+        var feeds = makeFeeds()
+        adoptHead(&feeds, filter: .nonTask, rows: [("chat", 10)])
+        feeds.parkPendingHeadRequestForTesting(
+            GaryxRecentHeadRequest(
+                filter: .nonTask,
+                source: .backgroundLoop,
+                homeProjectionCommit: .none
+            )
+        )
+        XCTAssertEqual(feeds.nonTaskFeed.queuedHeadRequest, .runnable)
+
+        let effects = feeds.requestHeadEffects(
+            filter: .nonTask,
+            source: .userAction,
+            forceReplacement: true,
+            homeProjectionCommit: .refreshedPins
+        )
+        let requests = effects.compactMap { effect -> GaryxRecentHeadRequest? in
+            guard case .requestHead(let request) = effect else { return nil }
+            return request
+        }
+
+        let request = try XCTUnwrap(requests.first)
+        XCTAssertEqual(requests.count, 1)
+        XCTAssertEqual(request.source, .userAction)
+        XCTAssertTrue(request.forceReplacement)
+        XCTAssertEqual(request.homeProjectionCommit, .refreshedPins)
+        XCTAssertNil(feeds.nonTaskFeed.pendingHeadRequest)
+        XCTAssertEqual(feeds.nonTaskFeed.queuedHeadRequest, .none)
+    }
+
+    func testInterruptedSettleEmitsRetryWithoutLeavingIdlePendingState() throws {
+        var feeds = makeFeeds()
+        adoptHead(&feeds, filter: .all, rows: [("old", 100)])
+        let ticket = try XCTUnwrap(feeds.testRequestHead(filter: .all))
+
+        let completion = feeds.completeHead(
+            ticket,
+            result: .interrupted(.interrupted)
+        )
+        let requests = completion.effects.compactMap {
+            effect -> GaryxRecentHeadRequest? in
+            guard case .requestHead(let request) = effect else { return nil }
+            return request
+        }
+
+        XCTAssertEqual(requests.count, 1)
+        XCTAssertNil(feeds.allFeed.pendingHeadRequest)
+        XCTAssertEqual(feeds.allFeed.queuedHeadRequest, .none)
+        XCTAssertEqual(
+            feeds.allFeed.headPhase,
+            .readyStale(.interrupted, .immediate)
+        )
+    }
+
     func testFavoritesSelectionHasNoRecentPagerOrTransportTicket() {
         var feeds = makeFeeds()
         feeds.select(.favorites)
@@ -145,6 +201,10 @@ final class GaryxRecentThreadFeedsTests: XCTestCase {
         )
         XCTAssertTrue(blockedEffects.isEmpty)
         XCTAssertNotNil(feeds.allFeed.pendingHeadRequest)
+        XCTAssertEqual(
+            feeds.allFeed.queuedHeadRequest,
+            .waitingForLoadMore
+        )
 
         let trailingEffects = feeds.failLoadMore(load)
         let trailingRequest = try XCTUnwrap(
@@ -154,6 +214,7 @@ final class GaryxRecentThreadFeedsTests: XCTestCase {
             }.first
         )
         XCTAssertEqual(trailingRequest.source, .userPullToRefresh)
+        XCTAssertEqual(feeds.allFeed.queuedHeadRequest, .none)
         XCTAssertNotNil(
             feeds.beginHeadRequest(
                 trailingRequest,

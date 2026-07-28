@@ -47,5 +47,39 @@ compression change).
   deterministic transport gate and explicitly settle the reducer transition
   before asserting both the hidden Home debt and the visible setup root.
 
+## Debt 4: Favorites user action can schedule a redundant third snapshot
+
+- `makeHomeFeedRefreshEffects` starts the general asynchronous
+  capability-aware Favorites refresh and, when Favorites is selected, also
+  calls the provider's synchronous `requestRefresh`. If the asynchronous
+  request crosses the first flight's settlement boundary, it can mark the
+  already-started trailing flight dirty and produce a third snapshot. The
+  provider still converges with no pending intent or active attempt; this
+  predates #TASK-2806 and is outside its freeze/cold-start contract.
+- Evidence: the required full Home regression run for #TASK-2806 observed
+  three successful snapshot transports in
+  `testP3FavoritesIntentConvergesWhenSnapshotIsAlreadyInFlight`, while the
+  focused run observed two. The P3 contract asserts post-intent convergence,
+  not an exact transport count.
+- Direction when picked up: make Favorites selection own one capability-aware
+  refresh entry point so the general and selected-filter paths cannot both
+  dirty the same generation. Preserve capability upgrade replacement and the
+  provider's trailing-dirty fence.
+
+## Debt 5: Feed convergence waiters do not inspect reducer-owned pending work
+
+- `GaryxHomeFeedSyncCoordinator.settleWaitersIfConverged` checks the active
+  head phase and coordinator-owned effects, but `hasQueuedRequest` does not
+  include a `GaryxRecentThreadFeedState.pendingHeadRequest` parked behind
+  load-more. The load-more completion still drains that request and the feed
+  converges, but an awaiting caller can be released before the trailing head
+  finishes.
+- This waiter bookkeeping predates #TASK-2806 and is separate from its
+  no-strand contract: P5 proves the reducer-owned request drains on the
+  load-more completion edge without another wake.
+- Direction when picked up: include reducer-owned queued state in the
+  convergence proof and add a deterministic gated-load-more test that pins
+  both waiter lifetime and trailing transport completion.
+
 These items are adjacent findings, not regressions; per the scope rule they
 must not ride along inside other tasks' review loops.

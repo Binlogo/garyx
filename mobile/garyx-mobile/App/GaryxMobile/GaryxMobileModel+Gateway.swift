@@ -218,6 +218,8 @@ extension GaryxMobileModel {
         threadRenameRollbackSummaries = [:]
         threadRuntimeMutationIds = [:]
         threadRuntimeRollbackSnapshots = [:]
+        connectRefreshBackgroundTask?.cancel()
+        connectRefreshBackgroundTask = nil
         connectRefreshRequestId = nil
         remoteStateRefreshRequestId = nil
         agentTargetsRefreshRequestId = nil
@@ -549,6 +551,8 @@ extension GaryxMobileModel {
         // may replace them with gateway state while a capture is in flight.
         guard !debugSnapshotActive else { return }
         #endif
+        connectRefreshBackgroundTask?.cancel()
+        connectRefreshBackgroundTask = nil
         gatewayURL = normalizedGatewayURL(gatewayURL)
         gatewayAuthToken = gatewayAuthToken.trimmingCharacters(in: .whitespacesAndNewlines)
         gatewayHeaders = GaryxGatewayHeaders.normalizedBlock(gatewayHeaders)
@@ -579,27 +583,20 @@ extension GaryxMobileModel {
             rememberCurrentGatewayProfile()
             gatewaySettingsStatus = "Saved and connected"
             connectionState = .ready(version: status.version)
-            startBackgroundCommittedRunReconcileLoop()
-            if threadOpenState.hasPendingIntent {
-                await openPendingThreadLinkIfNeeded()
-                guard isCurrentConnectRefresh(requestId, runtimeGeneration: runtimeGeneration, scopeId: gatewayScopeId) else {
-                    return
+            let plan = GaryxConnectRefreshPlan.afterSuccessfulProbe
+            for step in plan.criticalSteps {
+                switch step {
+                case .selectedHomeFeed:
+                    homeFeedSyncCoordinator.startSelectedFeedRefreshForConnect()
                 }
             }
-            await restoreLastOpenedThreadIfNeeded()
-            guard isCurrentConnectRefresh(requestId, runtimeGeneration: runtimeGeneration, scopeId: gatewayScopeId) else {
-                return
-            }
-            await refreshAgentTargets()
-            await refreshRemoteState(.forced)
-            guard isCurrentConnectRefresh(requestId, runtimeGeneration: runtimeGeneration, scopeId: gatewayScopeId) else {
-                return
-            }
-            await refreshCodingUsageWidget()
-            connectRefreshRequestId = nil
-            await openPendingMobileRouteIfNeeded()
             startBackgroundCommittedRunReconcileLoop()
-            startSelectedThreadReconcileLoop()
+            startConnectRefreshBackgroundWork(
+                plan: plan,
+                requestId: requestId,
+                runtimeGeneration: runtimeGeneration,
+                gatewayScopeId: gatewayScopeId
+            )
         } catch {
             guard isCurrentConnectRefresh(requestId, runtimeGeneration: runtimeGeneration, scopeId: gatewayScopeId) else {
                 return
@@ -612,6 +609,109 @@ extension GaryxMobileModel {
             lastError = message
         }
     }
+
+    private func startConnectRefreshBackgroundWork(
+        plan: GaryxConnectRefreshPlan,
+        requestId: UUID,
+        runtimeGeneration: GaryxGatewayRequestToken,
+        gatewayScopeId: String
+    ) {
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await withTaskGroup(of: Void.self) { group in
+                for domain in plan.concurrentBackgroundDomains {
+                    group.addTask { [weak self] in
+                        await self?.runConnectRefreshBackgroundDomain(
+                            domain,
+                            requestId: requestId,
+                            runtimeGeneration: runtimeGeneration,
+                            gatewayScopeId: gatewayScopeId
+                        )
+                    }
+                }
+            }
+            guard isCurrentConnectRefresh(
+                requestId,
+                runtimeGeneration: runtimeGeneration,
+                scopeId: gatewayScopeId
+            ) else {
+                return
+            }
+            connectRefreshRequestId = nil
+            connectRefreshBackgroundTask = nil
+        }
+        connectRefreshBackgroundTask = task
+    }
+
+    private func runConnectRefreshBackgroundDomain(
+        _ domain: GaryxConnectRefreshPlan.BackgroundDomain,
+        requestId: UUID,
+        runtimeGeneration: GaryxGatewayRequestToken,
+        gatewayScopeId: String
+    ) async {
+        guard isCurrentConnectRefresh(
+            requestId,
+            runtimeGeneration: runtimeGeneration,
+            scopeId: gatewayScopeId
+        ), !Task.isCancelled else {
+            return
+        }
+        switch domain {
+        case .routeRestoration:
+            await runConnectRouteRestoration(
+                requestId: requestId,
+                runtimeGeneration: runtimeGeneration,
+                gatewayScopeId: gatewayScopeId
+            )
+        case .agentTargets:
+            await refreshAgentTargets()
+        case .catalogSweep:
+            await refreshRemoteState(.forced)
+        case .codingUsage:
+            await refreshCodingUsageWidget(runtimeGeneration: runtimeGeneration)
+        }
+    }
+
+    private func runConnectRouteRestoration(
+        requestId: UUID,
+        runtimeGeneration: GaryxGatewayRequestToken,
+        gatewayScopeId: String
+    ) async {
+        if threadOpenState.hasPendingIntent {
+            await openPendingThreadLinkIfNeeded()
+            guard isCurrentConnectRefresh(
+                requestId,
+                runtimeGeneration: runtimeGeneration,
+                scopeId: gatewayScopeId
+            ), !Task.isCancelled else {
+                return
+            }
+        }
+        await restoreLastOpenedThreadIfNeeded()
+        guard isCurrentConnectRefresh(
+            requestId,
+            runtimeGeneration: runtimeGeneration,
+            scopeId: gatewayScopeId
+        ), !Task.isCancelled else {
+            return
+        }
+        await openPendingMobileRouteIfNeeded()
+        guard isCurrentConnectRefresh(
+            requestId,
+            runtimeGeneration: runtimeGeneration,
+            scopeId: gatewayScopeId
+        ), !Task.isCancelled else {
+            return
+        }
+        startBackgroundCommittedRunReconcileLoop()
+        startSelectedThreadReconcileLoop()
+    }
+
+    #if DEBUG
+    func waitForConnectBackgroundWorkForTesting() async {
+        await connectRefreshBackgroundTask?.value
+    }
+    #endif
 
     private static let connectCheckTimeoutNanos: UInt64 = 5_000_000_000
 

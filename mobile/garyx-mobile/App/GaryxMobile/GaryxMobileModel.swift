@@ -552,6 +552,7 @@ final class GaryxMobileModel: ObservableObject {
     var activeGatewayRuntimeIdentity: GaryxGatewayRuntimeIdentity?
     var catalogSnapshotRestored = false
     var connectRefreshRequestId: UUID?
+    var connectRefreshBackgroundTask: Task<Void, Never>?
     var remoteStateRefreshRequestId: UUID?
     var catalogRefreshInFlight: GaryxCatalogRefreshFlight?
     var lastSuccessfulCatalogSweepCompletedAt: Date?
